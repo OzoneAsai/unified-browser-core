@@ -1,0 +1,55 @@
+name: Release plugin
+
+on:
+  push:
+    tags:
+      - "*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify release version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+
+          const tag = process.env.RELEASE_TAG.replace(/^v/, '');
+          const packageVersion = JSON.parse(readFileSync('package.json', 'utf8')).version;
+          const manifestVersion = JSON.parse(readFileSync('manifest.json', 'utf8')).version;
+
+          if (tag !== packageVersion || tag !== manifestVersion) {
+            throw new Error(`Tag (${tag}), package.json (${packageVersion}), and manifest.json (${manifestVersion}) must match.`);
+          }
+          NODE
+
+      - name: Build plugin
+        run: npm run build
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          args=(--title "$RELEASE_TAG" --generate-notes)
+          if [[ "$RELEASE_TAG" == *-* ]]; then args+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" \
+            "${args[@]}" \
+            dist/main.js dist/manifest.json dist/styles.css

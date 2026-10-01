@@ -38,6 +38,21 @@ Copy `manifest.json`, `main.js`, and `styles.css` from `dist/` into your vault's
 
 Then restart Obsidian, open **Settings → Community plugins**, and enable **Unified Browser Core**.
 
+## Install beta releases with BRAT
+
+BRAT installs plugin builds from GitHub Releases. Add `OzoneAsai/unified-browser-core` with BRAT's **Add beta plugin for testing** command, then enable Unified Browser Core in **Settings → Community plugins**. BRAT can track the latest release or a frozen version.
+
+To publish a build for BRAT, update the version in both `package.json` and `manifest.json`, commit the change, and push a matching version tag. For example, for version `0.1.0-beta.1`:
+
+```sh
+git tag 0.1.0-beta.1
+git push origin 0.1.0-beta.1
+```
+
+GitHub Actions builds the plugin and creates a release containing `main.js`, `manifest.json`, and `styles.css`. Keep the tag and both manifest versions identical. Tags with a prerelease suffix, such as `-beta.1`, are published as pre-releases.
+
+The repository is currently private. BRAT users need access to a private repository; for general beta testing, the repository must be public.
+
 ## Development
 
 ```sh
