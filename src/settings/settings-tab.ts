@@ -389,6 +389,18 @@ export class BrowserSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("Appearance").setHeading();
 
     new Setting(containerEl)
+      .setName("Full-page loading shield")
+      .setDesc("Cover the web page while a new page starts loading. Off by default to avoid a full-page flash.")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.core.settings().fullPageLoadingShield)
+          .onChange((value) => {
+            this.plugin.core.updateSettings({ fullPageLoadingShield: value });
+            this.plugin.refreshLoadingShields();
+          }),
+      );
+
+    new Setting(containerEl)
       .setName("Reduced motion")
       .setDesc("Avoid large transitions, slides and parallax in Browser Core UI.")
       .addToggle((toggle) =>

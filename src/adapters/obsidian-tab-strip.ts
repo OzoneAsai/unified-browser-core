@@ -119,6 +119,19 @@ export class ObsidianTabStripAdapter {
     icon.appendChild(image);
   }
 
+  revealActiveTab(leaf: WorkspaceLeaf): void {
+    const header = this.tabHeader(leaf);
+    const strip = header?.parentElement;
+    if (!header || !(strip instanceof HTMLElement) || !strip.hasClass("ubc-browser-tab-strip-scroll")) return;
+    window.requestAnimationFrame(() => {
+      if (!header.isConnected || !strip.isConnected || !header.hasClass("is-active")) return;
+      const headerRect = header.getBoundingClientRect();
+      const stripRect = strip.getBoundingClientRect();
+      if (headerRect.left < stripRect.left) strip.scrollLeft += headerRect.left - stripRect.left;
+      else if (headerRect.right > stripRect.right) strip.scrollLeft += headerRect.right - stripRect.right;
+    });
+  }
+
   private tabHeader(leaf: WorkspaceLeaf): HTMLElement | undefined {
     return (leaf as WorkspaceLeaf & { tabHeaderEl?: HTMLElement }).tabHeaderEl;
   }

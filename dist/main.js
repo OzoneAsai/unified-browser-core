@@ -807,6 +807,18 @@ var ObsidianTabStripAdapter = class {
     image.src = dataUrl;
     icon.appendChild(image);
   }
+  revealActiveTab(leaf) {
+    const header = this.tabHeader(leaf);
+    const strip = header?.parentElement;
+    if (!header || !(strip instanceof HTMLElement) || !strip.hasClass("ubc-browser-tab-strip-scroll")) return;
+    window.requestAnimationFrame(() => {
+      if (!header.isConnected || !strip.isConnected || !header.hasClass("is-active")) return;
+      const headerRect = header.getBoundingClientRect();
+      const stripRect = strip.getBoundingClientRect();
+      if (headerRect.left < stripRect.left) strip.scrollLeft += headerRect.left - stripRect.left;
+      else if (headerRect.right > stripRect.right) strip.scrollLeft += headerRect.right - stripRect.right;
+    });
+  }
   tabHeader(leaf) {
     return leaf.tabHeaderEl;
   }
@@ -2403,6 +2415,7 @@ var DEFAULT_SETTINGS = {
   formRecoveryMaxSnapshotsPerUrl: 5,
   formRecoveryMaxUrls: 200,
   reducedMotion: false,
+  fullPageLoadingShield: false,
   defaultZoomFactor: 1,
   defaultContainerId: "default",
   containerMode: "automatic",
@@ -2975,6 +2988,12 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
       })
     );
     new import_obsidian3.Setting(containerEl).setName("Appearance").setHeading();
+    new import_obsidian3.Setting(containerEl).setName("Full-page loading shield").setDesc("Cover the web page while a new page starts loading. Off by default to avoid a full-page flash.").addToggle(
+      (toggle) => toggle.setValue(this.plugin.core.settings().fullPageLoadingShield).onChange((value) => {
+        this.plugin.core.updateSettings({ fullPageLoadingShield: value });
+        this.plugin.refreshLoadingShields();
+      })
+    );
     new import_obsidian3.Setting(containerEl).setName("Reduced motion").setDesc("Avoid large transitions, slides and parallax in Browser Core UI.").addToggle(
       (toggle) => toggle.setValue(this.plugin.core.settings().reducedMotion).onChange((value) => {
         this.plugin.core.updateSettings({ reducedMotion: value });
@@ -4041,7 +4060,7 @@ var BrowserView = class _BrowserView extends import_obsidian12.ItemView {
   loadingShieldEl;
   addressEl;
   containerButtonEl;
-  permissionButtonEl;
+  activeContainerMenu = null;
   statusEl;
   browserHeaderTitleEl = null;
   browserHeaderEl = null;
@@ -4126,6 +4145,7 @@ var BrowserView = class _BrowserView extends import_obsidian12.ItemView {
     }
   }
   async onClose() {
+    this.activeContainerMenu?.hide();
     await this.captureRecoveryState();
     this.disconnectHistoryObserver();
     if (this.webview) await this.teardownFormRecoveryInstrumentation(this.webview);
@@ -4388,9 +4408,6 @@ var BrowserView = class _BrowserView extends import_obsidian12.ItemView {
   formRecoveryMasterEnabled() {
     return this.plugin.core.settings().formRecoveryEnabled;
   }
-  refreshPermissionIndicator() {
-    this.updatePermissionIndicator();
-  }
   refreshContainerPresentation() {
     this.updateContainerIndicator();
     this.applyTabStyle();
@@ -4595,6 +4612,21 @@ var BrowserView = class _BrowserView extends import_obsidian12.ItemView {
   onPaneMenu(menu, source) {
     super.onPaneMenu(menu, source);
     menu.addSeparator();
+    menu.addItem((item) => item.setTitle("Home").setIcon("home").onClick(() => this.showInternal("home")));
+    menu.addItem((item) => item.setTitle("History").setIcon("history").onClick(() => this.showInternal("history")));
+    menu.addItem((item) => item.setTitle("Bookmarks").setIcon("book-open").onClick(() => this.showInternal("bookmarks")));
+    const closed = this.plugin.core.history.recentlyClosed(1)[0];
+    menu.addItem((item) => item.setTitle("Reopen closed tab").setIcon("rotate-ccw").setDisabled(!closed).onClick(() => {
+      if (closed) void this.plugin.restoreLeaf(closed.id);
+    }));
+    menu.addSeparator();
+    menu.addItem((item) => item.setTitle("Site permissions\u2026").setIcon("shield-check").onClick((event) => this.showPermissionMenu(event)));
+    menu.addItem((item) => item.setTitle("Zoom in").setIcon("zoom-in").onClick(() => this.zoomIn()));
+    menu.addItem((item) => item.setTitle("Zoom out").setIcon("zoom-out").onClick(() => this.zoomOut()));
+    menu.addItem((item) => item.setTitle("Reset site zoom").onClick(() => this.resetZoom()));
+    menu.addItem((item) => item.setTitle("Settings").setIcon("settings").onClick(() => this.plugin.openSettings()));
+    menu.addItem((item) => item.setTitle("Inspect page").setIcon("code").onClick(() => this.inspectPage()));
+    menu.addSeparator();
     menu.addItem(
       (item) => item.setTitle("Reload").setIcon("rotate-cw").onClick(() => this.reload())
     );
@@ -4732,10 +4764,6 @@ var BrowserView = class _BrowserView extends import_obsidian12.ItemView {
     this.containerButtonEl = this.addToolbarButton("box", "Container", (event) => this.showContainerMenu(event));
     this.containerButtonEl.addClass("ubc-container-button");
     this.updateContainerIndicator();
-    this.permissionButtonEl = this.addToolbarButton("shield-check", "Site permissions", (event) => this.showPermissionMenu(event));
-    this.permissionButtonEl.addClass("ubc-permission-button");
-    this.updatePermissionIndicator();
-    this.addToolbarButton("ellipsis", "Browser menu", (event) => this.showToolbarMoreMenu(event));
     this.favoritesBarEl = this.rootEl.createDiv({ cls: "ubc-favorites-bar" });
     this.favoritesBarEl.addEventListener("contextmenu", (event) => {
       if (event.target !== this.favoritesBarEl) return;
@@ -4797,30 +4825,6 @@ var BrowserView = class _BrowserView extends import_obsidian12.ItemView {
       this.reloadButtonEl.setAttribute("aria-label", actionLabel);
       this.reloadButtonEl.title = actionLabel;
     }
-  }
-  showToolbarMoreMenu(event) {
-    const menu = new import_obsidian12.Menu();
-    menu.addItem((item) => item.setTitle("Home").setIcon("home").onClick(() => this.showInternal("home")));
-    menu.addItem((item) => item.setTitle("History").setIcon("history").onClick(() => this.showInternal("history")));
-    menu.addItem((item) => item.setTitle("Bookmarks").setIcon("book-open").onClick(() => this.showInternal("bookmarks")));
-    menu.addItem((item) => item.setTitle("Search tabs").setIcon("search").onClick(() => this.plugin.openBrowserTabSearch()));
-    const closed = this.plugin.core.history.recentlyClosed(1)[0];
-    menu.addItem(
-      (item) => item.setTitle("Reopen closed tab").setIcon("rotate-ccw").setDisabled(!closed).onClick(() => {
-        if (closed) void this.plugin.restoreLeaf(closed.id);
-      })
-    );
-    menu.addSeparator();
-    menu.addItem(
-      (item) => item.setTitle("Site permissions\u2026").setIcon("shield-check").onClick(() => this.showPermissionMenu(event))
-    );
-    menu.addItem((item) => item.setTitle("Zoom in").setIcon("zoom-in").onClick(() => this.zoomIn()));
-    menu.addItem((item) => item.setTitle("Zoom out").setIcon("zoom-out").onClick(() => this.zoomOut()));
-    menu.addItem((item) => item.setTitle("Reset site zoom").onClick(() => this.resetZoom()));
-    menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Settings").setIcon("settings").onClick(() => this.plugin.openSettings()));
-    menu.addItem((item) => item.setTitle("Inspect page").setIcon("code").onClick(() => this.inspectPage()));
-    menu.showAtMouseEvent(event);
   }
   renderFavoritesBar() {
     if (!this.favoritesBarEl) return;
@@ -4888,7 +4892,6 @@ ${item.url}` }
     this.currentUrlValue = `browser://${resolvedSurface}`;
     this.addressEl.value = this.currentUrlValue;
     this.updateBookmarkButton();
-    this.updatePermissionIndicator();
     this.webLayerEl.addClass("is-hidden");
     this.hideLoadingShield();
     this.internalLayerEl.removeClass("is-hidden");
@@ -5063,7 +5066,6 @@ ${item.url}` }
       const previousWebIndex = currentTransient?.kind === "web" ? currentTransient.webIndex : void 0;
       this.currentUrlValue = url;
       this.addressEl.value = url;
-      this.updatePermissionIndicator();
       const reason = this.pendingHistoryIntent || "in-page";
       this.pendingHistoryIntent = null;
       const webIndex = this.navigationHistoryAdapter.activeIndex(webview);
@@ -5275,7 +5277,6 @@ ${item.url}` }
     }
     this.addressEl.value = url;
     this.updateBookmarkButton();
-    this.updatePermissionIndicator();
     const webIndex = this.webview ? this.navigationHistoryAdapter.activeIndex(this.webview) : void 0;
     if (this.pendingTransientTraversalIndex !== null) {
       const target = this.transientHistory[this.pendingTransientTraversalIndex];
@@ -5644,11 +5645,15 @@ ${item.url}` }
     this.hideLoadingShield();
   }
   showLoadingShield() {
+    if (!this.plugin.core.settings().fullPageLoadingShield) return;
     if (this.webviewDomReady) return;
     this.loadingShieldEl?.removeClass("is-hidden");
   }
   hideLoadingShield() {
     this.loadingShieldEl?.addClass("is-hidden");
+  }
+  refreshLoadingShield() {
+    if (!this.plugin.core.settings().fullPageLoadingShield) this.hideLoadingShield();
   }
   disconnectHistoryObserver() {
     this.historyObserver?.disconnect();
@@ -6567,7 +6572,7 @@ ${item.url}` }
         (item) => item.setTitle("Automatic site defaults are off").setIcon("route-off").setDisabled(true)
       );
       menu.addItem((item) => item.setTitle("Manage containers").setIcon("settings").onClick(() => this.plugin.openSettings()));
-      menu.showAtPosition(position);
+      this.openContainerMenu(menu, position);
       return;
     }
     const routing = this.plugin.core.containers.routingStatus(
@@ -6617,6 +6622,19 @@ ${item.url}` }
       menu.addItem((item) => item.setTitle("Site defaults are only available for web pages").setDisabled(true));
     }
     menu.addItem((item) => item.setTitle("Manage containers").setIcon("settings").onClick(() => this.plugin.openSettings()));
+    this.openContainerMenu(menu, position);
+  }
+  openContainerMenu(menu, position) {
+    this.activeContainerMenu?.hide();
+    const dismissEl = this.browserContentEl.createDiv({ cls: "ubc-menu-dismiss-layer" });
+    this.activeContainerMenu = menu;
+    dismissEl.addEventListener("pointerdown", () => menu.hide());
+    menu.onHide(() => {
+      dismissEl.remove();
+      if (this.activeContainerMenu === menu) {
+        this.activeContainerMenu = null;
+      }
+    });
     menu.showAtPosition(position);
   }
   assignCurrentSiteToContainer(hostname, containerId) {
@@ -6633,7 +6651,7 @@ ${item.url}` }
   updateContainerIndicator() {
     if (!this.containerButtonEl) return;
     const mode = this.plugin.core.settings().containerMode;
-    this.containerButtonEl.toggleClass("is-hidden", mode === "off");
+    this.containerButtonEl.hidden = mode === "off";
     if (mode === "off") return;
     const container = this.plugin.core.containers.get(this.containerId);
     (0, import_obsidian12.setIcon)(this.containerButtonEl, container.icon || "box");
@@ -6652,22 +6670,13 @@ ${item.url}` }
       container.color || "var(--text-muted)"
     );
   }
-  updatePermissionIndicator() {
-    if (!this.permissionButtonEl) return;
-    const origin = this.currentOrigin();
-    const records = origin ? this.plugin.core.permissions.listForOrigin(this.containerId, origin) : [];
-    this.permissionButtonEl.toggleClass("has-permissions", records.length > 0);
-    const summary = records.length ? records.map((record) => `${permissionLabel(record.permission)}: ${permissionDecisionLabel(record.decision)}`).join(", ") : "No saved site permissions";
-    this.permissionButtonEl.setAttribute("aria-label", `Site permissions: ${summary}`);
-    this.permissionButtonEl.title = summary;
-  }
   showPermissionMenu(event) {
     const menu = new import_obsidian12.Menu();
     const origin = this.currentOrigin();
     if (!origin) {
       menu.addItem((item) => item.setTitle("Site permissions are only available for web pages").setDisabled(true));
       menu.addItem((item) => item.setTitle("Open Browser Core settings").onClick(() => this.plugin.openSettings()));
-      menu.showAtMouseEvent(event);
+      this.showMenuForEvent(menu, event);
       return;
     }
     const records = this.plugin.core.permissions.listForOrigin(this.containerId, origin);
@@ -6684,7 +6693,6 @@ ${item.url}` }
               if (decision === "ask") this.plugin.core.permissions.remove(this.containerId, origin, record.permission);
               else this.plugin.core.permissions.set(this.containerId, origin, record.permission, decision);
               this.plugin.core.scheduleSave();
-              this.updatePermissionIndicator();
             })
           );
         }
@@ -6695,11 +6703,17 @@ ${item.url}` }
       (item) => item.setTitle("Reset site permissions").setIcon("rotate-ccw").setDisabled(records.length === 0).onClick(() => {
         this.plugin.core.permissions.resetOrigin(this.containerId, origin);
         this.plugin.core.scheduleSave();
-        this.updatePermissionIndicator();
       })
     );
     menu.addItem((item) => item.setTitle("Open Browser Core settings").setIcon("settings").onClick(() => this.plugin.openSettings()));
-    menu.showAtMouseEvent(event);
+    this.showMenuForEvent(menu, event);
+  }
+  showMenuForEvent(menu, event) {
+    if (event instanceof MouseEvent) menu.showAtMouseEvent(event);
+    else {
+      const rect = (this.browserHeaderEl ?? this.toolbarEl).getBoundingClientRect();
+      menu.showAtPosition({ x: rect.right, y: rect.bottom });
+    }
   }
   currentOrigin() {
     try {
@@ -7730,6 +7744,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian15.Plugin {
     );
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
+        if (leaf) this.tabStripAdapter.revealActiveTab(leaf);
         if (this.ensureHomeTakeoverArmed() && leaf?.view.getViewType() === "empty") {
           void this.replaceEmptyLeafWithHome(leaf);
           return;
@@ -7785,6 +7800,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian15.Plugin {
       await this.replaceMostRecentEmptyLeafWithHome();
       this.sessionCheckpointArmed = true;
       this.captureSessionCheckpoint();
+      this.revealActiveTab();
     } finally {
       this.layoutInitializationInProgress = false;
     }
@@ -7925,14 +7941,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian15.Plugin {
       containerId,
       this.core.permissions,
       (origin, permission) => this.requestPermission(origin, permission),
-      () => {
-        this.core.scheduleSave();
-        for (const leaf of this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE)) {
-          if (!(leaf.view instanceof BrowserView)) continue;
-          if (leaf.view.getState().containerId !== containerId) continue;
-          leaf.view.refreshPermissionIndicator();
-        }
-      }
+      () => this.core.scheduleSave()
     );
   }
   async deleteContainer(containerId) {
@@ -8001,9 +8010,6 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian15.Plugin {
   clearPermissionDecisions() {
     const count = this.core.permissions.clearAll();
     this.core.scheduleSave();
-    for (const leaf of this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE)) {
-      if (leaf.view instanceof BrowserView) leaf.view.refreshPermissionIndicator();
-    }
     return count;
   }
   async clearContainerSession(containerId) {
@@ -8016,10 +8022,6 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian15.Plugin {
     }
     this.core.permissions.resetContainer(containerId);
     this.core.scheduleSave();
-    for (const leaf of this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE)) {
-      if (!(leaf.view instanceof BrowserView)) continue;
-      if (leaf.view.getState().containerId === containerId) leaf.view.refreshPermissionIndicator();
-    }
     new import_obsidian15.Notice(`Cleared browsing data and saved permissions for \u201C${container.name}\u201D.`);
     return true;
   }
@@ -8096,6 +8098,16 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian15.Plugin {
         Boolean(state.pinned),
         container?.color
       );
+    }
+    this.revealActiveTab();
+  }
+  revealActiveTab() {
+    const leaf = this.app.workspace.activeLeaf;
+    if (leaf) this.tabStripAdapter.revealActiveTab(leaf);
+  }
+  refreshLoadingShields() {
+    for (const leaf of this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE)) {
+      if (leaf.view instanceof BrowserView) leaf.view.refreshLoadingShield();
     }
   }
   applyAccessibilityClasses() {

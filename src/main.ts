@@ -367,6 +367,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     );
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
+        if (leaf) this.tabStripAdapter.revealActiveTab(leaf);
         if (this.ensureHomeTakeoverArmed() && leaf?.view.getViewType() === "empty") {
           void this.replaceEmptyLeafWithHome(leaf);
           return;
@@ -431,6 +432,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       await this.replaceMostRecentEmptyLeafWithHome();
       this.sessionCheckpointArmed = true;
       this.captureSessionCheckpoint();
+      this.revealActiveTab();
     } finally {
       this.layoutInitializationInProgress = false;
     }
@@ -611,14 +613,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       containerId,
       this.core.permissions,
       (origin, permission) => this.requestPermission(origin, permission),
-      () => {
-        this.core.scheduleSave();
-        for (const leaf of this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE)) {
-          if (!(leaf.view instanceof BrowserView)) continue;
-          if (leaf.view.getState().containerId !== containerId) continue;
-          leaf.view.refreshPermissionIndicator();
-        }
-      },
+      () => this.core.scheduleSave(),
     );
   }
 
@@ -693,9 +688,6 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
   clearPermissionDecisions(): number {
     const count = this.core.permissions.clearAll();
     this.core.scheduleSave();
-    for (const leaf of this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE)) {
-      if (leaf.view instanceof BrowserView) leaf.view.refreshPermissionIndicator();
-    }
     return count;
   }
 
@@ -709,10 +701,6 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     }
     this.core.permissions.resetContainer(containerId);
     this.core.scheduleSave();
-    for (const leaf of this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE)) {
-      if (!(leaf.view instanceof BrowserView)) continue;
-      if (leaf.view.getState().containerId === containerId) leaf.view.refreshPermissionIndicator();
-    }
     new Notice(`Cleared browsing data and saved permissions for “${container.name}”.`);
     return true;
   }
@@ -795,6 +783,18 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
         Boolean(state.pinned),
         container?.color,
       );
+    }
+    this.revealActiveTab();
+  }
+
+  private revealActiveTab(): void {
+    const leaf = this.app.workspace.activeLeaf;
+    if (leaf) this.tabStripAdapter.revealActiveTab(leaf);
+  }
+
+  refreshLoadingShields(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE)) {
+      if (leaf.view instanceof BrowserView) leaf.view.refreshLoadingShield();
     }
   }
 

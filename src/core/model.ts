@@ -31,6 +31,7 @@ export interface BrowserSettings {
   formRecoveryMaxSnapshotsPerUrl: number;
   formRecoveryMaxUrls: number;
   reducedMotion: boolean;
+  fullPageLoadingShield: boolean;
   defaultZoomFactor: number;
   defaultContainerId: ContainerId;
   containerMode: ContainerMode;
@@ -270,6 +271,7 @@ export const DEFAULT_SETTINGS: BrowserSettings = {
   formRecoveryMaxSnapshotsPerUrl: 5,
   formRecoveryMaxUrls: 200,
   reducedMotion: false,
+  fullPageLoadingShield: false,
   defaultZoomFactor: 1,
   defaultContainerId: "default",
   containerMode: "automatic",

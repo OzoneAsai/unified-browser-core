@@ -62,7 +62,7 @@ export class BrowserView extends ItemView {
   private loadingShieldEl!: HTMLDivElement;
   private addressEl!: HTMLInputElement;
   private containerButtonEl!: HTMLButtonElement;
-  private permissionButtonEl!: HTMLButtonElement;
+  private activeContainerMenu: Menu | null = null;
   private statusEl!: HTMLSpanElement;
   private browserHeaderTitleEl: HTMLElement | null = null;
   private browserHeaderEl: HTMLElement | null = null;
@@ -162,6 +162,7 @@ export class BrowserView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.activeContainerMenu?.hide();
     await this.captureRecoveryState();
     this.disconnectHistoryObserver();
     if (this.webview) await this.teardownFormRecoveryInstrumentation(this.webview);
@@ -475,10 +476,6 @@ export class BrowserView extends ItemView {
     return this.plugin.core.settings().formRecoveryEnabled;
   }
 
-  refreshPermissionIndicator(): void {
-    this.updatePermissionIndicator();
-  }
-
   refreshContainerPresentation(): void {
     this.updateContainerIndicator();
     this.applyTabStyle();
@@ -695,6 +692,21 @@ export class BrowserView extends ItemView {
   onPaneMenu(menu: Menu, source: string): void {
     super.onPaneMenu(menu, source);
     menu.addSeparator();
+    menu.addItem((item) => item.setTitle("Home").setIcon("home").onClick(() => this.showInternal("home")));
+    menu.addItem((item) => item.setTitle("History").setIcon("history").onClick(() => this.showInternal("history")));
+    menu.addItem((item) => item.setTitle("Bookmarks").setIcon("book-open").onClick(() => this.showInternal("bookmarks")));
+    const closed = this.plugin.core.history.recentlyClosed(1)[0];
+    menu.addItem((item) => item.setTitle("Reopen closed tab").setIcon("rotate-ccw").setDisabled(!closed)
+      .onClick(() => { if (closed) void this.plugin.restoreLeaf(closed.id); }));
+    menu.addSeparator();
+    menu.addItem((item) => item.setTitle("Site permissions…").setIcon("shield-check")
+      .onClick((event) => this.showPermissionMenu(event)));
+    menu.addItem((item) => item.setTitle("Zoom in").setIcon("zoom-in").onClick(() => this.zoomIn()));
+    menu.addItem((item) => item.setTitle("Zoom out").setIcon("zoom-out").onClick(() => this.zoomOut()));
+    menu.addItem((item) => item.setTitle("Reset site zoom").onClick(() => this.resetZoom()));
+    menu.addItem((item) => item.setTitle("Settings").setIcon("settings").onClick(() => this.plugin.openSettings()));
+    menu.addItem((item) => item.setTitle("Inspect page").setIcon("code").onClick(() => this.inspectPage()));
+    menu.addSeparator();
     menu.addItem((item) =>
       item
         .setTitle("Reload")
@@ -895,10 +907,6 @@ export class BrowserView extends ItemView {
     this.containerButtonEl = this.addToolbarButton("box", "Container", (event) => this.showContainerMenu(event));
     this.containerButtonEl.addClass("ubc-container-button");
     this.updateContainerIndicator();
-    this.permissionButtonEl = this.addToolbarButton("shield-check", "Site permissions", (event) => this.showPermissionMenu(event));
-    this.permissionButtonEl.addClass("ubc-permission-button");
-    this.updatePermissionIndicator();
-    this.addToolbarButton("ellipsis", "Browser menu", (event) => this.showToolbarMoreMenu(event));
 
     this.favoritesBarEl = this.rootEl.createDiv({ cls: "ubc-favorites-bar" });
     this.favoritesBarEl.addEventListener("contextmenu", (event) => {
@@ -964,36 +972,6 @@ export class BrowserView extends ItemView {
       this.reloadButtonEl.setAttribute("aria-label", actionLabel);
       this.reloadButtonEl.title = actionLabel;
     }
-  }
-
-  private showToolbarMoreMenu(event: MouseEvent): void {
-    const menu = new Menu();
-    menu.addItem((item) => item.setTitle("Home").setIcon("home").onClick(() => this.showInternal("home")));
-    menu.addItem((item) => item.setTitle("History").setIcon("history").onClick(() => this.showInternal("history")));
-    menu.addItem((item) => item.setTitle("Bookmarks").setIcon("book-open").onClick(() => this.showInternal("bookmarks")));
-    menu.addItem((item) => item.setTitle("Search tabs").setIcon("search").onClick(() => this.plugin.openBrowserTabSearch()));
-    const closed = this.plugin.core.history.recentlyClosed(1)[0];
-    menu.addItem((item) =>
-      item
-        .setTitle("Reopen closed tab")
-        .setIcon("rotate-ccw")
-        .setDisabled(!closed)
-        .onClick(() => { if (closed) void this.plugin.restoreLeaf(closed.id); }),
-    );
-    menu.addSeparator();
-    menu.addItem((item) =>
-      item
-        .setTitle("Site permissions…")
-        .setIcon("shield-check")
-        .onClick(() => this.showPermissionMenu(event)),
-    );
-    menu.addItem((item) => item.setTitle("Zoom in").setIcon("zoom-in").onClick(() => this.zoomIn()));
-    menu.addItem((item) => item.setTitle("Zoom out").setIcon("zoom-out").onClick(() => this.zoomOut()));
-    menu.addItem((item) => item.setTitle("Reset site zoom").onClick(() => this.resetZoom()));
-    menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Settings").setIcon("settings").onClick(() => this.plugin.openSettings()));
-    menu.addItem((item) => item.setTitle("Inspect page").setIcon("code").onClick(() => this.inspectPage()));
-    menu.showAtMouseEvent(event);
   }
 
   renderFavoritesBar(): void {
@@ -1067,7 +1045,6 @@ export class BrowserView extends ItemView {
     this.currentUrlValue = `browser://${resolvedSurface}`;
     this.addressEl.value = this.currentUrlValue;
     this.updateBookmarkButton();
-    this.updatePermissionIndicator();
     this.webLayerEl.addClass("is-hidden");
     this.hideLoadingShield();
     this.internalLayerEl.removeClass("is-hidden");
@@ -1269,7 +1246,6 @@ export class BrowserView extends ItemView {
       const previousWebIndex = currentTransient?.kind === "web" ? currentTransient.webIndex : undefined;
       this.currentUrlValue = url;
       this.addressEl.value = url;
-      this.updatePermissionIndicator();
       const reason = this.pendingHistoryIntent || "in-page";
       this.pendingHistoryIntent = null;
       const webIndex = this.navigationHistoryAdapter.activeIndex(webview);
@@ -1516,7 +1492,6 @@ export class BrowserView extends ItemView {
     }
     this.addressEl.value = url;
     this.updateBookmarkButton();
-    this.updatePermissionIndicator();
     const webIndex = this.webview ? this.navigationHistoryAdapter.activeIndex(this.webview) : undefined;
     if (this.pendingTransientTraversalIndex !== null) {
       const target = this.transientHistory[this.pendingTransientTraversalIndex];
@@ -1910,6 +1885,7 @@ export class BrowserView extends ItemView {
   }
 
   private showLoadingShield(): void {
+    if (!this.plugin.core.settings().fullPageLoadingShield) return;
     // Loading can restart for background work such as link prefetch. Once a
     // guest page is visible, covering it would flash the theme background.
     if (this.webviewDomReady) return;
@@ -1918,6 +1894,10 @@ export class BrowserView extends ItemView {
 
   private hideLoadingShield(): void {
     this.loadingShieldEl?.addClass("is-hidden");
+  }
+
+  refreshLoadingShield(): void {
+    if (!this.plugin.core.settings().fullPageLoadingShield) this.hideLoadingShield();
   }
 
   private disconnectHistoryObserver(): void {
@@ -2939,7 +2919,7 @@ export class BrowserView extends ItemView {
           .setDisabled(true),
       );
       menu.addItem((item) => item.setTitle("Manage containers").setIcon("settings").onClick(() => this.plugin.openSettings()));
-      menu.showAtPosition(position);
+      this.openContainerMenu(menu, position);
       return;
     }
     const routing = this.plugin.core.containers.routingStatus(
@@ -3005,6 +2985,20 @@ export class BrowserView extends ItemView {
       menu.addItem((item) => item.setTitle("Site defaults are only available for web pages").setDisabled(true));
     }
     menu.addItem((item) => item.setTitle("Manage containers").setIcon("settings").onClick(() => this.plugin.openSettings()));
+    this.openContainerMenu(menu, position);
+  }
+
+  private openContainerMenu(menu: Menu, position: { x: number; y: number }): void {
+    this.activeContainerMenu?.hide();
+    const dismissEl = this.browserContentEl.createDiv({ cls: "ubc-menu-dismiss-layer" });
+    this.activeContainerMenu = menu;
+    dismissEl.addEventListener("pointerdown", () => menu.hide());
+    menu.onHide(() => {
+      dismissEl.remove();
+      if (this.activeContainerMenu === menu) {
+        this.activeContainerMenu = null;
+      }
+    });
     menu.showAtPosition(position);
   }
 
@@ -3023,7 +3017,7 @@ export class BrowserView extends ItemView {
   private updateContainerIndicator(): void {
     if (!this.containerButtonEl) return;
     const mode = this.plugin.core.settings().containerMode;
-    this.containerButtonEl.toggleClass("is-hidden", mode === "off");
+    this.containerButtonEl.hidden = mode === "off";
     if (mode === "off") return;
     const container = this.plugin.core.containers.get(this.containerId);
     setIcon(this.containerButtonEl, container.icon || "box");
@@ -3053,25 +3047,13 @@ export class BrowserView extends ItemView {
     );
   }
 
-  private updatePermissionIndicator(): void {
-    if (!this.permissionButtonEl) return;
-    const origin = this.currentOrigin();
-    const records = origin ? this.plugin.core.permissions.listForOrigin(this.containerId, origin) : [];
-    this.permissionButtonEl.toggleClass("has-permissions", records.length > 0);
-    const summary = records.length
-      ? records.map((record) => `${permissionLabel(record.permission)}: ${permissionDecisionLabel(record.decision)}`).join(", ")
-      : "No saved site permissions";
-    this.permissionButtonEl.setAttribute("aria-label", `Site permissions: ${summary}`);
-    this.permissionButtonEl.title = summary;
-  }
-
-  private showPermissionMenu(event: MouseEvent): void {
+  private showPermissionMenu(event: MouseEvent | KeyboardEvent): void {
     const menu = new Menu();
     const origin = this.currentOrigin();
     if (!origin) {
       menu.addItem((item) => item.setTitle("Site permissions are only available for web pages").setDisabled(true));
       menu.addItem((item) => item.setTitle("Open Browser Core settings").onClick(() => this.plugin.openSettings()));
-      menu.showAtMouseEvent(event);
+      this.showMenuForEvent(menu, event);
       return;
     }
     const records = this.plugin.core.permissions.listForOrigin(this.containerId, origin);
@@ -3093,7 +3075,6 @@ export class BrowserView extends ItemView {
                 if (decision === "ask") this.plugin.core.permissions.remove(this.containerId, origin, record.permission);
                 else this.plugin.core.permissions.set(this.containerId, origin, record.permission, decision);
                 this.plugin.core.scheduleSave();
-                this.updatePermissionIndicator();
               }),
           );
         }
@@ -3108,11 +3089,18 @@ export class BrowserView extends ItemView {
         .onClick(() => {
           this.plugin.core.permissions.resetOrigin(this.containerId, origin);
           this.plugin.core.scheduleSave();
-          this.updatePermissionIndicator();
         }),
     );
     menu.addItem((item) => item.setTitle("Open Browser Core settings").setIcon("settings").onClick(() => this.plugin.openSettings()));
-    menu.showAtMouseEvent(event);
+    this.showMenuForEvent(menu, event);
+  }
+
+  private showMenuForEvent(menu: Menu, event: MouseEvent | KeyboardEvent): void {
+    if (event instanceof MouseEvent) menu.showAtMouseEvent(event);
+    else {
+      const rect = (this.browserHeaderEl ?? this.toolbarEl).getBoundingClientRect();
+      menu.showAtPosition({ x: rect.right, y: rect.bottom });
+    }
   }
 
   private currentOrigin(): string | undefined {

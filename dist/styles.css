@@ -179,14 +179,8 @@
   border-bottom: 2px solid var(--ubc-container-color, var(--text-muted));
 }
 
-.ubc-permission-button {
+.ubc-container-button[hidden] {
   display: none;
-  color: var(--text-muted);
-}
-
-.ubc-permission-button.has-permissions {
-  display: inline-flex;
-  color: var(--text-accent);
 }
 
 .ubc-address {
@@ -398,6 +392,13 @@
   min-height: 0;
   overflow: hidden;
   background: var(--background-primary);
+}
+
+.ubc-menu-dismiss-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  background: transparent;
 }
 
 .ubc-web-layer,
