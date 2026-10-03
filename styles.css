@@ -155,6 +155,10 @@
   min-height: 36px;
 }
 
+.ubc-browser-view-header .view-header-nav-buttons {
+  display: none;
+}
+
 .ubc-toolbar {
   display: flex;
   align-items: center;
