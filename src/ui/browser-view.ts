@@ -1910,6 +1910,9 @@ export class BrowserView extends ItemView {
   }
 
   private showLoadingShield(): void {
+    // Loading can restart for background work such as link prefetch. Once a
+    // guest page is visible, covering it would flash the theme background.
+    if (this.webviewDomReady) return;
     this.loadingShieldEl?.removeClass("is-hidden");
   }
 

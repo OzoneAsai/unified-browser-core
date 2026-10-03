@@ -5644,6 +5644,7 @@ ${item.url}` }
     this.hideLoadingShield();
   }
   showLoadingShield() {
+    if (this.webviewDomReady) return;
     this.loadingShieldEl?.removeClass("is-hidden");
   }
   hideLoadingShield() {
