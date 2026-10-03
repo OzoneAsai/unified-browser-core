@@ -22,6 +22,9 @@ export interface ImportedWebBookmark {
   title: string;
   url: string;
   folderPath: string[];
+  favorite?: boolean;
+  visualKind?: BookmarkVisualKind;
+  visualValue?: string;
 }
 
 export interface BookmarkImportSummary {
@@ -113,7 +116,14 @@ export class BookmarkStore {
         reused += 1;
         continue;
       }
-      this.addBookmark({ title: entry.title, url: entry.url, parentId });
+      this.addBookmark({
+        title: entry.title,
+        url: entry.url,
+        parentId,
+        favorite: entry.favorite,
+        visualKind: entry.visualKind,
+        visualValue: entry.visualValue,
+      });
       added += 1;
     }
 

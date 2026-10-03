@@ -23,7 +23,7 @@ __export(main_exports, {
   default: () => UnifiedBrowserCorePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian14 = require("obsidian");
+var import_obsidian15 = require("obsidian");
 
 // src/adapters/electron-compat.ts
 function resolveElectronRemote() {
@@ -1009,6 +1009,60 @@ function isWebUrl(value) {
   }
 }
 
+// src/adapters/webviewer-bookmarks.ts
+var WebViewerBookmarksAdapter = class {
+  constructor(app) {
+    this.app = app;
+  }
+  async scan() {
+    const vault = this.app.vault;
+    const path = `${vault.configDir || ".obsidian"}/plugins/webviewer-bookmarks/data.json`;
+    try {
+      if (!await vault.adapter.exists(path)) return unavailable();
+      return normalizeWebViewerBookmarks(JSON.parse(await vault.adapter.read(path)));
+    } catch {
+      return unavailable();
+    }
+  }
+};
+function normalizeWebViewerBookmarks(data) {
+  if (!data || typeof data !== "object" || !("bookmarks" in data) || !Array.isArray(data.bookmarks)) {
+    return unavailable();
+  }
+  const entries = [];
+  let skippedInvalid = 0;
+  for (const item of data.bookmarks) {
+    if (!item || typeof item !== "object" || typeof item.url !== "string") {
+      skippedInvalid++;
+      continue;
+    }
+    const url = item.url.trim();
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      skippedInvalid++;
+      continue;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      skippedInvalid++;
+      continue;
+    }
+    entries.push({
+      title: typeof item.title === "string" && item.title.trim() ? item.title.trim() : parsed.hostname,
+      url,
+      folderPath: [],
+      favorite: item.ribbon === true,
+      visualKind: "icon",
+      visualValue: typeof item.lucide === "string" && item.lucide.trim() ? item.lucide.trim() : "bookmark"
+    });
+  }
+  return { available: true, entries, skippedInvalid };
+}
+function unavailable() {
+  return { available: false, entries: [], skippedInvalid: 0 };
+}
+
 // src/adapters/obsidian-commands.ts
 var ObsidianCommandAdapter = class {
   has(app, id) {
@@ -1196,7 +1250,14 @@ var BookmarkStore = class {
         reused += 1;
         continue;
       }
-      this.addBookmark({ title: entry.title, url: entry.url, parentId });
+      this.addBookmark({
+        title: entry.title,
+        url: entry.url,
+        parentId,
+        favorite: entry.favorite,
+        visualKind: entry.visualKind,
+        visualValue: entry.visualValue
+      });
       added += 1;
     }
     return { added, reused, foldersCreated };
@@ -3064,7 +3125,7 @@ function searchPresetForTemplate(template) {
 }
 
 // src/ui/browser-view.ts
-var import_obsidian11 = require("obsidian");
+var import_obsidian12 = require("obsidian");
 
 // src/adapters/electron-navigation-history.ts
 var ElectronNavigationHistoryAdapter = class {
@@ -3162,7 +3223,7 @@ function classifyInPageNavigation(previousIndex, nextIndex, intent) {
 }
 
 // src/ui/context-menus.ts
-var import_obsidian8 = require("obsidian");
+var import_obsidian9 = require("obsidian");
 
 // src/ui/bookmark-editor.ts
 var import_obsidian5 = require("obsidian");
@@ -3183,6 +3244,11 @@ function renderBookmarkVisual(parent, bookmark, className = "ubc-bookmark-visual
     }
     host.addClass("is-text");
     host.setText(value.slice(0, 4));
+    return host;
+  }
+  if (bookmark.visualKind === "icon") {
+    (0, import_obsidian4.setIcon)(host, bookmark.visualValue?.trim() || "bookmark");
+    if (!host.firstElementChild) fallback();
     return host;
   }
   const source = bookmark.visualKind === "image" ? resolveCustomImage(bookmark.visualValue, app) : bookmark.faviconUrl?.trim() || fallbackFaviconUrl(bookmark.url);
@@ -3256,6 +3322,7 @@ var BookmarkEditorModal = class extends import_obsidian5.Modal {
     visualKind.createEl("option", { text: "Website favicon", value: "favicon" });
     visualKind.createEl("option", { text: "Custom image", value: "image" });
     visualKind.createEl("option", { text: "Custom text", value: "text" });
+    visualKind.createEl("option", { text: "Lucide icon", value: "icon" });
     visualKind.value = this.options.visualKind ?? "favicon";
     const visualValueField = this.contentEl.createEl("label", { cls: "ubc-prompt-field" });
     visualValueField.createSpan({ cls: "ubc-prompt-label", text: "Custom value" });
@@ -3288,7 +3355,7 @@ var BookmarkEditorModal = class extends import_obsidian5.Modal {
     const syncVisualField = () => {
       const kind = visualKind.value;
       visualValueField.toggleClass("is-hidden", kind === "favicon");
-      visualValue.placeholder = kind === "image" ? "https://\u2026 or Images/icon.png" : "AI, G, \u2605, etc.";
+      visualValue.placeholder = kind === "image" ? "https://\u2026 or Images/icon.png" : kind === "icon" ? "bookmark, globe, link, etc." : "AI, G, \u2605, etc.";
       renderPreview();
     };
     visualKind.addEventListener("change", syncVisualField);
@@ -3348,14 +3415,22 @@ var BookmarkEditorModal = class extends import_obsidian5.Modal {
   }
 };
 
-// src/ui/folder-picker-modal.ts
+// src/bookmarks/bookmark-url.ts
 var import_obsidian6 = require("obsidian");
+function resolveBookmarkUrl(url, app) {
+  if (!/{{\s*selection\s*}}/.test(url)) return url;
+  const selection = app.workspace.getActiveViewOfType(import_obsidian6.MarkdownView)?.editor?.getSelection().trim() || "";
+  return url.replace(/{{\s*selection\s*}}/g, encodeURIComponent(selection));
+}
+
+// src/ui/folder-picker-modal.ts
+var import_obsidian7 = require("obsidian");
 function pickBookmarkFolder(app, store, options = {}) {
   return new Promise((resolve) => {
     new BookmarkFolderPickerModal(app, store, options.excludeFolderId, resolve).open();
   });
 }
-var BookmarkFolderPickerModal = class extends import_obsidian6.FuzzySuggestModal {
+var BookmarkFolderPickerModal = class extends import_obsidian7.FuzzySuggestModal {
   constructor(app, store, excludeFolderId, resolveChoice) {
     super(app);
     this.store = store;
@@ -3386,13 +3461,13 @@ var BookmarkFolderPickerModal = class extends import_obsidian6.FuzzySuggestModal
 };
 
 // src/ui/text-prompt.ts
-var import_obsidian7 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 function promptText(app, title, initialValue = "", placeholder = "") {
   return new Promise((resolve) => {
     new TextPromptModal(app, title, initialValue, placeholder, resolve).open();
   });
 }
-var TextPromptModal = class extends import_obsidian7.Modal {
+var TextPromptModal = class extends import_obsidian8.Modal {
   constructor(app, promptTitle, initialValue, placeholder, resolveValue) {
     super(app);
     this.promptTitle = promptTitle;
@@ -3563,7 +3638,7 @@ function buildWebContentMenuEntries(plugin, view, params) {
 
 // src/ui/context-menus.ts
 function showPageMenu(plugin, view, event) {
-  const menu = new import_obsidian8.Menu();
+  const menu = new import_obsidian9.Menu();
   menu.addItem(
     (item) => item.setTitle("Back").setIcon("arrow-left").setDisabled(!view.canGoBack()).onClick(() => view.goBack())
   );
@@ -3581,7 +3656,7 @@ function showPageMenu(plugin, view, event) {
   );
   menu.addItem((item) => item.setTitle("Copy page URL").setIcon("copy").onClick(async () => {
     await navigator.clipboard.writeText(view.currentUrl());
-    new import_obsidian8.Notice("URL copied.");
+    new import_obsidian9.Notice("URL copied.");
   }));
   menu.addItem(
     (item) => item.setTitle("View page in history").setIcon("history").onClick(() => view.showHistoryQuery(view.currentUrl()))
@@ -3605,7 +3680,7 @@ function showPageMenu(plugin, view, event) {
   menu.showAtMouseEvent(event);
 }
 function showWebContentMenu(plugin, view, params, position) {
-  const menu = new import_obsidian8.Menu();
+  const menu = new import_obsidian9.Menu();
   for (const entry of buildWebContentMenuEntries(plugin, view, params)) {
     if (entry.kind === "separator") {
       menu.addSeparator();
@@ -3621,13 +3696,13 @@ function showWebContentMenu(plugin, view, params, position) {
   menu.showAtPosition(position);
 }
 function showBookmarkMenu(plugin, view, bookmark, event) {
-  const menu = new import_obsidian8.Menu();
-  menu.addItem((item) => item.setTitle("Open").setIcon("external-link").onClick(() => view.navigate(bookmark.url)));
-  menu.addItem((item) => item.setTitle("Open in new tab").setIcon("plus").onClick(() => plugin.openBrowser({ url: bookmark.url })));
+  const menu = new import_obsidian9.Menu();
+  menu.addItem((item) => item.setTitle("Open").setIcon("external-link").onClick(() => view.navigate(resolveBookmarkUrl(bookmark.url, plugin.app))));
+  menu.addItem((item) => item.setTitle("Open in new tab").setIcon("plus").onClick(() => plugin.openBrowser({ url: resolveBookmarkUrl(bookmark.url, plugin.app) })));
   if (plugin.core.settings().containerMode !== "off") {
     for (const container of plugin.core.containers.list()) {
       menu.addItem(
-        (item) => item.setTitle(`Open in ${container.name}`).setIcon("box").onClick(() => plugin.openBrowser({ url: bookmark.url, containerId: container.id }))
+        (item) => item.setTitle(`Open in ${container.name}`).setIcon("box").onClick(() => plugin.openBrowser({ url: resolveBookmarkUrl(bookmark.url, plugin.app), containerId: container.id }))
       );
     }
   }
@@ -3678,7 +3753,7 @@ function showBookmarkMenu(plugin, view, bookmark, event) {
   menu.showAtMouseEvent(event);
 }
 function showBookmarkFolderMenu(plugin, view, folder, event) {
-  const menu = new import_obsidian8.Menu();
+  const menu = new import_obsidian9.Menu();
   const bookmarks = plugin.core.bookmarks.descendantBookmarks(folder.id);
   menu.addItem(
     (item) => item.setTitle("Open all").setDisabled(bookmarks.length === 0).onClick(() => view.openBookmarkSet(bookmarks, void 0, true))
@@ -3720,7 +3795,7 @@ function showBookmarkFolderMenu(plugin, view, folder, event) {
     const parentId = await pickBookmarkFolder(plugin.app, plugin.core.bookmarks, { excludeFolderId: folder.id });
     if (parentId === void 0) return;
     if (!plugin.core.bookmarks.moveFolder(folder.id, parentId)) {
-      new import_obsidian8.Notice("That move would create an invalid bookmark-folder cycle.");
+      new import_obsidian9.Notice("That move would create an invalid bookmark-folder cycle.");
       return;
     }
     plugin.core.scheduleSave();
@@ -3749,7 +3824,7 @@ function showBookmarkFolderMenu(plugin, view, folder, event) {
   menu.showAtMouseEvent(event);
 }
 function showFavoritesBarMenu(plugin, view, event) {
-  const menu = new import_obsidian8.Menu();
+  const menu = new import_obsidian9.Menu();
   if (!view.currentUrl().startsWith("browser://")) {
     menu.addItem((item) => item.setTitle("Add current page to favorites").setIcon("star").onClick(() => view.favoriteCurrentPage()));
   }
@@ -3763,11 +3838,11 @@ function showFavoritesBarMenu(plugin, view, event) {
 }
 
 // src/ui/recovery-details-modal.ts
-var import_obsidian9 = require("obsidian");
+var import_obsidian10 = require("obsidian");
 function showRecoveryDetails(app, details) {
   new RecoveryDetailsModal(app, details).open();
 }
-var RecoveryDetailsModal = class extends import_obsidian9.Modal {
+var RecoveryDetailsModal = class extends import_obsidian10.Modal {
   constructor(app, details) {
     super(app);
     this.details = details;
@@ -3808,11 +3883,11 @@ function addRow(parent, term, value) {
 }
 
 // src/ui/form-recovery-candidates-modal.ts
-var import_obsidian10 = require("obsidian");
+var import_obsidian11 = require("obsidian");
 function showFormRecoveryCandidates(app, fields, restoreSafeMatches) {
   new FormRecoveryCandidatesModal(app, fields, restoreSafeMatches).open();
 }
-var FormRecoveryCandidatesModal = class extends import_obsidian10.Modal {
+var FormRecoveryCandidatesModal = class extends import_obsidian11.Modal {
   constructor(app, fields, restoreSafeMatches) {
     super(app);
     this.fields = fields;
@@ -3946,7 +4021,7 @@ function isBracketedIpv6(value) {
 
 // src/ui/browser-view.ts
 var BROWSER_VIEW_TYPE = "unified-browser-core-view";
-var BrowserView = class _BrowserView extends import_obsidian11.ItemView {
+var BrowserView = class _BrowserView extends import_obsidian12.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -4219,14 +4294,15 @@ var BrowserView = class _BrowserView extends import_obsidian11.ItemView {
     if (useCurrent) {
       const first = bookmarks[0];
       if (first) {
-        if (containerId && containerId !== this.containerId) void this.plugin.openBrowser({ url: first.url, containerId });
-        else this.navigate(first.url);
+        if (containerId && containerId !== this.containerId) {
+          void this.plugin.openBrowser({ url: resolveBookmarkUrl(first.url, this.plugin.app), containerId });
+        } else this.navigate(resolveBookmarkUrl(first.url, this.plugin.app));
         start = 1;
       }
     }
     for (let index = start; index < bookmarks.length; index++) {
       const bookmark = bookmarks[index];
-      if (bookmark) void this.plugin.openBrowser({ url: bookmark.url, containerId });
+      if (bookmark) void this.plugin.openBrowser({ url: resolveBookmarkUrl(bookmark.url, this.plugin.app), containerId });
     }
   }
   bookmarkAllOpenTabs() {
@@ -4235,12 +4311,12 @@ var BrowserView = class _BrowserView extends import_obsidian11.ItemView {
     );
     const webViews = views.filter((view) => !view.currentUrl().startsWith("browser://"));
     if (!webViews.length) {
-      new import_obsidian11.Notice("There are no web pages to bookmark.");
+      new import_obsidian12.Notice("There are no web pages to bookmark.");
       return;
     }
     const newViews = webViews.filter((view) => !this.plugin.core.bookmarks.isBookmarked(view.currentUrl()));
     if (!newViews.length) {
-      new import_obsidian11.Notice("All open web pages are already bookmarked.");
+      new import_obsidian12.Notice("All open web pages are already bookmarked.");
       return;
     }
     const folder = this.plugin.core.bookmarks.addFolder(
@@ -4255,7 +4331,7 @@ var BrowserView = class _BrowserView extends import_obsidian11.ItemView {
     }
     this.plugin.core.scheduleSave();
     this.refreshBookmarks();
-    new import_obsidian11.Notice("Bookmarked " + newViews.length + " open browser tab(s)." + (newViews.length < webViews.length ? " Existing bookmarks were skipped." : ""));
+    new import_obsidian12.Notice("Bookmarked " + newViews.length + " open browser tab(s)." + (newViews.length < webViews.length ? " Existing bookmarks were skipped." : ""));
   }
   currentPageBookmarked() {
     return !this.currentUrlValue.startsWith("browser://") && this.plugin.core.bookmarks.isBookmarked(this.currentUrlValue);
@@ -4321,17 +4397,17 @@ var BrowserView = class _BrowserView extends import_obsidian11.ItemView {
   }
   enableFormRecoveryForSite() {
     if (!this.plugin.core.formRecovery.enableSite(this.containerId, this.currentUrlValue)) {
-      new import_obsidian11.Notice("Form recovery is only available for web pages.");
+      new import_obsidian12.Notice("Form recovery is only available for web pages.");
       return;
     }
     this.plugin.core.scheduleSave();
     void this.syncFormRecoveryInstrumentation();
-    new import_obsidian11.Notice("Form recovery enabled for this site.");
+    new import_obsidian12.Notice("Form recovery enabled for this site.");
   }
   showRecoveryCandidates() {
     const fields = this.plugin.core.formRecovery.recoveryFieldsForDocument(this.containerId, this.currentUrlValue);
     if (!fields.length) {
-      new import_obsidian11.Notice("No saved form values are available for this page.");
+      new import_obsidian12.Notice("No saved form values are available for this page.");
       return;
     }
     showFormRecoveryCandidates(
@@ -4342,13 +4418,13 @@ var BrowserView = class _BrowserView extends import_obsidian11.ItemView {
   }
   disableFormRecoveryForSite() {
     if (!this.plugin.core.formRecovery.disableSite(this.containerId, this.currentUrlValue, true)) {
-      new import_obsidian11.Notice("Form recovery is only available for web pages.");
+      new import_obsidian12.Notice("Form recovery is only available for web pages.");
       return;
     }
     this.formRecoveryWatchEnabled = false;
     this.plugin.core.scheduleSave();
     void this.syncFormRecoveryInstrumentation();
-    new import_obsidian11.Notice("Form recovery disabled and stored form values cleared for this site.");
+    new import_obsidian12.Notice("Form recovery disabled and stored form values cleared for this site.");
   }
   async syncFormRecoveryInstrumentation() {
     const webview = this.readyWebview();
@@ -4376,17 +4452,17 @@ var BrowserView = class _BrowserView extends import_obsidian11.ItemView {
   async disableFocusedFormRecoveryField() {
     const field = await this.focusedFormField();
     if (!field || !this.plugin.core.formRecovery.excludeField(this.containerId, this.currentUrlValue, field)) {
-      new import_obsidian11.Notice("Could not identify the focused form field.");
+      new import_obsidian12.Notice("Could not identify the focused form field.");
       return;
     }
     this.plugin.core.scheduleSave();
-    new import_obsidian11.Notice("This form field is excluded from recovery on this site.");
+    new import_obsidian12.Notice("This form field is excluded from recovery on this site.");
   }
   async restoreFocusedFormValue() {
     const saved = this.plugin.core.formRecovery.recoveryFieldsForDocument(this.containerId, this.currentUrlValue);
     const webview = this.readyWebview();
     if (!saved.length || !webview?.executeJavaScript) {
-      new import_obsidian11.Notice("No saved form value is available for this page.");
+      new import_obsidian12.Notice("No saved form value is available for this page.");
       return;
     }
     const payload = JSON.stringify(saved);
@@ -4425,13 +4501,13 @@ var BrowserView = class _BrowserView extends import_obsidian11.ItemView {
       el.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
     })()`);
-    new import_obsidian11.Notice(restored ? "Restored the previous value for this field." : "No matching saved value was found for this field.");
+    new import_obsidian12.Notice(restored ? "Restored the previous value for this field." : "No matching saved value was found for this field.");
   }
   async restoreFormValues(options = {}) {
     const recoveryFields = this.plugin.core.formRecovery.recoveryFieldsForDocument(this.containerId, this.currentUrlValue);
     const webview = this.readyWebview();
     if (!recoveryFields.length || !webview?.executeJavaScript) {
-      if (!options.silent) new import_obsidian11.Notice("No saved form values for this page.");
+      if (!options.silent) new import_obsidian12.Notice("No saved form values for this page.");
       return;
     }
     const watchNextSteps = options.watchNextSteps ?? true;
@@ -4511,7 +4587,7 @@ var BrowserView = class _BrowserView extends import_obsidian11.ItemView {
       return initialCount;
     })()`);
     if (!options.silent) {
-      new import_obsidian11.Notice(
+      new import_obsidian12.Notice(
         restored > 0 ? `Restored ${restored} form field(s).${watchNextSteps ? " Matching fields in later form steps will also be restored when they appear." : ""}` : "No matching fields were found for the saved form values."
       );
     }
@@ -4546,7 +4622,7 @@ var BrowserView = class _BrowserView extends import_obsidian11.ItemView {
         try {
           this.plugin.app.workspace.moveLeafToPopout(this.leaf);
         } catch {
-          new import_obsidian11.Notice("This Obsidian build cannot move the tab to a new window.");
+          new import_obsidian12.Notice("This Obsidian build cannot move the tab to a new window.");
         }
       })
     );
@@ -4627,7 +4703,7 @@ var BrowserView = class _BrowserView extends import_obsidian11.ItemView {
     });
     this.reloadButtonEl.addEventListener("contextmenu", (event) => {
       event.preventDefault();
-      const menu = new import_obsidian11.Menu();
+      const menu = new import_obsidian12.Menu();
       menu.addItem((item) => item.setTitle("Reload").setIcon("rotate-cw").onClick(() => this.reload()));
       menu.addItem((item) => item.setTitle("Hard reload").onClick(() => this.hardReload()));
       menu.addItem((item) => item.setTitle("Stop loading").onClick(() => this.stopLoading()));
@@ -4689,7 +4765,7 @@ var BrowserView = class _BrowserView extends import_obsidian11.ItemView {
       cls: "ubc-toolbar-button clickable-icon",
       attr: { "aria-label": label, title: label }
     });
-    (0, import_obsidian11.setIcon)(button, icon);
+    (0, import_obsidian12.setIcon)(button, icon);
     button.addEventListener("click", callback);
     return button;
   }
@@ -4716,14 +4792,14 @@ var BrowserView = class _BrowserView extends import_obsidian11.ItemView {
     }
     if (this.reloadButtonEl) {
       const loading = status === "waiting" || status === "loading";
-      (0, import_obsidian11.setIcon)(this.reloadButtonEl, loading ? "x" : "rotate-cw");
+      (0, import_obsidian12.setIcon)(this.reloadButtonEl, loading ? "x" : "rotate-cw");
       const actionLabel = loading ? "Stop loading" : "Reload";
       this.reloadButtonEl.setAttribute("aria-label", actionLabel);
       this.reloadButtonEl.title = actionLabel;
     }
   }
   showToolbarMoreMenu(event) {
-    const menu = new import_obsidian11.Menu();
+    const menu = new import_obsidian12.Menu();
     menu.addItem((item) => item.setTitle("Home").setIcon("home").onClick(() => this.showInternal("home")));
     menu.addItem((item) => item.setTitle("History").setIcon("history").onClick(() => this.showInternal("history")));
     menu.addItem((item) => item.setTitle("Bookmarks").setIcon("book-open").onClick(() => this.showInternal("bookmarks")));
@@ -4896,7 +4972,7 @@ ${item.url}` }
     });
     this.plugin.core.scheduleSave();
     this.refreshBookmarks();
-    new import_obsidian11.Notice(result.bookmarked ? "Bookmarked." : "Bookmark removed.");
+    new import_obsidian12.Notice(result.bookmarked ? "Bookmarked." : "Bookmark removed.");
   }
   favoriteCurrentPage() {
     if (!this.currentUrlValue || this.currentUrlValue.startsWith("browser://")) return;
@@ -4909,12 +4985,12 @@ ${item.url}` }
     this.plugin.core.bookmarks.setFavorite(bookmark.id, true);
     this.plugin.core.scheduleSave();
     this.refreshBookmarks();
-    new import_obsidian11.Notice("Added to favorites.");
+    new import_obsidian12.Notice("Added to favorites.");
   }
   updateBookmarkButton() {
     if (!this.bookmarkButtonEl) return;
     const bookmark = !this.currentUrlValue.startsWith("browser://") ? this.plugin.core.bookmarks.findByUrl(this.currentUrlValue) : void 0;
-    (0, import_obsidian11.setIcon)(this.bookmarkButtonEl, bookmark ? "bookmark-check" : "bookmark");
+    (0, import_obsidian12.setIcon)(this.bookmarkButtonEl, bookmark ? "bookmark-check" : "bookmark");
     const label = bookmark ? "Remove bookmark" : "Bookmark page";
     this.bookmarkButtonEl.setAttribute("aria-label", label);
     this.bookmarkButtonEl.title = label;
@@ -5234,7 +5310,7 @@ ${item.url}` }
       if (this.formRecoveryWatchEnabled) {
         await this.restoreFormValues({ silent: true, watchNextSteps: true });
       } else {
-        new import_obsidian11.Notice("Saved form values are available for this page.");
+        new import_obsidian12.Notice("Saved form values are available for this page.");
       }
     }
     if (this.checkpointTimer === void 0) {
@@ -5331,7 +5407,7 @@ ${item.url}` }
       this.plugin.scheduleSessionCheckpoint();
       const preserving = this.manualRetention === "preserve";
       retention.setText(preserving ? "Use normal recovery retention" : "Keep recovery data");
-      new import_obsidian11.Notice(
+      new import_obsidian12.Notice(
         preserving ? "Detailed recovery data for this tab will be kept until you remove it." : "Detailed recovery data for this tab will use normal retention again."
       );
     });
@@ -5345,7 +5421,7 @@ ${item.url}` }
     if (!webview || !this.restoredFromLeafId) return;
     const capsule = this.plugin.core.restore.get(this.restoredFromLeafId);
     if (!capsule || !await this.navigationHistoryAdapter.restore(webview, capsule)) {
-      new import_obsidian11.Notice("Detailed tab recovery is not currently available; the page can still be reopened normally.");
+      new import_obsidian12.Notice("Detailed tab recovery is not currently available; the page can still be reopened normally.");
       return;
     }
     this.setNavigationStatus("restored", "Restored tab state");
@@ -5586,7 +5662,7 @@ ${item.url}` }
       const target = event.target;
       if (target instanceof HTMLElement && target.closest("button, input, a")) return;
       event.preventDefault();
-      const menu = new import_obsidian11.Menu();
+      const menu = new import_obsidian12.Menu();
       menu.addItem((item) => item.setTitle("New browser tab").setIcon("plus").onClick(() => void this.plugin.openBrowser()));
       for (const container of this.plugin.core.containers.list()) {
         menu.addItem((item) => item.setTitle("New tab in " + container.name).setIcon("box").onClick(() => void this.plugin.openBrowser({ url: "browser://home", containerId: container.id })));
@@ -5723,7 +5799,7 @@ ${item.url}` }
         button.addEventListener("click", () => this.plugin.restoreLeaf(leaf.id));
         button.addEventListener("contextmenu", (event) => {
           event.preventDefault();
-          const menu = new import_obsidian11.Menu();
+          const menu = new import_obsidian12.Menu();
           menu.addItem((item) => item.setTitle("Restore").setIcon("rotate-ccw").onClick(() => this.plugin.restoreLeaf(leaf.id)));
           for (const container of this.plugin.core.containers.list()) {
             menu.addItem(
@@ -5770,7 +5846,7 @@ ${item.url}` }
       button.addEventListener("click", () => void this.openVaultHomeFile(file.path));
       button.addEventListener("contextmenu", (event) => {
         event.preventDefault();
-        const menu = new import_obsidian11.Menu();
+        const menu = new import_obsidian12.Menu();
         menu.addItem(
           (item) => item.setTitle("Open").setIcon("file").onClick(() => void this.openVaultHomeFile(file.path))
         );
@@ -5790,12 +5866,12 @@ ${item.url}` }
       const opened = await this.plugin.homeAdapter.openFile(this.leaf, path, newTab);
       if (!opened) {
         if (!newTab) this.closeReasonOverride = void 0;
-        new import_obsidian11.Notice("That file is no longer available.");
+        new import_obsidian12.Notice("That file is no longer available.");
       }
     } catch (error) {
       if (!newTab) this.closeReasonOverride = void 0;
       console.error("Unified Browser Core: failed to open Home file", error);
-      new import_obsidian11.Notice("Could not open that file.");
+      new import_obsidian12.Notice("Could not open that file.");
     }
   }
   renderBookmarks() {
@@ -5827,6 +5903,13 @@ ${item.url}` }
     importObsidian.addEventListener("click", () => {
       void (async () => {
         await this.plugin.importObsidianBookmarks();
+        this.showInternal("bookmarks", false);
+      })();
+    });
+    const importWebViewer = actions.createEl("button", { text: "Import Web viewer Bookmarks" });
+    importWebViewer.addEventListener("click", () => {
+      void (async () => {
+        await this.plugin.importWebViewerBookmarks();
         this.showInternal("bookmarks", false);
       })();
     });
@@ -5928,7 +6011,7 @@ ${item.url}` }
             "aria-expanded": String(!collapsed)
           }
         });
-        (0, import_obsidian11.setIcon)(toggle, collapsed ? "chevron-right" : "chevron-down");
+        (0, import_obsidian12.setIcon)(toggle, collapsed ? "chevron-right" : "chevron-down");
         const title = row.createEl("button", {
           cls: "ubc-bookmark-folder-title",
           text: item.title,
@@ -5981,7 +6064,7 @@ ${item.url}` }
         title: bookmark.favorite ? "Remove from favorites" : "Add to favorites"
       }
     });
-    (0, import_obsidian11.setIcon)(button, "star");
+    (0, import_obsidian12.setIcon)(button, "star");
     button.toggleClass("is-active", bookmark.favorite);
     button.addEventListener("click", () => {
       this.plugin.core.bookmarks.setFavorite(bookmark.id, !bookmark.favorite);
@@ -6159,6 +6242,7 @@ ${item.url}` }
     render();
   }
   openWebTargetFromPointer(url, event) {
+    url = resolveBookmarkUrl(url, this.plugin.app);
     const modifiedTab = event.metaKey || event.ctrlKey || event.button === 1;
     if (event.shiftKey && !modifiedTab) {
       void this.plugin.openBrowser({ url, placement: "window" });
@@ -6174,7 +6258,7 @@ ${item.url}` }
     this.navigate(url);
   }
   showHistoryDayMenu(day, dayNodes, event, filterDay, refresh) {
-    const menu = new import_obsidian11.Menu();
+    const menu = new import_obsidian12.Menu();
     const navigationNodes = dayNodes.filter((node) => node.kind === "navigation");
     const branchIds = [...new Set(navigationNodes.map((node) => node.branchId))];
     menu.addItem((item) => item.setTitle("Expand all alternate paths").onClick(() => {
@@ -6209,7 +6293,7 @@ ${item.url}` }
     const navigationNodes = leafNodes.filter((node) => node.kind === "navigation");
     const mainBranch = this.plugin.core.history.currentBranchForLeaf(leafId) ?? navigationNodes.at(-1)?.branchId;
     const mainNodes = mainBranch ? this.plugin.core.history.navigationNodesForBranch(mainBranch) : navigationNodes;
-    const menu = new import_obsidian11.Menu();
+    const menu = new import_obsidian12.Menu();
     if (record?.lastUrl) {
       menu.addItem((item) => item.setTitle("Restore tab").setIcon("rotate-ccw").onClick(() => void this.plugin.restoreLeaf(leafId)));
       const originalContainerExists = Boolean(this.plugin.core.containers.find(record.containerId));
@@ -6266,12 +6350,12 @@ ${item.url}` }
         row.addEventListener("contextmenu", (event) => {
           event.preventDefault();
           const check = this.plugin.core.history.canRemoveTombstone(node.id);
-          const menu = new import_obsidian11.Menu();
+          const menu = new import_obsidian12.Menu();
           menu.addItem(
             (item) => item.setTitle("Remove deleted entry marker").setIcon("trash").setDisabled(!check.ok).onClick(() => {
               const result = this.plugin.core.history.removeTombstone(node.id);
               if (!result.ok) {
-                new import_obsidian11.Notice(result.reason || "This deleted entry marker cannot be removed.");
+                new import_obsidian12.Notice(result.reason || "This deleted entry marker cannot be removed.");
                 return;
               }
               this.plugin.core.scheduleSave();
@@ -6305,7 +6389,7 @@ ${item.url}` }
           event.preventDefault();
           const branchNodes = this.plugin.core.history.navigationNodesForBranch(node.branchId);
           const latest = branchNodes.at(-1);
-          const menu = new import_obsidian11.Menu();
+          const menu = new import_obsidian12.Menu();
           menu.addItem((item) => item.setTitle("Show alternate path").onClick(() => {
             this.expandedHistoryBranches.add(node.branchId);
             this.showInternal("history");
@@ -6362,7 +6446,7 @@ ${item.url}` }
       }
       row.addEventListener("contextmenu", (event) => {
         event.preventDefault();
-        const menu = new import_obsidian11.Menu();
+        const menu = new import_obsidian12.Menu();
         menu.addItem((item) => item.setTitle("Open").onClick(() => this.navigate(node.url)));
         menu.addItem((item) => item.setTitle("Open in new tab").onClick(() => this.plugin.openBrowser({ url: node.url, containerId: node.containerId })));
         for (const container of this.plugin.core.containers.list()) {
@@ -6430,7 +6514,7 @@ ${item.url}` }
           detail.createSpan({ text });
           detail.addEventListener("contextmenu", (event) => {
             event.preventDefault();
-            const menu = new import_obsidian11.Menu();
+            const menu = new import_obsidian12.Menu();
             menu.addItem((item) => item.setTitle("Copy event details").setIcon("copy").onClick(() => {
               void navigator.clipboard.writeText(JSON.stringify(residual, null, 2));
             }));
@@ -6461,7 +6545,7 @@ ${item.url}` }
   showContainerMenuAt(position) {
     const mode = this.plugin.core.settings().containerMode;
     if (mode === "off") return;
-    const menu = new import_obsidian11.Menu();
+    const menu = new import_obsidian12.Menu();
     menu.addItem(
       (item) => item.setTitle("Open new tab in this container").setIcon("plus").onClick(() => void this.plugin.openBrowser({ url: "browser://home", containerId: this.containerId }))
     );
@@ -6525,7 +6609,7 @@ ${item.url}` }
           this.plugin.core.scheduleSave();
           this.plugin.scheduleSessionCheckpoint();
           this.updateContainerIndicator();
-          new import_obsidian11.Notice("Forgot the site default container for " + assignment.originPattern);
+          new import_obsidian12.Notice("Forgot the site default container for " + assignment.originPattern);
         }));
       }
     } else {
@@ -6543,7 +6627,7 @@ ${item.url}` }
     this.plugin.core.scheduleSave();
     this.plugin.scheduleSessionCheckpoint();
     this.updateContainerIndicator();
-    new import_obsidian11.Notice(`Always open ${hostname} in ${this.plugin.core.containers.nameFor(containerId)}.`);
+    new import_obsidian12.Notice(`Always open ${hostname} in ${this.plugin.core.containers.nameFor(containerId)}.`);
   }
   updateContainerIndicator() {
     if (!this.containerButtonEl) return;
@@ -6551,7 +6635,7 @@ ${item.url}` }
     this.containerButtonEl.toggleClass("is-hidden", mode === "off");
     if (mode === "off") return;
     const container = this.plugin.core.containers.get(this.containerId);
-    (0, import_obsidian11.setIcon)(this.containerButtonEl, container.icon || "box");
+    (0, import_obsidian12.setIcon)(this.containerButtonEl, container.icon || "box");
     const routing = this.plugin.core.containers.routingStatus(
       this.currentUrlValue,
       this.containerId,
@@ -6577,7 +6661,7 @@ ${item.url}` }
     this.permissionButtonEl.title = summary;
   }
   showPermissionMenu(event) {
-    const menu = new import_obsidian11.Menu();
+    const menu = new import_obsidian12.Menu();
     const origin = this.currentOrigin();
     if (!origin) {
       menu.addItem((item) => item.setTitle("Site permissions are only available for web pages").setDisabled(true));
@@ -6625,7 +6709,7 @@ ${item.url}` }
     }
   }
   showNavigationHistoryMenu(direction, event) {
-    const menu = new import_obsidian11.Menu();
+    const menu = new import_obsidian12.Menu();
     const transientIndices = [];
     if (direction < 0) {
       for (let index = this.transientIndex - 1; index >= 0 && transientIndices.length < 12; index--) {
@@ -6704,7 +6788,7 @@ ${item.url}` }
     }
   }
   showAddressMenu(event) {
-    const menu = new import_obsidian11.Menu();
+    const menu = new import_obsidian12.Menu();
     const start = this.addressEl.selectionStart ?? 0;
     const end = this.addressEl.selectionEnd ?? start;
     const selectionStart = Math.min(start, end);
@@ -6956,13 +7040,13 @@ function residualLabel(kind) {
 }
 
 // src/ui/permission-prompt.ts
-var import_obsidian12 = require("obsidian");
+var import_obsidian13 = require("obsidian");
 function promptPermission(app, origin, permission) {
   return new Promise((resolve) => {
     new PermissionPromptModal(app, origin, permission, resolve).open();
   });
 }
-var PermissionPromptModal = class extends import_obsidian12.Modal {
+var PermissionPromptModal = class extends import_obsidian13.Modal {
   constructor(app, origin, permission, resolve) {
     super(app);
     this.origin = origin;
@@ -6999,8 +7083,8 @@ var PermissionPromptModal = class extends import_obsidian12.Modal {
 };
 
 // src/ui/tab-search-modal.ts
-var import_obsidian13 = require("obsidian");
-var TabSearchModal = class extends import_obsidian13.FuzzySuggestModal {
+var import_obsidian14 = require("obsidian");
+var TabSearchModal = class extends import_obsidian14.FuzzySuggestModal {
   constructor(app, plugin) {
     super(app);
     this.plugin = plugin;
@@ -7098,14 +7182,14 @@ var TabSearchModal = class extends import_obsidian13.FuzzySuggestModal {
       event.stopPropagation();
       const { leaf, title, url } = match.item;
       const view = leaf.view instanceof BrowserView ? leaf.view : void 0;
-      const menu = new import_obsidian13.Menu();
+      const menu = new import_obsidian14.Menu();
       menu.addItem((item) => item.setTitle("Switch to tab").setIcon("mouse-pointer-click").onClick(() => this.plugin.app.workspace.revealLeaf(leaf)));
       menu.addItem((item) => item.setTitle(match.item.pinned ? "Unpin" : "Pin").setIcon("pin").onClick(() => leaf.setPinned(!match.item.pinned)));
       menu.addItem((item) => item.setTitle("Move to new window").setIcon("picture-in-picture").onClick(() => {
         try {
           this.plugin.app.workspace.moveLeafToPopout(leaf);
         } catch {
-          new import_obsidian13.Notice("This Obsidian build cannot move the tab to a new window.");
+          new import_obsidian14.Notice("This Obsidian build cannot move the tab to a new window.");
         }
       }));
       if (view) {
@@ -7337,7 +7421,7 @@ function openDb() {
 }
 
 // src/main.ts
-var UnifiedBrowserCorePlugin = class extends import_obsidian14.Plugin {
+var UnifiedBrowserCorePlugin = class extends import_obsidian15.Plugin {
   core;
   api;
   permissionAdapter = new ElectronPermissionAdapter();
@@ -7350,6 +7434,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian14.Plugin {
   commandAdapter = new ObsidianCommandAdapter();
   homeAdapter;
   bookmarksAdapter;
+  webViewerBookmarksAdapter;
   persistence;
   unloading = false;
   sessionCheckpointTimer;
@@ -7386,6 +7471,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian14.Plugin {
   async onload() {
     this.homeAdapter = new ObsidianHomeAdapter(this.app);
     this.bookmarksAdapter = new ObsidianBookmarksAdapter(this.app);
+    this.webViewerBookmarksAdapter = new WebViewerBookmarksAdapter(this.app);
     this.registerDomEvent(window, "beforeunload", () => this.prepareForShutdown());
     this.register(() => this.prepareForShutdown());
     const persistenceScope = this.app.appId || this.app.vault.getName();
@@ -7480,12 +7566,17 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian14.Plugin {
       callback: () => void this.importObsidianBookmarks()
     });
     this.addCommand({
+      id: "import-webviewer-bookmarks",
+      name: "Import bookmarks from Web viewer Bookmarks",
+      callback: () => void this.importWebViewerBookmarks()
+    });
+    this.addCommand({
       id: "reopen-closed-tab",
       name: "Reopen last closed browser tab",
       callback: () => {
         const closed = this.core.history.recentlyClosed(1)[0];
         if (closed) void this.restoreLeaf(closed.id);
-        else new import_obsidian14.Notice("No recently closed browser tab.");
+        else new import_obsidian15.Notice("No recently closed browser tab.");
       }
     });
     this.addCommand({
@@ -7795,7 +7886,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian14.Plugin {
   async restoreLeaf(oldLeafId, options = {}) {
     const record = this.core.state.history.leaves[oldLeafId];
     if (!record?.lastUrl) {
-      new import_obsidian14.Notice("This tab has no restorable URL.");
+      new import_obsidian15.Notice("This tab has no restorable URL.");
       return;
     }
     const pinned = options.pinned ?? record.pinned;
@@ -7851,13 +7942,13 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian14.Plugin {
       return leaf.view instanceof BrowserView && leaf.view.getState().containerId === containerId;
     });
     if (hasLiveLeaf) {
-      new import_obsidian14.Notice("Close or reopen tabs using this container before deleting it.");
+      new import_obsidian15.Notice("Close or reopen tabs using this container before deleting it.");
       return false;
     }
     this.permissionAdapter.release(containerId);
     const cleared = await this.sessionDataAdapter.clearPartition(container.partition);
     if (!cleared) {
-      new import_obsidian14.Notice("Could not clear this container's browsing data, so the container was not deleted.");
+      new import_obsidian15.Notice("Could not clear this container's browsing data, so the container was not deleted.");
       return false;
     }
     this.core.permissions.resetContainer(containerId);
@@ -7865,7 +7956,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian14.Plugin {
     const removed = this.core.containers.remove(containerId);
     if (removed) {
       this.core.scheduleSave();
-      new import_obsidian14.Notice(`Deleted container \u201C${container.name}\u201D and cleared its browsing data.`);
+      new import_obsidian15.Notice(`Deleted container \u201C${container.name}\u201D and cleared its browsing data.`);
     }
     return removed;
   }
@@ -7919,7 +8010,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian14.Plugin {
     if (!container) return false;
     const cleared = await this.sessionDataAdapter.clearPartition(container.partition);
     if (!cleared) {
-      new import_obsidian14.Notice(`Could not clear browsing data for \u201C${container.name}\u201D.`);
+      new import_obsidian15.Notice(`Could not clear browsing data for \u201C${container.name}\u201D.`);
       return false;
     }
     this.core.permissions.resetContainer(containerId);
@@ -7928,7 +8019,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian14.Plugin {
       if (!(leaf.view instanceof BrowserView)) continue;
       if (leaf.view.getState().containerId === containerId) leaf.view.refreshPermissionIndicator();
     }
-    new import_obsidian14.Notice(`Cleared browsing data and saved permissions for \u201C${container.name}\u201D.`);
+    new import_obsidian15.Notice(`Cleared browsing data and saved permissions for \u201C${container.name}\u201D.`);
     return true;
   }
   captureSessionCheckpoint() {
@@ -7953,12 +8044,12 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian14.Plugin {
   async restorePreviousSession(notify) {
     const checkpoint = this.previousSessionCheckpoint;
     if (!checkpoint.leaves.length) {
-      if (notify) new import_obsidian14.Notice("No previous browser session is available.");
+      if (notify) new import_obsidian15.Notice("No previous browser session is available.");
       return;
     }
     const leavesToRestore = this.pendingPreviousSessionLeaves();
     if (!leavesToRestore.length) {
-      if (notify) new import_obsidian14.Notice("The previous browser session is already restored.");
+      if (notify) new import_obsidian15.Notice("The previous browser session is already restored.");
       return;
     }
     for (const saved of leavesToRestore) {
@@ -7978,7 +8069,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian14.Plugin {
       });
       leaf.setPinned(saved.pinned);
     }
-    if (notify) new import_obsidian14.Notice(`Restored ${leavesToRestore.length} browser tab(s).`);
+    if (notify) new import_obsidian15.Notice(`Restored ${leavesToRestore.length} browser tab(s).`);
   }
   pendingPreviousSessionLeaves() {
     const liveRepresentations = this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE).flatMap((leaf) => {
@@ -8034,13 +8125,13 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian14.Plugin {
   }
   openSettings() {
     if (!this.settingsAdapter.openPluginSettings(this.app, this.manifest.id)) {
-      new import_obsidian14.Notice("Open Obsidian Settings \u2192 Community plugins \u2192 Unified Browser Core.");
+      new import_obsidian15.Notice("Open Obsidian Settings \u2192 Community plugins \u2192 Unified Browser Core.");
     }
   }
   async importObsidianBookmarks(notify = true) {
     const snapshot = await this.bookmarksAdapter.scan();
     if (!snapshot.available) {
-      if (notify) new import_obsidian14.Notice("Obsidian Bookmarks is unavailable or has no readable bookmark data.");
+      if (notify) new import_obsidian15.Notice("Obsidian Bookmarks is unavailable or has no readable bookmark data.");
       return { available: false, added: 0, reused: 0, foldersCreated: 0, skippedNonWeb: 0 };
     }
     const imported = this.core.bookmarks.importWebBookmarks(snapshot.entries);
@@ -8055,9 +8146,30 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian14.Plugin {
         imported.foldersCreated ? `${imported.foldersCreated} folder${imported.foldersCreated === 1 ? "" : "s"} created` : "",
         snapshot.skippedNonWeb ? `${snapshot.skippedNonWeb} non-web item${snapshot.skippedNonWeb === 1 ? "" : "s"} left in Obsidian Bookmarks` : ""
       ].filter(Boolean);
-      new import_obsidian14.Notice(parts.join(" \xB7 "));
+      new import_obsidian15.Notice(parts.join(" \xB7 "));
     }
     return { available: true, ...imported, skippedNonWeb: snapshot.skippedNonWeb };
+  }
+  async importWebViewerBookmarks(notify = true) {
+    const snapshot = await this.webViewerBookmarksAdapter.scan();
+    if (!snapshot.available) {
+      if (notify) new import_obsidian15.Notice("Web viewer Bookmarks has no readable data in this vault.");
+      return { available: false, added: 0, reused: 0, skippedInvalid: 0 };
+    }
+    const imported = this.core.bookmarks.importWebBookmarks(snapshot.entries);
+    if (imported.added) {
+      this.core.scheduleSave();
+      this.refreshBrowserViews();
+    }
+    if (notify) {
+      const parts = [
+        imported.added ? `Imported ${imported.added} bookmark${imported.added === 1 ? "" : "s"}` : "No new bookmarks",
+        imported.reused ? `${imported.reused} already present` : "",
+        snapshot.skippedInvalid ? `${snapshot.skippedInvalid} invalid item${snapshot.skippedInvalid === 1 ? "" : "s"} skipped` : ""
+      ].filter(Boolean);
+      new import_obsidian15.Notice(parts.join(" \xB7 "));
+    }
+    return { available: true, added: imported.added, reused: imported.reused, skippedInvalid: snapshot.skippedInvalid };
   }
   async openFromApi(url, options = {}) {
     const disposition = options.disposition ?? "new-tab";
@@ -8147,11 +8259,11 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian14.Plugin {
   }
   openQuickSwitcher() {
     if (!this.commandAdapter.openQuickSwitcher(this.app)) {
-      new import_obsidian14.Notice("Obsidian Quick Switcher is not available.");
+      new import_obsidian15.Notice("Obsidian Quick Switcher is not available.");
     }
   }
   showTabStripMenu(event) {
-    const menu = new import_obsidian14.Menu();
+    const menu = new import_obsidian15.Menu();
     menu.addItem((item) => item.setTitle("New browser tab").setIcon("plus").onClick(() => void this.openBrowser()));
     for (const container of this.core.containers.list()) {
       menu.addItem(

@@ -381,6 +381,13 @@
   object-fit: contain;
 }
 
+.ubc-favorite-visual svg,
+.ubc-bookmark-kind svg,
+.ubc-bookmark-editor-preview-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
 .ubc-content {
   position: relative;
   flex: 1 1 auto;

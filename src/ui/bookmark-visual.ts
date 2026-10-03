@@ -24,6 +24,12 @@ export function renderBookmarkVisual(
     return host;
   }
 
+  if (bookmark.visualKind === "icon") {
+    setIcon(host, bookmark.visualValue?.trim() || "bookmark");
+    if (!host.firstElementChild) fallback();
+    return host;
+  }
+
   const source = bookmark.visualKind === "image"
     ? resolveCustomImage(bookmark.visualValue, app)
     : bookmark.faviconUrl?.trim() || fallbackFaviconUrl(bookmark.url);

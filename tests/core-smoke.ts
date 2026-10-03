@@ -23,6 +23,7 @@ import { ElectronContextMenuAdapter } from "../src/adapters/electron-context-men
 import { resolveGuestWebContents } from "../src/adapters/electron-compat";
 import { cloneSessionCheckpoint, pendingSessionLeaves } from "../src/core/session-restore";
 import { normalizeObsidianBookmarkItems } from "../src/adapters/obsidian-bookmarks";
+import { WebViewerBookmarksAdapter, normalizeWebViewerBookmarks } from "../src/adapters/webviewer-bookmarks";
 
 (globalThis as typeof globalThis & { window?: typeof globalThis }).window = globalThis;
 
@@ -802,6 +803,44 @@ assert.equal(importStore.findByUrl("https://openai.com")?.parentId !== null, tru
 assert.equal(importStore.folders().length, 2);
 const secondImport = importStore.importWebBookmarks(obsidianBookmarkSnapshot.entries);
 assert.deepEqual(secondImport, { added: 0, reused: 2, foldersCreated: 0 }, "Obsidian bookmark import must be idempotent");
+
+const webViewerSnapshot = normalizeWebViewerBookmarks({
+  bookmarks: [
+    { url: "https://example.com/search?q={{selection}}", title: "Search", ribbon: true, lucide: "search" },
+    { url: "https://docs.example/", title: "", ribbon: false, lucide: "" },
+    { url: "file:///local", title: "Local" },
+    { url: "not a URL", title: "Invalid" },
+  ],
+});
+assert.equal(webViewerSnapshot.available, true);
+assert.equal(webViewerSnapshot.skippedInvalid, 2);
+assert.deepEqual(webViewerSnapshot.entries.map(({ title, favorite, visualKind, visualValue }) => ({
+  title, favorite, visualKind, visualValue,
+})), [
+  { title: "Search", favorite: true, visualKind: "icon", visualValue: "search" },
+  { title: "docs.example", favorite: false, visualKind: "icon", visualValue: "bookmark" },
+]);
+const webViewerStore = new BookmarkStore(BrowserCore.normalize(null).bookmarks);
+assert.deepEqual(webViewerStore.importWebBookmarks(webViewerSnapshot.entries), { added: 2, reused: 0, foldersCreated: 0 });
+assert.equal(webViewerStore.findByUrl("https://example.com/search?q={{selection}}")?.favorite, true);
+assert.equal(webViewerStore.findByUrl("https://example.com/search?q={{selection}}")?.visualValue, "search");
+assert.deepEqual(webViewerStore.importWebBookmarks(webViewerSnapshot.entries), { added: 0, reused: 2, foldersCreated: 0 });
+assert.equal(normalizeWebViewerBookmarks({ bookmarks: "invalid" }).available, false);
+let webViewerDataPath = "";
+const webViewerAdapter = new WebViewerBookmarksAdapter({
+  vault: {
+    configDir: ".custom-obsidian",
+    adapter: {
+      exists: async (path: string) => {
+        webViewerDataPath = path;
+        return true;
+      },
+      read: async () => JSON.stringify({ bookmarks: [{ url: "https://example.com", title: "Example" }] }),
+    },
+  },
+} as any);
+assert.equal((await webViewerAdapter.scan()).entries.length, 1);
+assert.equal(webViewerDataPath, ".custom-obsidian/plugins/webviewer-bookmarks/data.json");
 
 const legacyBookmarkState = BrowserCore.normalize({
   settings: { showBookmarkBar: false } as any,

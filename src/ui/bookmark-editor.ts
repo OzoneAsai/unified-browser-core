@@ -70,6 +70,7 @@ class BookmarkEditorModal extends Modal {
     visualKind.createEl("option", { text: "Website favicon", value: "favicon" });
     visualKind.createEl("option", { text: "Custom image", value: "image" });
     visualKind.createEl("option", { text: "Custom text", value: "text" });
+    visualKind.createEl("option", { text: "Lucide icon", value: "icon" });
     visualKind.value = this.options.visualKind ?? "favicon";
 
     const visualValueField = this.contentEl.createEl("label", { cls: "ubc-prompt-field" });
@@ -103,7 +104,9 @@ class BookmarkEditorModal extends Modal {
     const syncVisualField = () => {
       const kind = visualKind.value as BookmarkVisualKind;
       visualValueField.toggleClass("is-hidden", kind === "favicon");
-      visualValue.placeholder = kind === "image" ? "https://… or Images/icon.png" : "AI, G, ★, etc.";
+      visualValue.placeholder = kind === "image"
+        ? "https://… or Images/icon.png"
+        : kind === "icon" ? "bookmark, globe, link, etc." : "AI, G, ★, etc.";
       renderPreview();
     };
     visualKind.addEventListener("change", syncVisualField);

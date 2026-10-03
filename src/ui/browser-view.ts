@@ -40,6 +40,7 @@ import { editBookmark } from "./bookmark-editor";
 import { promptText } from "./text-prompt";
 import { permissionDecisionLabel, permissionLabel } from "./permission-label";
 import { fallbackFaviconUrl, renderBookmarkVisual } from "./bookmark-visual";
+import { resolveBookmarkUrl } from "../bookmarks/bookmark-url";
 
 export const BROWSER_VIEW_TYPE = "unified-browser-core-view";
 
@@ -362,14 +363,16 @@ export class BrowserView extends ItemView {
     if (useCurrent) {
       const first = bookmarks[0];
       if (first) {
-        if (containerId && containerId !== this.containerId) void this.plugin.openBrowser({ url: first.url, containerId });
-        else this.navigate(first.url);
+        if (containerId && containerId !== this.containerId) {
+          void this.plugin.openBrowser({ url: resolveBookmarkUrl(first.url, this.plugin.app), containerId });
+        }
+        else this.navigate(resolveBookmarkUrl(first.url, this.plugin.app));
         start = 1;
       }
     }
     for (let index = start; index < bookmarks.length; index++) {
       const bookmark = bookmarks[index];
-      if (bookmark) void this.plugin.openBrowser({ url: bookmark.url, containerId });
+      if (bookmark) void this.plugin.openBrowser({ url: resolveBookmarkUrl(bookmark.url, this.plugin.app), containerId });
     }
   }
 
@@ -2191,6 +2194,13 @@ export class BrowserView extends ItemView {
         this.showInternal("bookmarks", false);
       })();
     });
+    const importWebViewer = actions.createEl("button", { text: "Import Web viewer Bookmarks" });
+    importWebViewer.addEventListener("click", () => {
+      void (async () => {
+        await this.plugin.importWebViewerBookmarks();
+        this.showInternal("bookmarks", false);
+      })();
+    });
     page.createEl("p", {
       cls: "ubc-surface-description",
       text: "Organize saved pages into folders, or search by title, URL, and folder.",
@@ -2555,6 +2565,7 @@ export class BrowserView extends ItemView {
   }
 
   private openWebTargetFromPointer(url: string, event: MouseEvent): void {
+    url = resolveBookmarkUrl(url, this.plugin.app);
     const modifiedTab = event.metaKey || event.ctrlKey || event.button === 1;
     if (event.shiftKey && !modifiedTab) {
       void this.plugin.openBrowser({ url, placement: "window" });

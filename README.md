@@ -9,11 +9,17 @@ Unified Browser Core is a desktop-only browser plugin for [Obsidian](https://obs
 - Open web pages in browser views inside the Obsidian workspace.
 - Organize browsing into containers with separate persistent sessions.
 - Track navigation as graph history and restore closed tabs with their available state.
-- Save and organize bookmarks, including importing bookmarks from Obsidian's Bookmarks core plugin.
+- Save and organize bookmarks, including importing from Obsidian's Bookmarks core plugin and Web viewer Bookmarks.
 - Restore tabs and windows after restarting Obsidian.
 - Handle browser permissions and popup requests through Browser Core.
 - Optionally recover form contents for sites you explicitly allow. Form recovery is off by default and excludes password, payment, one-time-code, WebAuthn, file, and hidden fields.
 - Expose a public API for other Obsidian plugins.
+
+## Import from Web viewer Bookmarks
+
+In a vault that has Web viewer Bookmarks installed, open Unified Browser Core's Bookmarks page and choose **Import Web viewer Bookmarks**, or run **Import bookmarks from Web viewer Bookmarks** from the command palette. UBC reads that plugin's `data.json` from the same vault and leaves it unchanged. Repeating the import skips URLs already in UBC.
+
+The import copies web URLs, titles, and Lucide icons. Bookmarks shown in the source plugin's ribbon become UBC favorites. URLs containing `{{selection}}` expand the selected text from an active Markdown editor when opened. Per-bookmark commands and the source plugin's opening mode are not copied.
 
 ## Requirements
 

@@ -8,6 +8,7 @@ import { ObsidianTabStripAdapter } from "./adapters/obsidian-tab-strip";
 import { ObsidianSettingsAdapter } from "./adapters/obsidian-settings";
 import { ObsidianHomeAdapter } from "./adapters/obsidian-home";
 import { ObsidianBookmarksAdapter } from "./adapters/obsidian-bookmarks";
+import { WebViewerBookmarksAdapter } from "./adapters/webviewer-bookmarks";
 import { ObsidianCommandAdapter } from "./adapters/obsidian-commands";
 import {
   BrowserPublicApi,
@@ -59,6 +60,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
   readonly commandAdapter = new ObsidianCommandAdapter();
   homeAdapter!: ObsidianHomeAdapter;
   bookmarksAdapter!: ObsidianBookmarksAdapter;
+  webViewerBookmarksAdapter!: WebViewerBookmarksAdapter;
   private persistence!: HybridBrowserPersistence;
   private unloading = false;
   private sessionCheckpointTimer: number | undefined;
@@ -105,6 +107,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
   async onload(): Promise<void> {
     this.homeAdapter = new ObsidianHomeAdapter(this.app);
     this.bookmarksAdapter = new ObsidianBookmarksAdapter(this.app);
+    this.webViewerBookmarksAdapter = new WebViewerBookmarksAdapter(this.app);
     this.registerDomEvent(window, "beforeunload", () => this.prepareForShutdown());
     this.register(() => this.prepareForShutdown());
     const persistenceScope = ((this.app as App & { appId?: string }).appId || this.app.vault.getName());
@@ -199,6 +202,11 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       id: "import-obsidian-bookmarks",
       name: "Import web bookmarks from Obsidian Bookmarks",
       callback: () => void this.importObsidianBookmarks(),
+    });
+    this.addCommand({
+      id: "import-webviewer-bookmarks",
+      name: "Import bookmarks from Web viewer Bookmarks",
+      callback: () => void this.importWebViewerBookmarks(),
     });
     this.addCommand({
       id: "reopen-closed-tab",
@@ -855,6 +863,34 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       new Notice(parts.join(" · "));
     }
     return { available: true, ...imported, skippedNonWeb: snapshot.skippedNonWeb };
+  }
+
+  async importWebViewerBookmarks(notify = true): Promise<{
+    available: boolean;
+    added: number;
+    reused: number;
+    skippedInvalid: number;
+  }> {
+    const snapshot = await this.webViewerBookmarksAdapter.scan();
+    if (!snapshot.available) {
+      if (notify) new Notice("Web viewer Bookmarks has no readable data in this vault.");
+      return { available: false, added: 0, reused: 0, skippedInvalid: 0 };
+    }
+
+    const imported = this.core.bookmarks.importWebBookmarks(snapshot.entries);
+    if (imported.added) {
+      this.core.scheduleSave();
+      this.refreshBrowserViews();
+    }
+    if (notify) {
+      const parts = [
+        imported.added ? `Imported ${imported.added} bookmark${imported.added === 1 ? "" : "s"}` : "No new bookmarks",
+        imported.reused ? `${imported.reused} already present` : "",
+        snapshot.skippedInvalid ? `${snapshot.skippedInvalid} invalid item${snapshot.skippedInvalid === 1 ? "" : "s"} skipped` : "",
+      ].filter(Boolean);
+      new Notice(parts.join(" · "));
+    }
+    return { available: true, added: imported.added, reused: imported.reused, skippedInvalid: snapshot.skippedInvalid };
   }
 
   private async openFromApi(url: string, options: BrowserOpenOptions = {}): Promise<void> {

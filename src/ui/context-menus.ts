@@ -4,6 +4,7 @@ import type { BrowserView } from "./browser-view";
 import type { BookmarkEntry, BookmarkFolder } from "../core/model";
 import type { WebviewContextMenuParams } from "./webview-types";
 import { editBookmark } from "./bookmark-editor";
+import { resolveBookmarkUrl } from "../bookmarks/bookmark-url";
 import { pickBookmarkFolder } from "./folder-picker-modal";
 import { promptText } from "./text-prompt";
 import { buildWebContentMenuEntries } from "./web-content-menu-model";
@@ -93,15 +94,15 @@ export function showBookmarkMenu(
   event: MouseEvent,
 ): void {
   const menu = new Menu();
-  menu.addItem((item) => item.setTitle("Open").setIcon("external-link").onClick(() => view.navigate(bookmark.url)));
-  menu.addItem((item) => item.setTitle("Open in new tab").setIcon("plus").onClick(() => plugin.openBrowser({ url: bookmark.url })));
+  menu.addItem((item) => item.setTitle("Open").setIcon("external-link").onClick(() => view.navigate(resolveBookmarkUrl(bookmark.url, plugin.app))));
+  menu.addItem((item) => item.setTitle("Open in new tab").setIcon("plus").onClick(() => plugin.openBrowser({ url: resolveBookmarkUrl(bookmark.url, plugin.app) })));
   if (plugin.core.settings().containerMode !== "off") {
     for (const container of plugin.core.containers.list()) {
       menu.addItem((item) =>
         item
           .setTitle(`Open in ${container.name}`)
           .setIcon("box")
-          .onClick(() => plugin.openBrowser({ url: bookmark.url, containerId: container.id })),
+          .onClick(() => plugin.openBrowser({ url: resolveBookmarkUrl(bookmark.url, plugin.app), containerId: container.id })),
       );
     }
   }
