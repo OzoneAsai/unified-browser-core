@@ -741,7 +741,6 @@ var ManagedWebviewBackend = class {
 
 // src/adapters/obsidian-tab-strip.ts
 var ObsidianTabStripAdapter = class {
-  isReordering = false;
   dragging = false;
   pendingStrips = /* @__PURE__ */ new Set();
   scheduleStripStyle(strip) {
@@ -761,85 +760,45 @@ var ObsidianTabStripAdapter = class {
     let sourceStrip;
     let marker;
     let insertion = 0;
-    let startEvent;
-    let nativePaneDrag = false;
-    let completionFrame;
-    let dragSurface;
     const overStrip = (event) => {
       if (!sourceStrip) return false;
       const rect = sourceStrip.getBoundingClientRect();
       return event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
     };
-    const win = document.defaultView ?? window;
-    const workspace = plugin.app.workspace;
     const clear = () => {
       marker?.removeClass("ubc-drop-before", "ubc-drop-after");
       if (source) this.tabHeader(source)?.removeClass("ubc-tab-dragging");
       source = void 0;
       sourceStrip = void 0;
       marker = void 0;
-      dragSurface?.remove();
-      dragSurface = void 0;
-      startEvent = void 0;
-      nativePaneDrag = false;
       this.dragging = false;
-      this.isReordering = false;
     };
-    const finishNativeDrag = () => {
-      if (completionFrame !== void 0) return;
-      completionFrame = win.requestAnimationFrame(() => {
-        completionFrame = void 0;
-        clear();
-        plugin.app.workspace.requestSaveLayout();
-        plugin.app.workspace.trigger("layout-change");
-      });
-    };
-    plugin.register(() => {
-      if (completionFrame !== void 0) win.cancelAnimationFrame(completionFrame);
-      clear();
-    });
+    plugin.register(clear);
     plugin.registerDomEvent(document, "dragstart", (event) => {
       const target = event.target;
       const header = target.closest?.(".workspace-tab-header.ubc-browser-tab-layout");
       const strip = header?.parentElement;
-      if (!header || !strip?.hasClass("ubc-browser-tab-strip") || event.altKey || !workspace.onDragLeaf) return;
+      if (!header || !strip?.hasClass("ubc-browser-tab-strip") || event.altKey) return;
       let leaf;
       plugin.app.workspace.iterateAllLeaves((candidate) => {
         if (this.tabHeader(candidate) === header) leaf = candidate;
       });
-      if (!leaf || this.leavesInSameGroup(leaf).length < 2 || typeof leaf.parent.updateTabDisplay !== "function") return;
+      const group = leaf?.parent;
+      if (!leaf || this.leavesInSameGroup(leaf).length < 2 || typeof group?.updateTabDisplay !== "function") return;
       clear();
       source = leaf;
       sourceStrip = strip;
       insertion = this.leavesInSameGroup(leaf).indexOf(leaf);
       this.dragging = true;
-      startEvent = event;
-      dragSurface = header.ownerDocument.body.createDiv({ cls: "ubc-tab-drag-surface", attr: { "aria-hidden": "true" } });
       header.addClass("ubc-tab-dragging");
-      event.stopImmediatePropagation();
-      event.dataTransfer?.setData("application/x-ubc-tab", "reorder");
-      if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
     }, true);
     plugin.registerDomEvent(document, "dragover", (event) => {
-      if (!source || !sourceStrip || nativePaneDrag) return;
-      const rect = sourceStrip.getBoundingClientRect();
-      const outside = event.clientY < rect.top - 32 || event.clientY > rect.bottom + 32 || event.clientX < rect.left - 48 || event.clientX > rect.right + 48;
-      if (outside && startEvent && workspace.onDragLeaf) {
+      if (!source || !sourceStrip || !overStrip(event)) {
         marker?.removeClass("ubc-drop-before", "ubc-drop-after");
-        this.tabHeader(source)?.removeClass("ubc-tab-dragging");
-        nativePaneDrag = true;
-        this.isReordering = true;
-        workspace.onDragLeaf(startEvent, source);
-        return;
-      }
-      event.stopImmediatePropagation();
-      if (!overStrip(event)) {
-        marker?.removeClass("ubc-drop-before", "ubc-drop-after");
-        event.preventDefault();
-        if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
         return;
       }
       event.preventDefault();
+      event.stopPropagation();
       if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
       const others = this.leavesInSameGroup(source).filter((leaf) => leaf !== source);
       insertion = others.findIndex((leaf) => {
@@ -848,28 +807,23 @@ var ObsidianTabStripAdapter = class {
       });
       if (insertion < 0) insertion = others.length;
       marker?.removeClass("ubc-drop-before", "ubc-drop-after");
-      marker = this.tabHeader(others[Math.min(insertion, others.length - 1)]);
+      marker = others.length ? this.tabHeader(others[Math.min(insertion, others.length - 1)]) : void 0;
       marker?.addClass(insertion === others.length ? "ubc-drop-after" : "ubc-drop-before");
+      const rect = sourceStrip.getBoundingClientRect();
       if (event.clientX < rect.left + 24) sourceStrip.scrollLeft -= 16;
       else if (event.clientX > rect.right - 24) sourceStrip.scrollLeft += 16;
     }, true);
     plugin.registerDomEvent(document, "drop", (event) => {
-      if (nativePaneDrag) {
-        finishNativeDrag();
-        return;
-      }
-      if (!source || !sourceStrip) return;
-      event.stopImmediatePropagation();
-      if (!overStrip(event)) {
+      if (!source || !sourceStrip || !overStrip(event)) {
         clear();
         return;
       }
       event.preventDefault();
+      event.stopPropagation();
       const leaf = source;
       const group = leaf.parent;
       const selected = group.children[group.currentTab];
       const oldIndex = group.children.indexOf(leaf);
-      this.isReordering = true;
       try {
         if (oldIndex >= 0 && oldIndex !== insertion && group.children.length > 1) {
           group.children.splice(oldIndex, 1);
@@ -878,16 +832,12 @@ var ObsidianTabStripAdapter = class {
           group.updateTabDisplay();
         }
       } finally {
-        this.isReordering = false;
         clear();
       }
       plugin.app.workspace.requestSaveLayout();
       plugin.app.workspace.trigger("layout-change");
     }, true);
-    plugin.registerDomEvent(document, "dragend", () => {
-      if (nativePaneDrag) finishNativeDrag();
-      else clear();
-    }, true);
+    plugin.registerDomEvent(document, "dragend", clear, true);
     plugin.registerDomEvent(document, "contextmenu", (event) => {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
@@ -981,7 +931,6 @@ var ObsidianTabStripAdapter = class {
     icon.appendChild(image);
   }
   revealActiveTab(leaf) {
-    if (this.dragging) return;
     const header = this.tabHeader(leaf);
     const strip = header?.parentElement;
     if (!header || !(strip instanceof HTMLElement) || !strip.hasClass("ubc-browser-tab-strip-scroll")) return;
@@ -9281,7 +9230,6 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian16.Plugin {
     });
     this.registerEvent(
       this.app.workspace.on("layout-change", () => {
-        if (this.tabStripAdapter.isReordering) return;
         if (!this.sessionCheckpointArmed && this.app.workspace.layoutReady) {
           void this.initializeLayout();
         }
@@ -9292,7 +9240,6 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian16.Plugin {
     );
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
-        if (this.tabStripAdapter.isReordering) return;
         if (leaf) this.tabStripAdapter.revealActiveTab(leaf);
         if (this.ensureHomeTakeoverArmed() && leaf?.view.getViewType() === "empty") {
           void this.replaceEmptyLeafWithHome(leaf);

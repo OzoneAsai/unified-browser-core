@@ -133,3 +133,8 @@ Site zoom is relative to the containing Obsidian window (100% matches Surfing's 
 ### 0.2.2 pane dragging
 
 Dragging inside the tab strip reorders tabs. Moving at least 32 px above/below the strip or 48 px beyond either horizontal edge hands the gesture to Obsidian's native pane movement and split preview. Once handed over, the rest of the gesture uses native pane behavior; Alt-drag also starts native movement immediately. A transparent drag surface keeps host drag events available across Electron webviews and is removed when the gesture finishes. UBC defers its home takeover and session/style reactions until the native layout operation completes.
+
+
+### 0.2.3 drag safety
+
+Obsidian receives the original tab drag start and owns pane movement and split previews. UBC intercepts drag-over/drop only while the pointer is inside a browser tab strip and reorders the existing leaves there. The temporary full-window overlay and mid-drag call into Obsidian's private pane-drag method were removed because they could obscure native drop-target detection and cause a tab to land outside the visible workspace.

@@ -371,7 +371,6 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     });
     this.registerEvent(
       this.app.workspace.on("layout-change", () => {
-        if (this.tabStripAdapter.isReordering) return;
         if (!this.sessionCheckpointArmed && this.app.workspace.layoutReady) {
           void this.initializeLayout();
         }
@@ -382,7 +381,6 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     );
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
-        if (this.tabStripAdapter.isReordering) return;
         if (leaf) this.tabStripAdapter.revealActiveTab(leaf);
         if (this.ensureHomeTakeoverArmed() && leaf?.view.getViewType() === "empty") {
           void this.replaceEmptyLeafWithHome(leaf);
