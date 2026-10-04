@@ -1057,3 +1057,9 @@
     transition-duration: 0.001ms !important;
   }
 }
+
+/* Initial guest backing surface; page-painted colors take precedence. */
+.ubc-browser-view:not(.ubc-native-background) .ubc-web-layer,
+.ubc-browser-view:not(.ubc-native-background) .ubc-webview {
+  background: var(--ubc-initial-background, var(--background-primary));
+}

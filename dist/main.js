@@ -681,14 +681,18 @@ var ElectronContextMenuAdapter = class {
 // src/adapters/managed-webview-backend.ts
 var ManagedWebviewBackend = class {
   liveGuests = /* @__PURE__ */ new Set();
-  create(partition) {
+  policySessions = /* @__PURE__ */ new Map();
+  settings;
+  create(partition, settings) {
+    this.settings = settings ?? this.settings;
+    this.bindPolicy(partition);
     const webview = document.createElement("webview");
     webview.addClass("ubc-webview");
     webview.partition = partition;
     webview.setAttribute("allowpopups", "");
     webview.setAttribute(
       "webpreferences",
-      "contextIsolation=yes,nodeIntegration=no,sandbox=yes"
+      `contextIsolation=yes,nodeIntegration=no,sandbox=yes,autoplayPolicy=${settings?.().autoplayPolicy === "allow" ? "no-user-gesture-required" : "document-user-activation-required"}`
     );
     this.liveGuests.add(webview);
     return webview;
@@ -701,7 +705,33 @@ var ManagedWebviewBackend = class {
     }
     webview.remove();
   }
+  bindPolicy(partition) {
+    if (this.policySessions.has(partition)) return;
+    const session = resolvePartitionSession(partition);
+    if (!session?.webRequest?.onHeadersReceived) return;
+    session.webRequest.onHeadersReceived({ urls: ["http://*/*", "https://*/*"] }, (details, callback) => {
+      const ownGuest = [...this.liveGuests].some((guest) => {
+        try {
+          return guest.getWebContentsId?.() === details.webContentsId;
+        } catch {
+          return false;
+        }
+      });
+      const headers = { ...details.responseHeaders };
+      if (ownGuest && this.settings?.().blockPasskeyRequests && ["mainFrame", "subFrame"].includes(details.resourceType)) {
+        const key = Object.keys(headers).find((name) => name.toLowerCase() === "permissions-policy");
+        const existing = key ? headers[key]?.join(", ") ?? "" : "";
+        const rest = existing.split(/,(?![^()]*\))/).filter((part) => !/^\s*publickey-credentials-(get|create)\s*=/.test(part));
+        if (key) delete headers[key];
+        headers["Permissions-Policy"] = [[...rest.filter(Boolean), "publickey-credentials-get=()", "publickey-credentials-create=()"].join(", ")];
+      }
+      callback({ responseHeaders: headers });
+    });
+    this.policySessions.set(partition, session);
+  }
   dispose() {
+    for (const session of this.policySessions.values()) session.webRequest?.onHeadersReceived(null);
+    this.policySessions.clear();
     for (const webview of [...this.liveGuests]) this.destroy(webview);
   }
   activeGuestCount() {
@@ -2657,6 +2687,10 @@ var DEFAULT_SETTINGS = {
   showFavoritesBar: true,
   bookmarkBarMode: "selected",
   initialBackgroundOverride: true,
+  initialBackgroundSource: "theme",
+  initialBackgroundColor: "#ffffff",
+  autoplayPolicy: "block-audible",
+  blockPasskeyRequests: false,
   language: "auto"
 };
 var EMPTY_HISTORY = {
@@ -2890,6 +2924,18 @@ function t(source, values = {}) {
   return result.replace(/\{(\w+)\}/g, (match, key) => String(values[key] ?? match));
 }
 var ja = {
+  "No override": "\u4E0A\u66F8\u304D\u306A\u3057",
+  "Follow theme": "\u30C6\u30FC\u30DE\u306B\u5408\u308F\u305B\u308B",
+  "Custom color": "\u4EFB\u610F\u306E\u8272",
+  "Initial background color": "\u521D\u671F\u80CC\u666F\u8272",
+  "Choose the background before the site paints. The site's own colors remain in control once painted.": "\u30B5\u30A4\u30C8\u304C\u63CF\u753B\u3055\u308C\u308B\u524D\u306E\u80CC\u666F\u8272\u3092\u9078\u629E\u3057\u307E\u3059\u3002\u63CF\u753B\u5F8C\u306F\u30B5\u30A4\u30C8\u81EA\u8EAB\u306E\u8272\u304C\u512A\u5148\u3055\u308C\u307E\u3059\u3002",
+  "Playback and authentication": "\u518D\u751F\u3068\u8A8D\u8A3C",
+  "Autoplay": "\u81EA\u52D5\u518D\u751F",
+  "Block audible autoplay": "\u97F3\u58F0\u4ED8\u304D\u306E\u81EA\u52D5\u518D\u751F\u3092\u6291\u5236",
+  "Allow autoplay": "\u81EA\u52D5\u518D\u751F\u3092\u8A31\u53EF",
+  "Block audible autoplay until you interact with the page. Muted videos may still play. Reopen tabs after changing this setting.": "\u30DA\u30FC\u30B8\u3092\u64CD\u4F5C\u3059\u308B\u307E\u3067\u97F3\u58F0\u4ED8\u304D\u306E\u81EA\u52D5\u518D\u751F\u3092\u6291\u5236\u3057\u307E\u3059\u3002\u7121\u97F3\u306E\u52D5\u753B\u306F\u518D\u751F\u3055\u308C\u308B\u5834\u5408\u304C\u3042\u308A\u307E\u3059\u3002\u5909\u66F4\u5F8C\u306F\u30BF\u30D6\u3092\u958B\u304D\u76F4\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
+  "Block passkey requests": "\u30D1\u30B9\u30AD\u30FC\u8981\u6C42\u3092\u6291\u5236",
+  "Prevent sites from requesting or creating passkeys, including requests you start yourself. Turn off to sign in with a passkey. Reload pages after changing this setting.": "\u30B5\u30A4\u30C8\u306E\u30D1\u30B9\u30AD\u30FC\u8981\u6C42\u30FB\u767B\u9332\u3092\u6291\u5236\u3057\u307E\u3059\u3002\u624B\u52D5\u3067\u958B\u59CB\u3057\u305F\u8981\u6C42\u3082\u5BFE\u8C61\u3067\u3059\u3002\u30D1\u30B9\u30AD\u30FC\u3067\u30ED\u30B0\u30A4\u30F3\u3059\u308B\u969B\u306F\u30AA\u30D5\u306B\u3057\u3066\u304F\u3060\u3055\u3044\u3002\u5909\u66F4\u5F8C\u306F\u30DA\u30FC\u30B8\u3092\u518D\u8AAD\u307F\u8FBC\u307F\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
   "Clear browser history": "\u30D6\u30E9\u30A6\u30B6\u5C65\u6B74\u3092\u6D88\u53BB",
   "Copy link": "\u30EA\u30F3\u30AF\u3092\u30B3\u30D4\u30FC",
   "Show link in history": "\u30EA\u30F3\u30AF\u306E\u5C65\u6B74\u3092\u898B\u308B",
@@ -3574,6 +3620,11 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
       this.plugin.refreshLanguage();
       this.display();
     }));
+    new import_obsidian3.Setting(containerEl).setName(t("Playback and authentication")).setHeading();
+    new import_obsidian3.Setting(containerEl).setName(t("Autoplay")).setDesc(t("Block audible autoplay until you interact with the page. Muted videos may still play. Reopen tabs after changing this setting.")).addDropdown((dropdown) => dropdown.addOption("block-audible", t("Block audible autoplay")).addOption("allow", t("Allow autoplay")).setValue(this.plugin.core.settings().autoplayPolicy).onChange((value) => {
+      if (value === "allow" || value === "block-audible") this.plugin.core.updateSettings({ autoplayPolicy: value });
+    }));
+    new import_obsidian3.Setting(containerEl).setName(t("Block passkey requests")).setDesc(t("Prevent sites from requesting or creating passkeys, including requests you start yourself. Turn off to sign in with a passkey. Reload pages after changing this setting.")).addToggle((toggle) => toggle.setValue(this.plugin.core.settings().blockPasskeyRequests).onChange((value) => this.plugin.core.updateSettings({ blockPasskeyRequests: value })));
     new import_obsidian3.Setting(containerEl).setName(t("Tab style")).setDesc(t("Firefox keeps a readable minimum tab width and overflows horizontally. Chrome compresses tabs more aggressively.")).addDropdown(
       (dropdown) => dropdown.addOption("firefox", t("Firefox")).addOption("chrome", t("Chrome")).setValue(this.plugin.core.settings().tabStyle).onChange((value) => {
         this.plugin.core.updateSettings({ tabStyle: value });
@@ -3795,10 +3846,17 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
       })
     );
     new import_obsidian3.Setting(containerEl).setName(t("Appearance")).setHeading();
-    new import_obsidian3.Setting(containerEl).setName(t("Initial background color override")).setDesc(t("Use the Obsidian theme background before a page is painted. Turn off to use the browser's own background.")).addToggle((toggle) => toggle.setValue(this.plugin.core.settings().initialBackgroundOverride).onChange((value) => {
-      this.plugin.core.updateSettings({ initialBackgroundOverride: value });
+    new import_obsidian3.Setting(containerEl).setName(t("Initial background color override")).setDesc(t("Choose the background before the site paints. The site's own colors remain in control once painted.")).addDropdown((dropdown) => dropdown.addOption("none", t("No override")).addOption("theme", t("Follow theme")).addOption("custom", t("Custom color")).setValue(this.plugin.core.settings().initialBackgroundOverride ? this.plugin.core.settings().initialBackgroundSource : "none").onChange((value) => {
+      this.plugin.core.updateSettings({ initialBackgroundOverride: value !== "none", initialBackgroundSource: value === "custom" ? "custom" : "theme" });
       this.plugin.refreshBrowserViews();
+      this.display();
     }));
+    if (this.plugin.core.settings().initialBackgroundOverride && this.plugin.core.settings().initialBackgroundSource === "custom") {
+      new import_obsidian3.Setting(containerEl).setName(t("Initial background color")).addColorPicker((picker) => picker.setValue(this.plugin.core.settings().initialBackgroundColor).onChange((value) => {
+        this.plugin.core.updateSettings({ initialBackgroundColor: value });
+        this.plugin.refreshBrowserViews();
+      }));
+    }
     new import_obsidian3.Setting(containerEl).setName(t("Full-page loading shield")).setDesc(t("Cover the web page while a new page starts loading. Off by default to avoid a full-page flash.")).addToggle(
       (toggle) => toggle.setValue(this.plugin.core.settings().fullPageLoadingShield).onChange((value) => {
         this.plugin.core.updateSettings({ fullPageLoadingShield: value });
@@ -5861,6 +5919,10 @@ var BrowserView = class _BrowserView extends import_obsidian13.ItemView {
   renderFavoritesBar() {
     if (!this.favoritesBarEl) return;
     this.rootEl.toggleClass("ubc-native-background", !this.plugin.core.settings().initialBackgroundOverride);
+    const backgroundSettings = this.plugin.core.settings();
+    if (backgroundSettings.initialBackgroundOverride && backgroundSettings.initialBackgroundSource === "custom") {
+      this.rootEl.style.setProperty("--ubc-initial-background", backgroundSettings.initialBackgroundColor);
+    } else this.rootEl.style.removeProperty("--ubc-initial-background");
     this.updateBookmarkButton();
     this.favoritesBarEl.empty();
     const visible = this.plugin.core.settings().showFavoritesBar;
@@ -6093,13 +6155,14 @@ ${item.url}` }
   ensureWebview(url) {
     if (!this.webview) {
       const webview2 = this.plugin.managedWebviewBackend.create(
-        this.plugin.core.containers.get(this.containerId).partition
+        this.plugin.core.containers.get(this.containerId).partition,
+        () => this.plugin.core.settings()
       );
       this.webview = webview2;
       this.webviewDomReady = false;
       this.bindWebview(webview2);
       this.webLayerEl.appendChild(webview2);
-      if (!this.richRestoreAttempted && this.restoredFromLeafId) {
+      if (this.plugin.core.settings().blockPasskeyRequests || !this.richRestoreAttempted && this.restoredFromLeafId) {
         this.pendingInitialWebUrl = url;
         this.ignoreBootstrapAboutBlank = true;
         webview2.src = "about:blank";

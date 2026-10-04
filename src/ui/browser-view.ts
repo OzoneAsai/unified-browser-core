@@ -985,6 +985,10 @@ export class BrowserView extends ItemView {
   renderFavoritesBar(): void {
     if (!this.favoritesBarEl) return;
     this.rootEl.toggleClass("ubc-native-background", !this.plugin.core.settings().initialBackgroundOverride);
+    const backgroundSettings = this.plugin.core.settings();
+    if (backgroundSettings.initialBackgroundOverride && backgroundSettings.initialBackgroundSource === "custom") {
+      this.rootEl.style.setProperty("--ubc-initial-background", backgroundSettings.initialBackgroundColor);
+    } else this.rootEl.style.removeProperty("--ubc-initial-background");
     this.updateBookmarkButton();
     this.favoritesBarEl.empty();
     const visible = this.plugin.core.settings().showFavoritesBar;
@@ -1236,13 +1240,15 @@ export class BrowserView extends ItemView {
     if (!this.webview) {
       const webview = this.plugin.managedWebviewBackend.create(
         this.plugin.core.containers.get(this.containerId).partition,
+        () => this.plugin.core.settings(),
       );
       this.webview = webview;
       this.webviewDomReady = false;
       this.bindWebview(webview);
       this.webLayerEl.appendChild(webview);
 
-      if (!this.richRestoreAttempted && this.restoredFromLeafId) {
+      if (this.plugin.core.settings().blockPasskeyRequests || (!this.richRestoreAttempted && this.restoredFromLeafId)) {
+        // Bootstrap first so guest-scoped response policies are ready.
         // A webview without src never creates a guest, so waiting for
         // did-attach before setting the first URL deadlocks. Use about:blank
         // only to bootstrap an attached guest when rich restore needs to run

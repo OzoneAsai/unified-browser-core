@@ -12,6 +12,18 @@ export function t(source: string, values: Record<string, string | number> = {}):
 }
 
 const ja: Record<string, string> = {
+  "No override": "上書きなし", "Follow theme": "テーマに合わせる", "Custom color": "任意の色",
+  "Initial background color": "初期背景色",
+  "Choose the background before the site paints. The site's own colors remain in control once painted.": "サイトが描画される前の背景色を選択します。描画後はサイト自身の色が優先されます。",
+
+  "Playback and authentication": "再生と認証",
+  "Autoplay": "自動再生",
+  "Block audible autoplay": "音声付きの自動再生を抑制",
+  "Allow autoplay": "自動再生を許可",
+  "Block audible autoplay until you interact with the page. Muted videos may still play. Reopen tabs after changing this setting.": "ページを操作するまで音声付きの自動再生を抑制します。無音の動画は再生される場合があります。変更後はタブを開き直してください。",
+  "Block passkey requests": "パスキー要求を抑制",
+  "Prevent sites from requesting or creating passkeys, including requests you start yourself. Turn off to sign in with a passkey. Reload pages after changing this setting.": "サイトのパスキー要求・登録を抑制します。手動で開始した要求も対象です。パスキーでログインする際はオフにしてください。変更後はページを再読み込みしてください。",
+
   "Clear browser history": "ブラウザ履歴を消去", "Copy link": "リンクをコピー", "Show link in history": "リンクの履歴を見る",
   "Copy image URL": "画像のURLをコピー", "Download image": "画像をダウンロード", "Undo": "元に戻す", "Redo": "やり直す",
   "Copy selected text": "選択した文字をコピー", "Restore previous value": "前回の入力内容を復元", "Restore all saved form values": "保存した入力内容をすべて復元",

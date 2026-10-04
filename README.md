@@ -104,3 +104,11 @@ Browser Core owns browser state and policies; adapters connect it to Obsidian an
 ## License
 
 No license has been specified yet.
+
+### Playback and passkey controls
+
+Settings → Playback and authentication offers audible autoplay suppression (default) or allowance. Chromium's document activation policy permits muted autoplay and can unlock playback after page interaction. Reopen tabs after changing this option.
+
+Block passkey requests is off by default. WebAuthn get/create Permissions-Policy restrictions apply to UBC's HTTP(S) guest documents before scripts run. Explicit passkey login and registration are also blocked: disable and reload to use passkeys. Requires Electron remote session APIs and WebAuthn policy support. Plugins sharing the adopted Surfing session should be disabled after migration to avoid competing headers listeners.
+
+Initial background can follow the Obsidian theme, use a custom color, or remain unmodified. The choice affects the initial backing surface, not the colors painted by a website.

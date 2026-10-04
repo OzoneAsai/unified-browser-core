@@ -28,6 +28,23 @@ export class BrowserSettingTab extends PluginSettingTab {
           this.plugin.refreshLanguage(); this.display();
         }));
 
+    new Setting(containerEl).setName(t("Playback and authentication")).setHeading();
+    new Setting(containerEl)
+      .setName(t("Autoplay"))
+      .setDesc(t("Block audible autoplay until you interact with the page. Muted videos may still play. Reopen tabs after changing this setting."))
+      .addDropdown((dropdown) => dropdown
+        .addOption("block-audible", t("Block audible autoplay"))
+        .addOption("allow", t("Allow autoplay"))
+        .setValue(this.plugin.core.settings().autoplayPolicy)
+        .onChange((value) => {
+          if (value === "allow" || value === "block-audible") this.plugin.core.updateSettings({ autoplayPolicy: value });
+        }));
+    new Setting(containerEl)
+      .setName(t("Block passkey requests"))
+      .setDesc(t("Prevent sites from requesting or creating passkeys, including requests you start yourself. Turn off to sign in with a passkey. Reload pages after changing this setting."))
+      .addToggle((toggle) => toggle.setValue(this.plugin.core.settings().blockPasskeyRequests)
+        .onChange((value) => this.plugin.core.updateSettings({ blockPasskeyRequests: value })));
+
     new Setting(containerEl)
       .setName(t("Tab style"))
       .setDesc(t("Firefox keeps a readable minimum tab width and overflows horizontally. Chrome compresses tabs more aggressively."))
@@ -419,9 +436,23 @@ export class BrowserSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName(t("Initial background color override"))
-      .setDesc(t("Use the Obsidian theme background before a page is painted. Turn off to use the browser's own background."))
-      .addToggle((toggle) => toggle.setValue(this.plugin.core.settings().initialBackgroundOverride)
-        .onChange((value) => { this.plugin.core.updateSettings({ initialBackgroundOverride: value }); this.plugin.refreshBrowserViews(); }));
+      .setDesc(t("Choose the background before the site paints. The site's own colors remain in control once painted."))
+      .addDropdown((dropdown) => dropdown
+        .addOption("none", t("No override"))
+        .addOption("theme", t("Follow theme"))
+        .addOption("custom", t("Custom color"))
+        .setValue(this.plugin.core.settings().initialBackgroundOverride ? this.plugin.core.settings().initialBackgroundSource : "none")
+        .onChange((value) => {
+          this.plugin.core.updateSettings({ initialBackgroundOverride: value !== "none", initialBackgroundSource: value === "custom" ? "custom" : "theme" });
+          this.plugin.refreshBrowserViews(); this.display();
+        }));
+    if (this.plugin.core.settings().initialBackgroundOverride && this.plugin.core.settings().initialBackgroundSource === "custom") {
+      new Setting(containerEl).setName(t("Initial background color"))
+        .addColorPicker((picker) => picker.setValue(this.plugin.core.settings().initialBackgroundColor)
+          .onChange((value) => {
+            this.plugin.core.updateSettings({ initialBackgroundColor: value }); this.plugin.refreshBrowserViews();
+          }));
+    }
 
     new Setting(containerEl)
       .setName(t("Full-page loading shield"))

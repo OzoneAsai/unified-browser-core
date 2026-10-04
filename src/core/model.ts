@@ -39,6 +39,10 @@ export interface BrowserSettings {
   showFavoritesBar: boolean;
   bookmarkBarMode: "all" | "selected";
   initialBackgroundOverride: boolean;
+  initialBackgroundSource: "theme" | "custom";
+  initialBackgroundColor: string;
+  autoplayPolicy: "allow" | "block-audible";
+  blockPasskeyRequests: boolean;
   language: "auto" | "en" | "ja";
 }
 
@@ -311,6 +315,10 @@ export const DEFAULT_SETTINGS: BrowserSettings = {
   showFavoritesBar: true,
   bookmarkBarMode: "selected",
   initialBackgroundOverride: true,
+  initialBackgroundSource: "theme",
+  initialBackgroundColor: "#ffffff",
+  autoplayPolicy: "block-audible",
+  blockPasskeyRequests: false,
   language: "auto",
 };
 
