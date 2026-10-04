@@ -1063,3 +1063,41 @@
 .ubc-browser-view:not(.ubc-native-background) .ubc-webview {
   background: var(--ubc-initial-background, var(--background-primary));
 }
+
+/* Compact only pane tab rows managed by UBC; retain native drag controls. */
+.workspace-tab-header-container:has(.ubc-browser-tab-strip) {
+  --header-height: 34px;
+  height: 34px;
+  min-height: 34px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.ubc-browser-tab-strip {
+  height: 34px;
+  min-height: 0;
+  align-items: center;
+}
+.ubc-browser-tab-strip > .workspace-tab-header {
+  height: 28px;
+  min-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.ubc-browser-tab-strip-scroll {
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgb(128 128 128 / 35%) transparent;
+}
+.ubc-browser-tab-strip-scroll::-webkit-scrollbar {
+  height: 4px;
+}
+.ubc-browser-tab-strip-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.ubc-browser-tab-strip-scroll::-webkit-scrollbar-thumb {
+  background: rgb(128 128 128 / 35%);
+  border-radius: 4px;
+}
+.ubc-browser-tab-strip-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgb(128 128 128 / 65%);
+}
