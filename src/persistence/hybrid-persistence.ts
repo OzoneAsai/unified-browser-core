@@ -58,6 +58,7 @@ export class HybridBrowserPersistence {
       permissions: state.permissions,
       formRecoveryPolicies: state.formRecoveryPolicies,
       sessionCheckpoint: state.sessionCheckpoint,
+      surfingMigration: state.surfingMigration,
       __hybridRevision: revision,
       __hybridHeavyFallback: false,
     };

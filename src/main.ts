@@ -9,6 +9,7 @@ import { ObsidianSettingsAdapter } from "./adapters/obsidian-settings";
 import { ObsidianHomeAdapter } from "./adapters/obsidian-home";
 import { ObsidianBookmarksAdapter } from "./adapters/obsidian-bookmarks";
 import { WebViewerBookmarksAdapter } from "./adapters/webviewer-bookmarks";
+import { SurfingMigrationAdapter, normalizeSurfingBookmarks, surfingFolderPaths, surfingSearchTemplate } from "./adapters/surfing-migration";
 import { ObsidianCommandAdapter } from "./adapters/obsidian-commands";
 import {
   BrowserPublicApi,
@@ -20,6 +21,7 @@ import {
   type BrowserTabSnapshot,
 } from "./api/browser-api";
 import { BrowserCore } from "./core/browser-core";
+import { createId } from "./core/id";
 import type {
   BookmarkEntry,
   BrowserCoreState,
@@ -34,6 +36,7 @@ import { resolveTabLayoutPolicy } from "./tabs/tab-layout-policy";
 import { BrowserSettingTab } from "./settings/settings-tab";
 import { BROWSER_VIEW_TYPE, BrowserView } from "./ui/browser-view";
 import { promptPermission } from "./ui/permission-prompt";
+import { confirmAction } from "./ui/confirm-modal";
 import { TabSearchModal } from "./ui/tab-search-modal";
 import { HybridBrowserPersistence } from "./persistence/hybrid-persistence";
 import type { WebviewElement } from "./ui/webview-types";
@@ -60,6 +63,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
   readonly commandAdapter = new ObsidianCommandAdapter();
   homeAdapter!: ObsidianHomeAdapter;
   bookmarksAdapter!: ObsidianBookmarksAdapter;
+  surfingMigrationAdapter!: SurfingMigrationAdapter;
   webViewerBookmarksAdapter!: WebViewerBookmarksAdapter;
   private persistence!: HybridBrowserPersistence;
   private unloading = false;
@@ -68,6 +72,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
   private layoutInitializationInProgress = false;
   private homeTakeoverArmed = false;
   private replacingEmptyLeaf = false;
+  private surfingMigrationRunning = false;
   private previousSessionCheckpoint: BrowserSessionCheckpoint = { capturedAt: 0, leaves: [] };
 
   getPublicApi(): BrowserPublicApi {
@@ -108,6 +113,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     this.homeAdapter = new ObsidianHomeAdapter(this.app);
     this.bookmarksAdapter = new ObsidianBookmarksAdapter(this.app);
     this.webViewerBookmarksAdapter = new WebViewerBookmarksAdapter(this.app);
+    this.surfingMigrationAdapter = new SurfingMigrationAdapter(this.app);
     this.registerDomEvent(window, "beforeunload", () => this.prepareForShutdown());
     this.register(() => this.prepareForShutdown());
     const persistenceScope = ((this.app as App & { appId?: string }).appId || this.app.vault.getName());
@@ -207,6 +213,11 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       id: "import-webviewer-bookmarks",
       name: "Import bookmarks from Web viewer Bookmarks",
       callback: () => void this.importWebViewerBookmarks(),
+    });
+    this.addCommand({
+      id: "migrate-from-surfing",
+      name: "Migrate browsing data from Surfing",
+      callback: () => void this.migrateFromSurfing(),
     });
     this.addCommand({
       id: "reopen-closed-tab",
@@ -891,6 +902,173 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       new Notice(parts.join(" · "));
     }
     return { available: true, added: imported.added, reused: imported.reused, skippedInvalid: snapshot.skippedInvalid };
+  }
+
+  async migrateFromSurfing(): Promise<void> {
+    if (this.surfingMigrationRunning) return;
+    this.surfingMigrationRunning = true;
+    try {
+      const previous = this.core.state.surfingMigration;
+      if (previous?.completedAt) {
+        new Notice(`Surfing migration already completed. Backup: ${previous.backupPath}`);
+        return;
+      }
+      const snapshot = previous ? null : await this.surfingMigrationAdapter.scan();
+      if (snapshot && !snapshot.settingsFound && !snapshot.bookmarksFound && snapshot.tabs.length === 0) {
+        new Notice("No Surfing data was found in this vault. Run migration before uninstalling Surfing.");
+        return;
+      }
+      if (snapshot && (snapshot.settingsFound && !snapshot.settings || snapshot.bookmarksFound && !snapshot.bookmarksValid)) {
+        new Notice("Surfing data could not be read safely. No changes were made.");
+        return;
+      }
+      const tabs = previous?.tabs ?? snapshot?.tabs ?? [];
+      const message = previous
+        ? `Resume the interrupted Surfing migration? ${tabs.length - previous.completedTabKeys.length} tab(s) remain.`
+        : `Adopt Surfing's persistent browsing profile, import ${snapshot!.bookmarks.length} bookmark(s), ` +
+          `apply compatible settings and open ${tabs.length} saved tab(s)? Browser Core will save a backup first. ` +
+          `Surfing data will remain untouched.${snapshot!.warnings.length ? ` Warnings: ${snapshot!.warnings.join(" ")}` : ""}`;
+      const confirmed = await confirmAction(this.app, "Migrate from Surfing", message, "Migrate");
+      if (!confirmed) return;
+
+      let record = previous;
+      if (!record && snapshot) {
+        const vault = this.app.vault as typeof this.app.vault & { configDir?: string };
+        const configDir = vault.configDir || ".obsidian";
+        const backupPath = `${configDir}/plugins/${this.manifest.id}/surfing-migration-backup-${Date.now()}.json`;
+        await this.app.vault.adapter.write(backupPath, JSON.stringify({
+          format: "ubc-surfing-migration-backup-v1",
+          savedAt: Date.now(),
+          ubcBeforeMigration: this.core.state,
+          surfingSettings: snapshot.settings,
+          surfingBookmarks: snapshot.bookmarksRaw,
+          surfingTabs: snapshot.tabs,
+          sourcePartition: snapshot.sourcePartition,
+        }, null, 2));
+
+        const container = this.core.containers.list().find((candidate) => candidate.partition === snapshot.sourcePartition)
+          ?? this.core.containers.create("Surfing profile", "#8a75d6", "globe");
+        container.partition = snapshot.sourcePartition;
+        const previousDefaultContainerId = this.core.settings().defaultContainerId;
+        record = {
+          sourcePartition: snapshot.sourcePartition,
+          surfingContainerId: container.id,
+          previousDefaultContainerId,
+          backupPath,
+          startedAt: Date.now(),
+          tabs,
+          completedTabKeys: [],
+          historyLeafIds: {},
+          initialImportComplete: false,
+          bookmarksAdded: 0,
+          bookmarksReused: 0,
+          settingsImported: false,
+        };
+        this.core.state.surfingMigration = record;
+        await this.core.flush();
+      }
+      if (!record) throw new Error("Migration state was not initialized.");
+
+      if (!record.initialImportComplete) {
+        let settings = snapshot?.settings ?? null;
+        let bookmarks = snapshot?.bookmarks ?? [];
+        let folderPaths = snapshot?.folderPaths ?? [];
+        if (!snapshot) {
+          const backup = JSON.parse(await this.app.vault.adapter.read(record.backupPath)) as {
+            surfingSettings: Record<string, unknown> | null;
+            surfingBookmarks: unknown;
+          };
+          settings = backup.surfingSettings;
+          const parsed = normalizeSurfingBookmarks(backup.surfingBookmarks);
+          if (backup.surfingBookmarks != null && !parsed.valid) {
+            throw new Error("The Surfing bookmark backup could not be read safely.");
+          }
+          bookmarks = parsed.entries;
+          folderPaths = surfingFolderPaths(backup.surfingBookmarks);
+        }
+        const searchUrlTemplate = surfingSearchTemplate(settings);
+        const bookmarkManager = settings?.bookmarkManager;
+        this.core.updateSettings({
+          defaultContainerId: record.surfingContainerId,
+          homeSearchMode: "web",
+          ...(searchUrlTemplate ? { searchUrlTemplate } : {}),
+          ...(bookmarkManager && typeof bookmarkManager === "object" && "openBookMark" in bookmarkManager &&
+            typeof bookmarkManager.openBookMark === "boolean"
+            ? { showFavoritesBar: bookmarkManager.openBookMark } : {}),
+        });
+        for (const path of folderPaths) this.core.bookmarks.ensureFolderPath(path);
+        const imported = this.core.bookmarks.importWebBookmarks(bookmarks);
+        record.bookmarksAdded = imported.added;
+        record.bookmarksReused = imported.reused;
+        record.settingsImported = Boolean(settings);
+        record.initialImportComplete = true;
+        await this.core.flush();
+      }
+
+      for (const tab of record.tabs) {
+        if (record.completedTabKeys.includes(tab.sourceKey)) continue;
+        let historyLeafId = record.historyLeafIds[tab.sourceKey];
+        if (!historyLeafId) {
+          historyLeafId = createId("surfing-history");
+          this.core.history.beginLeaf({
+            leafId: historyLeafId,
+            containerId: record.surfingContainerId,
+            url: tab.history[0]?.url ?? tab.url,
+            title: tab.title,
+          });
+          const importedNodes: string[] = [];
+          for (const entry of tab.history) {
+            if (entry.kind !== "web") continue;
+            const node = this.core.history.addNavigation({
+              leafId: historyLeafId,
+              containerId: record.surfingContainerId,
+              url: entry.url,
+              title: entry.title,
+            });
+            importedNodes.push(node.id);
+          }
+          const activeNodeId = importedNodes[tab.historyIndex];
+          if (activeNodeId) {
+            this.core.state.history.currentByLeaf[historyLeafId] = activeNodeId;
+            this.core.history.touchLeaf(historyLeafId, { lastUrl: tab.url, lastTitle: tab.title });
+          }
+          this.core.history.closeLeaf(historyLeafId, "replaced");
+          record.historyLeafIds[tab.sourceKey] = historyLeafId;
+          await this.core.flush();
+        }
+        const alreadyOpen = this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE).some((candidate) => {
+          const state = candidate.getViewState().state as BrowserLeafViewState | undefined;
+          return state?.restoredFromLeafId === historyLeafId && state.url === tab.url;
+        });
+        if (alreadyOpen) {
+          record.completedTabKeys.push(tab.sourceKey);
+          await this.core.flush();
+          continue;
+        }
+        const leaf = await this.openBrowser({
+          url: tab.url,
+          containerId: record.surfingContainerId,
+          restoredFromLeafId: historyLeafId,
+          reveal: tab.active,
+          state: { pinned: tab.pinned, transientHistory: tab.history, transientIndex: tab.historyIndex },
+        });
+        leaf.setPinned(tab.pinned);
+        record.completedTabKeys.push(tab.sourceKey);
+        await this.core.flush();
+      }
+      record.completedAt = Date.now();
+      this.refreshBrowserViews();
+      this.refreshContainerPresentation();
+      if (this.sessionCheckpointArmed) this.captureSessionCheckpoint();
+      await this.core.flush();
+      new Notice(`Surfing migration complete: ${record.bookmarksAdded} bookmark(s) added, ` +
+        `${record.tabs.length} tab(s) opened. Backup: ${record.backupPath}`, 12000);
+    } catch (error) {
+      console.error("Unified Browser Core: Surfing migration failed.", error);
+      new Notice("Surfing migration stopped. Source data was not deleted; run the command again to resume.", 12000);
+    } finally {
+      this.surfingMigrationRunning = false;
+    }
   }
 
   private async openFromApi(url: string, options: BrowserOpenOptions = {}): Promise<void> {

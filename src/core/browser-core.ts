@@ -83,7 +83,7 @@ export class BrowserCore {
     );
     const bookmarks = mergeDuplicateBookmarks(normalizedBookmarks);
     return {
-      version: 5,
+      version: 6,
       settings: { ...DEFAULT_SETTINGS, ...settingsPatch, startupBehavior, historyDayStartMinutes, showFavoritesBar },
       siteZoom: raw?.siteZoom ?? {},
       containers: raw?.containers ?? {},
@@ -103,6 +103,7 @@ export class BrowserCore {
       formRecovery: raw?.formRecovery ?? {},
       formRecoveryPolicies: raw?.formRecoveryPolicies ?? {},
       sessionCheckpoint: raw?.sessionCheckpoint ?? { capturedAt: 0, leaves: [] },
+      surfingMigration: raw?.surfingMigration,
     };
   }
 
@@ -204,9 +205,7 @@ export class BrowserCore {
   }
 
   defaultContainerForNewTab(): ContainerId {
-    return this.state.settings.containerMode === "off"
-      ? this.containers.ensureDefault().id
-      : this.normalizeContainer(this.state.settings.defaultContainerId);
+    return this.normalizeContainer(this.state.settings.defaultContainerId);
   }
 
   scheduleSave(): void {

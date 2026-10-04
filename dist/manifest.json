@@ -1,7 +1,7 @@
 {
   "id": "unified-browser-core",
   "name": "Unified Browser Core",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "minAppVersion": "1.8.0",
   "description": "A unified browser core for Obsidian with container sessions, graph history, bookmarks, recovery metadata, and configurable tab layout policies.",
   "author": "O3Yui",

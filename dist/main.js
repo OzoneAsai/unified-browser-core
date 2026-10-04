@@ -1075,6 +1075,207 @@ function unavailable() {
   return { available: false, entries: [], skippedInvalid: 0 };
 }
 
+// src/adapters/surfing-migration.ts
+var SurfingMigrationAdapter = class {
+  constructor(app) {
+    this.app = app;
+  }
+  async scan() {
+    const vault = this.app.vault;
+    const configDir = vault.configDir || ".obsidian";
+    const appId = this.app.appId;
+    if (!appId) throw new Error("Obsidian did not expose a vault app ID, so the Surfing profile cannot be identified safely.");
+    const settingsPath = `${configDir}/plugins/surfing/data.json`;
+    const bookmarksPath = `${configDir}/surfing-bookmark.json`;
+    const warnings = [];
+    const settingsResult = await this.readJson(settingsPath, warnings);
+    const bookmarksResult = await this.readJson(bookmarksPath, warnings);
+    const settings = isRecord(settingsResult.data) ? settingsResult.data : null;
+    if (settingsResult.found && !settings) warnings.push("Surfing settings have an unsupported format.");
+    const parsedBookmarks = normalizeSurfingBookmarks(bookmarksResult.data);
+    if (bookmarksResult.found && !parsedBookmarks.valid) warnings.push("Surfing bookmarks have an unsupported format.");
+    if (parsedBookmarks.invalid) warnings.push(`${parsedBookmarks.invalid} invalid Surfing bookmark(s) cannot be opened; their source records are preserved in the backup.`);
+    const liveLeaves = this.app.workspace.getLeavesOfType("surfing-view");
+    const liveTabs = liveLeaves.map((leaf) => tabFromLeaf(leaf, this.app.workspace.activeLeaf)).filter((tab) => Boolean(tab));
+    const savedTabs = liveTabs.length ? [] : await this.savedWorkspaceTabs(`${configDir}/workspace.json`, warnings);
+    const tabs = liveTabs.length ? liveTabs : savedTabs;
+    const invalidTabs = liveLeaves.length > 0 ? liveLeaves.length - liveTabs.length : 0;
+    if (invalidTabs) warnings.push(`${invalidTabs} Surfing tab(s) have URLs Browser Core cannot open; the source layout is left untouched.`);
+    return {
+      sourcePartition: `persist:surfing-vault-${appId}`,
+      settingsPath,
+      bookmarksPath,
+      settings,
+      bookmarksRaw: bookmarksResult.data,
+      bookmarks: parsedBookmarks.entries,
+      folderPaths: surfingFolderPaths(bookmarksResult.data),
+      tabs,
+      invalidBookmarks: parsedBookmarks.invalid,
+      invalidTabs,
+      warnings,
+      settingsFound: settingsResult.found,
+      bookmarksFound: bookmarksResult.found,
+      bookmarksValid: parsedBookmarks.valid,
+      tabsSource: liveTabs.length ? "live" : savedTabs.length ? "workspace" : "none"
+    };
+  }
+  async readJson(path, warnings) {
+    if (!await this.app.vault.adapter.exists(path)) return { found: false, data: null };
+    try {
+      return { found: true, data: JSON.parse(await this.app.vault.adapter.read(path)) };
+    } catch {
+      warnings.push(`Could not read ${path}.`);
+      return { found: true, data: null };
+    }
+  }
+  async savedWorkspaceTabs(path, warnings) {
+    if (!await this.app.vault.adapter.exists(path)) return [];
+    try {
+      const root = JSON.parse(await this.app.vault.adapter.read(path));
+      const tabs = [];
+      const visit = (value) => {
+        if (!isRecord(value)) {
+          if (Array.isArray(value)) for (const child of value) visit(child);
+          return;
+        }
+        if (value.type === "leaf" && isRecord(value.state) && value.state.type === "surfing-view" && isRecord(value.state.state) && isWebUrl2(value.state.state.url)) {
+          tabs.push({
+            sourceKey: `workspace-${tabs.length}`,
+            url: value.state.state.url,
+            pinned: value.pinned === true || value.state.pinned === true,
+            active: false,
+            history: [{ kind: "web", url: value.state.state.url }],
+            historyIndex: 0
+          });
+          return;
+        }
+        for (const child of Object.values(value)) visit(child);
+      };
+      visit(root);
+      return tabs;
+    } catch {
+      warnings.push(`Could not read saved Surfing tabs from ${path}.`);
+      return [];
+    }
+  }
+};
+function normalizeSurfingBookmarks(data) {
+  if (!isRecord(data) || !Array.isArray(data.bookmarks)) return { valid: false, entries: [], invalid: 0 };
+  const entries = [];
+  let invalid = 0;
+  for (const raw of data.bookmarks) {
+    if (!isRecord(raw) || !isWebUrl2(raw.url)) {
+      invalid++;
+      continue;
+    }
+    const folderPath = Array.isArray(raw.category) ? raw.category.filter((part) => typeof part === "string").map((part) => part.trim()).filter((part) => part.length > 0 && part.toUpperCase() !== "ROOT") : [];
+    entries.push({
+      title: typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : raw.url,
+      url: raw.url,
+      folderPath,
+      favorite: folderPath.length === 0,
+      description: typeof raw.description === "string" ? raw.description : void 0,
+      tags: typeof raw.tags === "string" ? raw.tags.split(/\s+/).filter(Boolean) : void 0,
+      createdAt: typeof raw.created === "number" && Number.isFinite(raw.created) ? raw.created : void 0
+    });
+  }
+  return { valid: true, entries, invalid };
+}
+function surfingFolderPaths(data) {
+  if (!isRecord(data) || !Array.isArray(data.categories)) return [];
+  const paths = [];
+  const visit = (category, parent) => {
+    if (!isRecord(category)) return;
+    const name = typeof category.text === "string" && category.text.trim() ? category.text.trim() : typeof category.value === "string" ? category.value.trim() : "";
+    const path = name && name.toUpperCase() !== "ROOT" ? [...parent, name] : parent;
+    if (path.length) paths.push(path);
+    if (Array.isArray(category.children)) for (const child of category.children) visit(child, path);
+  };
+  for (const category of data.categories) visit(category, []);
+  return paths;
+}
+function surfingSearchTemplate(settings) {
+  if (!settings || typeof settings.defaultSearchEngine !== "string") return void 0;
+  const selected = settings.defaultSearchEngine.toLowerCase();
+  const custom = Array.isArray(settings.customSearchEngine) ? settings.customSearchEngine.find((entry) => isRecord(entry) && typeof entry.name === "string" && entry.name.toLowerCase() === selected && typeof entry.url === "string") : void 0;
+  const builtIn = {
+    google: "https://www.google.com/search?q=",
+    bing: "https://www.bing.com/search?q=",
+    duckduckgo: "https://duckduckgo.com/?q=",
+    yahoo: "https://search.yahoo.com/search?p=",
+    baidu: "https://www.baidu.com/s?wd=",
+    yandex: "https://yandex.com/search/?text=",
+    wikipedia: "https://en.wikipedia.org/w/index.php?search="
+  };
+  const raw = custom?.url ?? builtIn[selected];
+  if (typeof raw !== "string" || !isWebUrl2(raw)) return void 0;
+  if (raw.includes("{query}")) return raw;
+  if (raw.includes("%s")) return raw.replace("%s", "{query}");
+  return raw + "{query}";
+}
+function tabFromLeaf(leaf, activeLeaf) {
+  const viewState = leaf.getViewState();
+  const state = isRecord(viewState.state) ? viewState.state : null;
+  if (!state || !isWebUrl2(state.url)) return null;
+  const history = leaf.history;
+  const previous = (history?.backHistory ?? []).map(historyUrl).filter((url) => Boolean(url));
+  const forward = (history?.forwardHistory ?? []).map(historyUrl).filter((url) => Boolean(url)).reverse();
+  const entries = [...previous, state.url, ...forward].map((url) => ({ kind: "web", url }));
+  const guestHistory = historyFromSurfingGuest(leaf, state.url);
+  return {
+    sourceKey: leaf.id ?? `live-${state.url}`,
+    url: state.url,
+    title: leaf.view.getDisplayText(),
+    pinned: Boolean(leaf.pinned),
+    active: leaf === activeLeaf,
+    history: guestHistory?.entries ?? entries,
+    historyIndex: guestHistory?.index ?? previous.length
+  };
+}
+function historyFromSurfingGuest(leaf, currentUrl) {
+  const webview = leaf.view.webviewEl;
+  if (!webview) return null;
+  const guest = resolveGuestWebContents(webview);
+  const navigation = guest?.navigationHistory;
+  if (!navigation?.getAllEntries) return null;
+  try {
+    const raw = navigation.getAllEntries();
+    const rawIndex = navigation.getActiveIndex?.() ?? raw.length - 1;
+    const entries = [];
+    let index = 0;
+    for (let position = 0; position < raw.length; position++) {
+      const entry = raw[position];
+      if (!isWebUrl2(entry?.url)) continue;
+      if (position <= rawIndex) index = entries.length;
+      entries.push({ kind: "web", url: entry.url, title: entry.title });
+    }
+    if (!entries.length) return null;
+    if (entries[index]?.url !== currentUrl) {
+      entries.push({ kind: "web", url: currentUrl });
+      index = entries.length - 1;
+    }
+    return { entries, index };
+  } catch {
+    return null;
+  }
+}
+function historyUrl(value) {
+  if (!isRecord(value) || !isRecord(value.state) || !isRecord(value.state.state)) return null;
+  return isWebUrl2(value.state.state.url) ? value.state.state.url : null;
+}
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+function isWebUrl2(value) {
+  if (typeof value !== "string") return false;
+  try {
+    const protocol = new URL(value).protocol;
+    return protocol === "http:" || protocol === "https:" || protocol === "file:";
+  } catch {
+    return false;
+  }
+}
+
 // src/adapters/obsidian-commands.ts
 var ObsidianCommandAdapter = class {
   has(app, id) {
@@ -1202,6 +1403,14 @@ var BookmarkStore = class {
         existing.favoriteOrder = this.nextFavoriteOrder();
         changed = true;
       }
+      if (!existing.description && input.description) {
+        existing.description = input.description;
+        changed = true;
+      }
+      if ((!existing.tags || existing.tags.length === 0) && input.tags?.length) {
+        existing.tags = [...input.tags];
+        changed = true;
+      }
       if (changed) this.onChanged({ action: "updated", kind: "bookmark", id: existing.id, entry: existing });
       return existing;
     }
@@ -1213,7 +1422,9 @@ var BookmarkStore = class {
       title: input.title || input.url,
       url: input.url,
       order: siblings.length,
-      createdAt: Date.now(),
+      createdAt: input.createdAt ?? Date.now(),
+      description: input.description,
+      tags: input.tags ? [...input.tags] : void 0,
       favorite: input.favorite ?? false,
       favoriteOrder: input.favorite ? this.nextFavoriteOrder() : void 0,
       visualKind: input.visualKind ?? "favicon",
@@ -1242,23 +1453,21 @@ var BookmarkStore = class {
     let reused = 0;
     let foldersCreated = 0;
     for (const entry of entries) {
-      let parentId = null;
-      for (const rawTitle of entry.folderPath) {
-        const title = rawTitle.trim();
-        if (!title) continue;
-        const existing2 = this.children(parentId).find(
-          (child) => child.kind === "folder" && child.title === title
-        );
-        if (existing2) {
-          parentId = existing2.id;
-          continue;
-        }
-        const folder = this.addFolder(title, parentId);
-        parentId = folder.id;
-        foldersCreated += 1;
-      }
+      const folder = this.ensureFolderPath(entry.folderPath);
+      const parentId = folder.parentId;
+      foldersCreated += folder.created;
       const existing = this.findByUrl(entry.url);
       if (existing) {
+        let changed = false;
+        if (!existing.description && entry.description) {
+          existing.description = entry.description;
+          changed = true;
+        }
+        if ((!existing.tags || existing.tags.length === 0) && entry.tags?.length) {
+          existing.tags = [...entry.tags];
+          changed = true;
+        }
+        if (changed) this.onChanged({ action: "updated", kind: "bookmark", id: existing.id, entry: existing });
         reused += 1;
         continue;
       }
@@ -1268,11 +1477,33 @@ var BookmarkStore = class {
         parentId,
         favorite: entry.favorite,
         visualKind: entry.visualKind,
-        visualValue: entry.visualValue
+        visualValue: entry.visualValue,
+        description: entry.description,
+        tags: entry.tags,
+        createdAt: entry.createdAt
       });
       added += 1;
     }
     return { added, reused, foldersCreated };
+  }
+  ensureFolderPath(path) {
+    let parentId = null;
+    let created = 0;
+    for (const rawTitle of path) {
+      const title = rawTitle.trim();
+      if (!title) continue;
+      const existing = this.children(parentId).find(
+        (child) => child.kind === "folder" && child.title === title
+      );
+      if (existing) {
+        parentId = existing.id;
+        continue;
+      }
+      const folder = this.addFolder(title, parentId);
+      parentId = folder.id;
+      created += 1;
+    }
+    return { parentId, created };
   }
   deleteBookmark(id) {
     const bookmark = this.state.bookmarks[id];
@@ -1327,6 +1558,8 @@ var BookmarkStore = class {
     if (patch.url !== void 0) bookmark.url = patch.url.trim() || bookmark.url;
     if (bookmark.url !== previousUrl && patch.faviconUrl === void 0) bookmark.faviconUrl = void 0;
     if (patch.title !== void 0) bookmark.title = patch.title.trim() || bookmark.url;
+    if (patch.description !== void 0) bookmark.description = patch.description.trim() || void 0;
+    if (patch.tags !== void 0) bookmark.tags = [...patch.tags];
     if (patch.favorite !== void 0) bookmark.favorite = patch.favorite;
     if (patch.visualKind !== void 0) {
       bookmark.visualKind = patch.visualKind;
@@ -1422,7 +1655,7 @@ var BookmarkStore = class {
   }
   search(query) {
     const needle = query.toLowerCase();
-    return Object.values(this.state.bookmarks).filter((bookmark) => bookmark.title.toLowerCase().includes(needle) || bookmark.url.toLowerCase().includes(needle)).sort((a, b) => b.createdAt - a.createdAt);
+    return Object.values(this.state.bookmarks).filter((bookmark) => [bookmark.title, bookmark.url, bookmark.description ?? "", ...bookmark.tags ?? []].some((value) => value.toLowerCase().includes(needle))).sort((a, b) => b.createdAt - a.createdAt);
   }
   allBookmarks() {
     return Object.values(this.state.bookmarks).sort((a, b) => a.order - b.order);
@@ -2479,7 +2712,7 @@ var BrowserCore = class {
     );
     const bookmarks = mergeDuplicateBookmarks(normalizedBookmarks);
     return {
-      version: 5,
+      version: 6,
       settings: { ...DEFAULT_SETTINGS, ...settingsPatch, startupBehavior, historyDayStartMinutes, showFavoritesBar },
       siteZoom: raw?.siteZoom ?? {},
       containers: raw?.containers ?? {},
@@ -2498,7 +2731,8 @@ var BrowserCore = class {
       restoreCapsules: raw?.restoreCapsules ?? {},
       formRecovery: raw?.formRecovery ?? {},
       formRecoveryPolicies: raw?.formRecoveryPolicies ?? {},
-      sessionCheckpoint: raw?.sessionCheckpoint ?? { capturedAt: 0, leaves: [] }
+      sessionCheckpoint: raw?.sessionCheckpoint ?? { capturedAt: 0, leaves: [] },
+      surfingMigration: raw?.surfingMigration
     };
   }
   settings() {
@@ -2582,7 +2816,7 @@ var BrowserCore = class {
     return this.containers.resolveForUrl(url, normalizedFallback);
   }
   defaultContainerForNewTab() {
-    return this.state.settings.containerMode === "off" ? this.containers.ensureDefault().id : this.normalizeContainer(this.state.settings.defaultContainerId);
+    return this.normalizeContainer(this.state.settings.defaultContainerId);
   }
   scheduleSave() {
     if (this.saveTimer !== void 0) window.clearTimeout(this.saveTimer);
@@ -2807,6 +3041,12 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
       })
     );
     customSearchSetting.settingEl.style.display = currentSearchPreset ? "none" : "";
+    new import_obsidian3.Setting(containerEl).setName("Migration").setHeading();
+    const surfingMigration = this.plugin.core.state.surfingMigration;
+    new import_obsidian3.Setting(containerEl).setName("Migrate from Surfing").setDesc(surfingMigration?.completedAt ? `Completed. Original Surfing data was kept. Backup: ${surfingMigration.backupPath}` : "Adopt Surfing's persistent login session, import bookmarks and compatible settings, and copy open tabs. Existing Browser Core data and Surfing source files are kept.").addButton((button) => button.setButtonText(surfingMigration?.completedAt ? "Migrated" : surfingMigration ? "Resume migration" : "Preview and migrate").setDisabled(Boolean(surfingMigration?.completedAt)).onClick(async () => {
+      await this.plugin.migrateFromSurfing();
+      this.display();
+    }));
     new import_obsidian3.Setting(containerEl).setName("Home").setHeading();
     new import_obsidian3.Setting(containerEl).setName("Replace new empty tabs with Home").setDesc("A newly created empty Obsidian tab becomes the Browser Core Home surface.").addToggle(
       (toggle) => toggle.setValue(this.plugin.core.settings().replaceEmptyTabsWithHome).onChange((value) => {
@@ -3013,18 +3253,18 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
       })
     );
     new import_obsidian3.Setting(containerEl).setName("Containers").setHeading();
-    new import_obsidian3.Setting(containerEl).setName("Container use").setDesc("Off uses the default browser session only. Manual keeps containers available without automatic site routing. Automatic also applies site default rules.").addDropdown(
+    new import_obsidian3.Setting(containerEl).setName("Container use").setDesc("Off uses only the selected default container. Manual keeps other containers available without automatic site routing. Automatic also applies site default rules.").addDropdown(
       (dropdown) => dropdown.addOption("off", "Off").addOption("manual", "Manual").addOption("automatic", "Automatic").setValue(this.plugin.core.settings().containerMode).onChange((value) => {
         this.plugin.core.updateSettings({ containerMode: value });
         this.plugin.refreshContainerPresentation();
         this.display();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Default container").setDesc("Used for new browser tabs when containers are enabled. Automatic mode may replace it with a site's default container.").addDropdown((dropdown) => {
+    new import_obsidian3.Setting(containerEl).setName("Default container").setDesc("Used for new browser tabs, including when container controls are off. Automatic mode may replace it with a site's default container.").addDropdown((dropdown) => {
       for (const container of this.plugin.core.containers.list()) {
         dropdown.addOption(container.id, container.name);
       }
-      dropdown.setValue(this.plugin.core.settings().defaultContainerId).setDisabled(this.plugin.core.settings().containerMode === "off").onChange((value) => this.plugin.core.updateSettings({ defaultContainerId: value }));
+      dropdown.setValue(this.plugin.core.settings().defaultContainerId).onChange((value) => this.plugin.core.updateSettings({ defaultContainerId: value }));
     });
     for (const container of this.plugin.core.containers.list()) {
       const row = new import_obsidian3.Setting(containerEl).setName(container.name).setDesc("Separate persistent login and site data").addText(
@@ -3331,6 +3571,20 @@ var BookmarkEditorModal = class extends import_obsidian5.Modal {
       attr: { type: "url", placeholder: "https://\u2026", "aria-label": "Bookmark URL" }
     });
     url.value = this.initialUrl;
+    const descriptionField = this.contentEl.createEl("label", { cls: "ubc-prompt-field" });
+    descriptionField.createSpan({ cls: "ubc-prompt-label", text: "Description" });
+    const description = descriptionField.createEl("input", {
+      cls: "ubc-prompt-input",
+      attr: { type: "text", "aria-label": "Bookmark description" }
+    });
+    description.value = this.options.description ?? "";
+    const tagsField = this.contentEl.createEl("label", { cls: "ubc-prompt-field" });
+    tagsField.createSpan({ cls: "ubc-prompt-label", text: "Tags" });
+    const tags = tagsField.createEl("input", {
+      cls: "ubc-prompt-input",
+      attr: { type: "text", placeholder: "Separate tags with spaces", "aria-label": "Bookmark tags" }
+    });
+    tags.value = (this.options.tags ?? []).join(" ");
     const favoriteField = this.contentEl.createEl("label", { cls: "ubc-prompt-check" });
     const favorite = favoriteField.createEl("input", { attr: { type: "checkbox" } });
     favorite.checked = Boolean(this.options.favorite);
@@ -3392,6 +3646,8 @@ var BookmarkEditorModal = class extends import_obsidian5.Modal {
       this.finish({
         title: title.value.trim() || nextUrl,
         url: nextUrl,
+        description: description.value.trim(),
+        tags: tags.value.trim() ? tags.value.trim().split(/\s+/) : [],
         favorite: favorite.checked,
         visualKind: kind,
         visualValue: kind === "favicon" ? void 0 : visualValue.value.trim() || void 0
@@ -3738,7 +3994,9 @@ function showBookmarkMenu(plugin, view, bookmark, event) {
     const draft = await editBookmark(plugin.app, bookmark.title, bookmark.url, "Edit bookmark", {
       favorite: bookmark.favorite,
       visualKind: bookmark.visualKind,
-      visualValue: bookmark.visualValue
+      visualValue: bookmark.visualValue,
+      description: bookmark.description,
+      tags: bookmark.tags
     });
     if (!draft) return;
     if (!plugin.core.bookmarks.updateBookmark(bookmark.id, draft)) return;
@@ -5944,7 +6202,7 @@ ${item.url}` }
       if (needle) {
         const matches = allBookmarks.filter((bookmark) => {
           const path = bookmark.parentId ? this.plugin.core.bookmarks.folderPath(bookmark.parentId) : "";
-          return [bookmark.title, bookmark.url, path].some((value) => value.toLowerCase().includes(needle));
+          return [bookmark.title, bookmark.url, path, bookmark.description ?? "", ...bookmark.tags ?? []].some((value) => value.toLowerCase().includes(needle));
         });
         summary.setText(
           matches.length ? `${matches.length} matching bookmark${matches.length === 1 ? "" : "s"}` : "No bookmarks match this search."
@@ -5997,6 +6255,8 @@ ${item.url}` }
       cls: "ubc-bookmark-meta",
       text: path ? `${path} \xB7 ${bookmark.url}` : bookmark.url
     });
+    if (bookmark.description) content.createSpan({ cls: "ubc-bookmark-meta", text: bookmark.description });
+    if (bookmark.tags?.length) content.createSpan({ cls: "ubc-bookmark-meta", text: bookmark.tags.join(" \xB7 ") });
     this.renderBookmarkFavoriteToggle(row, bookmark);
     row.addEventListener("contextmenu", (event) => {
       event.preventDefault();
@@ -7294,6 +7554,7 @@ var HybridBrowserPersistence = class {
       permissions: state.permissions,
       formRecoveryPolicies: state.formRecoveryPolicies,
       sessionCheckpoint: state.sessionCheckpoint,
+      surfingMigration: state.surfingMigration,
       __hybridRevision: revision,
       __hybridHeavyFallback: false
     };
@@ -7449,6 +7710,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian15.Plugin {
   commandAdapter = new ObsidianCommandAdapter();
   homeAdapter;
   bookmarksAdapter;
+  surfingMigrationAdapter;
   webViewerBookmarksAdapter;
   persistence;
   unloading = false;
@@ -7457,6 +7719,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian15.Plugin {
   layoutInitializationInProgress = false;
   homeTakeoverArmed = false;
   replacingEmptyLeaf = false;
+  surfingMigrationRunning = false;
   previousSessionCheckpoint = { capturedAt: 0, leaves: [] };
   getPublicApi() {
     return this.api;
@@ -7487,6 +7750,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian15.Plugin {
     this.homeAdapter = new ObsidianHomeAdapter(this.app);
     this.bookmarksAdapter = new ObsidianBookmarksAdapter(this.app);
     this.webViewerBookmarksAdapter = new WebViewerBookmarksAdapter(this.app);
+    this.surfingMigrationAdapter = new SurfingMigrationAdapter(this.app);
     this.registerDomEvent(window, "beforeunload", () => this.prepareForShutdown());
     this.register(() => this.prepareForShutdown());
     const persistenceScope = this.app.appId || this.app.vault.getName();
@@ -7584,6 +7848,11 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian15.Plugin {
       id: "import-webviewer-bookmarks",
       name: "Import bookmarks from Web viewer Bookmarks",
       callback: () => void this.importWebViewerBookmarks()
+    });
+    this.addCommand({
+      id: "migrate-from-surfing",
+      name: "Migrate browsing data from Surfing",
+      callback: () => void this.migrateFromSurfing()
     });
     this.addCommand({
       id: "reopen-closed-tab",
@@ -8183,6 +8452,157 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian15.Plugin {
       new import_obsidian15.Notice(parts.join(" \xB7 "));
     }
     return { available: true, added: imported.added, reused: imported.reused, skippedInvalid: snapshot.skippedInvalid };
+  }
+  async migrateFromSurfing() {
+    if (this.surfingMigrationRunning) return;
+    this.surfingMigrationRunning = true;
+    try {
+      const previous = this.core.state.surfingMigration;
+      if (previous?.completedAt) {
+        new import_obsidian15.Notice(`Surfing migration already completed. Backup: ${previous.backupPath}`);
+        return;
+      }
+      const snapshot = previous ? null : await this.surfingMigrationAdapter.scan();
+      if (snapshot && !snapshot.settingsFound && !snapshot.bookmarksFound && snapshot.tabs.length === 0) {
+        new import_obsidian15.Notice("No Surfing data was found in this vault. Run migration before uninstalling Surfing.");
+        return;
+      }
+      if (snapshot && (snapshot.settingsFound && !snapshot.settings || snapshot.bookmarksFound && !snapshot.bookmarksValid)) {
+        new import_obsidian15.Notice("Surfing data could not be read safely. No changes were made.");
+        return;
+      }
+      const tabs = previous?.tabs ?? snapshot?.tabs ?? [];
+      const message = previous ? `Resume the interrupted Surfing migration? ${tabs.length - previous.completedTabKeys.length} tab(s) remain.` : `Adopt Surfing's persistent browsing profile, import ${snapshot.bookmarks.length} bookmark(s), apply compatible settings and open ${tabs.length} saved tab(s)? Browser Core will save a backup first. Surfing data will remain untouched.${snapshot.warnings.length ? ` Warnings: ${snapshot.warnings.join(" ")}` : ""}`;
+      const confirmed = await confirmAction(this.app, "Migrate from Surfing", message, "Migrate");
+      if (!confirmed) return;
+      let record = previous;
+      if (!record && snapshot) {
+        const vault = this.app.vault;
+        const configDir = vault.configDir || ".obsidian";
+        const backupPath = `${configDir}/plugins/${this.manifest.id}/surfing-migration-backup-${Date.now()}.json`;
+        await this.app.vault.adapter.write(backupPath, JSON.stringify({
+          format: "ubc-surfing-migration-backup-v1",
+          savedAt: Date.now(),
+          ubcBeforeMigration: this.core.state,
+          surfingSettings: snapshot.settings,
+          surfingBookmarks: snapshot.bookmarksRaw,
+          surfingTabs: snapshot.tabs,
+          sourcePartition: snapshot.sourcePartition
+        }, null, 2));
+        const container = this.core.containers.list().find((candidate) => candidate.partition === snapshot.sourcePartition) ?? this.core.containers.create("Surfing profile", "#8a75d6", "globe");
+        container.partition = snapshot.sourcePartition;
+        const previousDefaultContainerId = this.core.settings().defaultContainerId;
+        record = {
+          sourcePartition: snapshot.sourcePartition,
+          surfingContainerId: container.id,
+          previousDefaultContainerId,
+          backupPath,
+          startedAt: Date.now(),
+          tabs,
+          completedTabKeys: [],
+          historyLeafIds: {},
+          initialImportComplete: false,
+          bookmarksAdded: 0,
+          bookmarksReused: 0,
+          settingsImported: false
+        };
+        this.core.state.surfingMigration = record;
+        await this.core.flush();
+      }
+      if (!record) throw new Error("Migration state was not initialized.");
+      if (!record.initialImportComplete) {
+        let settings = snapshot?.settings ?? null;
+        let bookmarks = snapshot?.bookmarks ?? [];
+        let folderPaths = snapshot?.folderPaths ?? [];
+        if (!snapshot) {
+          const backup = JSON.parse(await this.app.vault.adapter.read(record.backupPath));
+          settings = backup.surfingSettings;
+          const parsed = normalizeSurfingBookmarks(backup.surfingBookmarks);
+          if (backup.surfingBookmarks != null && !parsed.valid) {
+            throw new Error("The Surfing bookmark backup could not be read safely.");
+          }
+          bookmarks = parsed.entries;
+          folderPaths = surfingFolderPaths(backup.surfingBookmarks);
+        }
+        const searchUrlTemplate = surfingSearchTemplate(settings);
+        const bookmarkManager = settings?.bookmarkManager;
+        this.core.updateSettings({
+          defaultContainerId: record.surfingContainerId,
+          homeSearchMode: "web",
+          ...searchUrlTemplate ? { searchUrlTemplate } : {},
+          ...bookmarkManager && typeof bookmarkManager === "object" && "openBookMark" in bookmarkManager && typeof bookmarkManager.openBookMark === "boolean" ? { showFavoritesBar: bookmarkManager.openBookMark } : {}
+        });
+        for (const path of folderPaths) this.core.bookmarks.ensureFolderPath(path);
+        const imported = this.core.bookmarks.importWebBookmarks(bookmarks);
+        record.bookmarksAdded = imported.added;
+        record.bookmarksReused = imported.reused;
+        record.settingsImported = Boolean(settings);
+        record.initialImportComplete = true;
+        await this.core.flush();
+      }
+      for (const tab of record.tabs) {
+        if (record.completedTabKeys.includes(tab.sourceKey)) continue;
+        let historyLeafId = record.historyLeafIds[tab.sourceKey];
+        if (!historyLeafId) {
+          historyLeafId = createId("surfing-history");
+          this.core.history.beginLeaf({
+            leafId: historyLeafId,
+            containerId: record.surfingContainerId,
+            url: tab.history[0]?.url ?? tab.url,
+            title: tab.title
+          });
+          const importedNodes = [];
+          for (const entry of tab.history) {
+            if (entry.kind !== "web") continue;
+            const node = this.core.history.addNavigation({
+              leafId: historyLeafId,
+              containerId: record.surfingContainerId,
+              url: entry.url,
+              title: entry.title
+            });
+            importedNodes.push(node.id);
+          }
+          const activeNodeId = importedNodes[tab.historyIndex];
+          if (activeNodeId) {
+            this.core.state.history.currentByLeaf[historyLeafId] = activeNodeId;
+            this.core.history.touchLeaf(historyLeafId, { lastUrl: tab.url, lastTitle: tab.title });
+          }
+          this.core.history.closeLeaf(historyLeafId, "replaced");
+          record.historyLeafIds[tab.sourceKey] = historyLeafId;
+          await this.core.flush();
+        }
+        const alreadyOpen = this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE).some((candidate) => {
+          const state = candidate.getViewState().state;
+          return state?.restoredFromLeafId === historyLeafId && state.url === tab.url;
+        });
+        if (alreadyOpen) {
+          record.completedTabKeys.push(tab.sourceKey);
+          await this.core.flush();
+          continue;
+        }
+        const leaf = await this.openBrowser({
+          url: tab.url,
+          containerId: record.surfingContainerId,
+          restoredFromLeafId: historyLeafId,
+          reveal: tab.active,
+          state: { pinned: tab.pinned, transientHistory: tab.history, transientIndex: tab.historyIndex }
+        });
+        leaf.setPinned(tab.pinned);
+        record.completedTabKeys.push(tab.sourceKey);
+        await this.core.flush();
+      }
+      record.completedAt = Date.now();
+      this.refreshBrowserViews();
+      this.refreshContainerPresentation();
+      if (this.sessionCheckpointArmed) this.captureSessionCheckpoint();
+      await this.core.flush();
+      new import_obsidian15.Notice(`Surfing migration complete: ${record.bookmarksAdded} bookmark(s) added, ${record.tabs.length} tab(s) opened. Backup: ${record.backupPath}`, 12e3);
+    } catch (error) {
+      console.error("Unified Browser Core: Surfing migration failed.", error);
+      new import_obsidian15.Notice("Surfing migration stopped. Source data was not deleted; run the command again to resume.", 12e3);
+    } finally {
+      this.surfingMigrationRunning = false;
+    }
   }
   async openFromApi(url, options = {}) {
     const disposition = options.disposition ?? "new-tab";

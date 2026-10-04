@@ -133,6 +133,8 @@ export interface BookmarkEntry {
   url: string;
   order: number;
   createdAt: number;
+  description?: string;
+  tags?: string[];
   favorite: boolean;
   favoriteOrder?: number;
   visualKind: BookmarkVisualKind;
@@ -209,7 +211,7 @@ export interface FormRecoveryPolicy {
 }
 
 export interface BrowserCoreState {
-  version: 5;
+  version: 6;
   settings: BrowserSettings;
   siteZoom: Record<string, number>;
   containers: Record<ContainerId, BrowserContainer>;
@@ -221,6 +223,31 @@ export interface BrowserCoreState {
   formRecovery: Record<string, FormRecoverySnapshot[]>;
   formRecoveryPolicies: Record<string, FormRecoveryPolicy>;
   sessionCheckpoint: BrowserSessionCheckpoint;
+  surfingMigration?: SurfingMigrationRecord;
+}
+
+export interface SurfingMigrationRecord {
+  sourcePartition: string;
+  surfingContainerId: ContainerId;
+  previousDefaultContainerId: ContainerId;
+  backupPath: string;
+  startedAt: number;
+  completedAt?: number;
+  tabs: Array<{
+    sourceKey: string;
+    url: string;
+    title?: string;
+    pinned: boolean;
+    active: boolean;
+    history: BrowserTransientHistoryEntry[];
+    historyIndex: number;
+  }>;
+  completedTabKeys: string[];
+  historyLeafIds: Record<string, LeafId>;
+  initialImportComplete: boolean;
+  bookmarksAdded: number;
+  bookmarksReused: number;
+  settingsImported: boolean;
 }
 
 export interface BrowserLeafViewState extends Record<string, unknown> {

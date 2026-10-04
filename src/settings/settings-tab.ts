@@ -74,6 +74,21 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
     customSearchSetting.settingEl.style.display = currentSearchPreset ? "none" : "";
 
+    new Setting(containerEl).setName("Migration").setHeading();
+    const surfingMigration = this.plugin.core.state.surfingMigration;
+    new Setting(containerEl)
+      .setName("Migrate from Surfing")
+      .setDesc(surfingMigration?.completedAt
+        ? `Completed. Original Surfing data was kept. Backup: ${surfingMigration.backupPath}`
+        : "Adopt Surfing's persistent login session, import bookmarks and compatible settings, and copy open tabs. Existing Browser Core data and Surfing source files are kept.")
+      .addButton((button) => button
+        .setButtonText(surfingMigration?.completedAt ? "Migrated" : surfingMigration ? "Resume migration" : "Preview and migrate")
+        .setDisabled(Boolean(surfingMigration?.completedAt))
+        .onClick(async () => {
+          await this.plugin.migrateFromSurfing();
+          this.display();
+        }));
+
     new Setting(containerEl).setName("Home").setHeading();
 
     new Setting(containerEl)
@@ -441,7 +456,7 @@ export class BrowserSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("Containers").setHeading();
     new Setting(containerEl)
       .setName("Container use")
-      .setDesc("Off uses the default browser session only. Manual keeps containers available without automatic site routing. Automatic also applies site default rules.")
+      .setDesc("Off uses only the selected default container. Manual keeps other containers available without automatic site routing. Automatic also applies site default rules.")
       .addDropdown((dropdown) =>
         dropdown
           .addOption("off", "Off")
@@ -456,14 +471,13 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
     new Setting(containerEl)
       .setName("Default container")
-      .setDesc("Used for new browser tabs when containers are enabled. Automatic mode may replace it with a site's default container.")
+      .setDesc("Used for new browser tabs, including when container controls are off. Automatic mode may replace it with a site's default container.")
       .addDropdown((dropdown) => {
         for (const container of this.plugin.core.containers.list()) {
           dropdown.addOption(container.id, container.name);
         }
         dropdown
           .setValue(this.plugin.core.settings().defaultContainerId)
-          .setDisabled(this.plugin.core.settings().containerMode === "off")
           .onChange((value) => this.plugin.core.updateSettings({ defaultContainerId: value }));
       });
     for (const container of this.plugin.core.containers.list()) {

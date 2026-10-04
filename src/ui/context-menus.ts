@@ -123,6 +123,8 @@ export function showBookmarkMenu(
       favorite: bookmark.favorite,
       visualKind: bookmark.visualKind,
       visualValue: bookmark.visualValue,
+      description: bookmark.description,
+      tags: bookmark.tags,
     });
     if (!draft) return;
     if (!plugin.core.bookmarks.updateBookmark(bookmark.id, draft)) return;

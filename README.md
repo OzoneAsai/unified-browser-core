@@ -9,7 +9,7 @@ Unified Browser Core is a desktop-only browser plugin for [Obsidian](https://obs
 - Open web pages in browser views inside the Obsidian workspace.
 - Organize browsing into containers with separate persistent sessions.
 - Track navigation as graph history and restore closed tabs with their available state.
-- Save and organize bookmarks, including importing from Obsidian's Bookmarks core plugin and Web viewer Bookmarks.
+- Save and organize bookmarks, including importing from Obsidian's Bookmarks core plugin, Web viewer Bookmarks, and Surfing.
 - Restore tabs and windows after restarting Obsidian.
 - Handle browser permissions and popup requests through Browser Core.
 - Optionally recover form contents for sites you explicitly allow. Form recovery is off by default and excludes password, payment, one-time-code, WebAuthn, file, and hidden fields.
@@ -20,6 +20,14 @@ Unified Browser Core is a desktop-only browser plugin for [Obsidian](https://obs
 In a vault that has Web viewer Bookmarks installed, open Unified Browser Core's Bookmarks page and choose **Import Web viewer Bookmarks**, or run **Import bookmarks from Web viewer Bookmarks** from the command palette. UBC reads that plugin's `data.json` from the same vault and leaves it unchanged. Repeating the import skips URLs already in UBC.
 
 The import copies web URLs, titles, and Lucide icons. Bookmarks shown in the source plugin's ribbon become UBC favorites. URLs containing `{{selection}}` expand the selected text from an active Markdown editor when opened. Per-bookmark commands and the source plugin's opening mode are not copied.
+
+## Migrate from Surfing
+
+While Surfing is still installed, open **Unified Browser Core → Settings → Migration → Migrate from Surfing**, or run **Migrate browsing data from Surfing**. Review the preview and confirm. Keep Surfing installed until you have checked the migrated pages and bookmarks in UBC.
+
+The migration registers Surfing's vault-specific persistent Electron session as a dedicated UBC container and selects it for new tabs. Cookies, local storage, IndexedDB, and other data in that session remain available without copying Chromium's live database files. Existing UBC containers keep their own sessions. Because both plugins refer to the same session, clearing browsing data in either plugin clears that shared profile. Uninstalling Surfing's plugin files does not itself clear the Electron session; deleting Obsidian's application data does.
+
+UBC also imports Surfing bookmarks from `.obsidian/surfing-bookmark.json`, including folders, descriptions, and tags. It imports Surfing's open tabs and their available navigation history, then maps the selected search engine and bookmark-bar setting where UBC has an equivalent. Surfing-only feature settings are saved in the migration backup but are not enabled as UBC features. The backup includes the original Surfing settings and bookmarks plus UBC's pre-migration state, and is written inside UBC's plugin folder before any UBC state changes. Surfing's source files and open tabs are left untouched. If Surfing is disabled before migration, saved workspace tabs may be recoverable, but live WebView navigation history is unavailable.
 
 ## Requirements
 

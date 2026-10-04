@@ -2210,7 +2210,8 @@ export class BrowserView extends ItemView {
       if (needle) {
         const matches = allBookmarks.filter((bookmark) => {
           const path = bookmark.parentId ? this.plugin.core.bookmarks.folderPath(bookmark.parentId) : "";
-          return [bookmark.title, bookmark.url, path].some((value) => value.toLowerCase().includes(needle));
+          return [bookmark.title, bookmark.url, path, bookmark.description ?? "", ...(bookmark.tags ?? [])]
+            .some((value) => value.toLowerCase().includes(needle));
         });
         summary.setText(
           matches.length
@@ -2270,6 +2271,8 @@ export class BrowserView extends ItemView {
       cls: "ubc-bookmark-meta",
       text: path ? `${path} · ${bookmark.url}` : bookmark.url,
     });
+    if (bookmark.description) content.createSpan({ cls: "ubc-bookmark-meta", text: bookmark.description });
+    if (bookmark.tags?.length) content.createSpan({ cls: "ubc-bookmark-meta", text: bookmark.tags.join(" · ") });
     this.renderBookmarkFavoriteToggle(row, bookmark);
     row.addEventListener("contextmenu", (event) => {
       event.preventDefault();

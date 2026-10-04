@@ -16,6 +16,9 @@ export interface BookmarkInput {
   visualKind?: BookmarkVisualKind;
   visualValue?: string;
   faviconUrl?: string;
+  description?: string;
+  tags?: string[];
+  createdAt?: number;
 }
 
 export interface ImportedWebBookmark {
@@ -25,6 +28,9 @@ export interface ImportedWebBookmark {
   favorite?: boolean;
   visualKind?: BookmarkVisualKind;
   visualValue?: string;
+  description?: string;
+  tags?: string[];
+  createdAt?: number;
 }
 
 export interface BookmarkImportSummary {
@@ -52,6 +58,14 @@ export class BookmarkStore {
         existing.favoriteOrder = this.nextFavoriteOrder();
         changed = true;
       }
+      if (!existing.description && input.description) {
+        existing.description = input.description;
+        changed = true;
+      }
+      if ((!existing.tags || existing.tags.length === 0) && input.tags?.length) {
+        existing.tags = [...input.tags];
+        changed = true;
+      }
       if (changed) this.onChanged({ action: "updated", kind: "bookmark", id: existing.id, entry: existing });
       return existing;
     }
@@ -63,7 +77,9 @@ export class BookmarkStore {
       title: input.title || input.url,
       url: input.url,
       order: siblings.length,
-      createdAt: Date.now(),
+      createdAt: input.createdAt ?? Date.now(),
+      description: input.description,
+      tags: input.tags ? [...input.tags] : undefined,
       favorite: input.favorite ?? false,
       favoriteOrder: input.favorite ? this.nextFavoriteOrder() : undefined,
       visualKind: input.visualKind ?? "favicon",
@@ -95,24 +111,22 @@ export class BookmarkStore {
     let foldersCreated = 0;
 
     for (const entry of entries) {
-      let parentId: BookmarkFolderId | null = null;
-      for (const rawTitle of entry.folderPath) {
-        const title = rawTitle.trim();
-        if (!title) continue;
-        const existing: BookmarkFolder | undefined = this.children(parentId).find(
-          (child): child is BookmarkFolder => child.kind === "folder" && child.title === title,
-        );
-        if (existing) {
-          parentId = existing.id;
-          continue;
-        }
-        const folder = this.addFolder(title, parentId);
-        parentId = folder.id;
-        foldersCreated += 1;
-      }
+      const folder = this.ensureFolderPath(entry.folderPath);
+      const parentId = folder.parentId;
+      foldersCreated += folder.created;
 
       const existing = this.findByUrl(entry.url);
       if (existing) {
+        let changed = false;
+        if (!existing.description && entry.description) {
+          existing.description = entry.description;
+          changed = true;
+        }
+        if ((!existing.tags || existing.tags.length === 0) && entry.tags?.length) {
+          existing.tags = [...entry.tags];
+          changed = true;
+        }
+        if (changed) this.onChanged({ action: "updated", kind: "bookmark", id: existing.id, entry: existing });
         reused += 1;
         continue;
       }
@@ -123,11 +137,34 @@ export class BookmarkStore {
         favorite: entry.favorite,
         visualKind: entry.visualKind,
         visualValue: entry.visualValue,
+        description: entry.description,
+        tags: entry.tags,
+        createdAt: entry.createdAt,
       });
       added += 1;
     }
 
     return { added, reused, foldersCreated };
+  }
+
+  ensureFolderPath(path: string[]): { parentId: BookmarkFolderId | null; created: number } {
+    let parentId: BookmarkFolderId | null = null;
+    let created = 0;
+    for (const rawTitle of path) {
+      const title = rawTitle.trim();
+      if (!title) continue;
+      const existing: BookmarkFolder | undefined = this.children(parentId).find(
+        (child): child is BookmarkFolder => child.kind === "folder" && child.title === title,
+      );
+      if (existing) {
+        parentId = existing.id;
+        continue;
+      }
+      const folder = this.addFolder(title, parentId);
+      parentId = folder.id;
+      created += 1;
+    }
+    return { parentId, created };
   }
 
   deleteBookmark(id: string): void {
@@ -189,7 +226,7 @@ export class BookmarkStore {
 
   updateBookmark(
     id: string,
-    patch: Partial<Pick<BookmarkEntry, "title" | "url" | "favorite" | "visualKind" | "visualValue" | "faviconUrl">>,
+    patch: Partial<Pick<BookmarkEntry, "title" | "url" | "favorite" | "visualKind" | "visualValue" | "faviconUrl" | "description" | "tags">>,
   ): boolean {
     const bookmark = this.state.bookmarks[id];
     if (!bookmark) return false;
@@ -197,6 +234,8 @@ export class BookmarkStore {
     if (patch.url !== undefined) bookmark.url = patch.url.trim() || bookmark.url;
     if (bookmark.url !== previousUrl && patch.faviconUrl === undefined) bookmark.faviconUrl = undefined;
     if (patch.title !== undefined) bookmark.title = patch.title.trim() || bookmark.url;
+    if (patch.description !== undefined) bookmark.description = patch.description.trim() || undefined;
+    if (patch.tags !== undefined) bookmark.tags = [...patch.tags];
     if (patch.favorite !== undefined) bookmark.favorite = patch.favorite;
     if (patch.visualKind !== undefined) {
       bookmark.visualKind = patch.visualKind;
@@ -304,7 +343,8 @@ export class BookmarkStore {
   search(query: string): BookmarkEntry[] {
     const needle = query.toLowerCase();
     return Object.values(this.state.bookmarks)
-      .filter((bookmark) => bookmark.title.toLowerCase().includes(needle) || bookmark.url.toLowerCase().includes(needle))
+      .filter((bookmark) => [bookmark.title, bookmark.url, bookmark.description ?? "", ...(bookmark.tags ?? [])]
+        .some((value) => value.toLowerCase().includes(needle)))
       .sort((a, b) => b.createdAt - a.createdAt);
   }
 

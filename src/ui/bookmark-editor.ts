@@ -5,12 +5,16 @@ import { renderBookmarkVisual } from "./bookmark-visual";
 export type BookmarkDraft = {
   title: string;
   url: string;
+  description?: string;
+  tags?: string[];
   favorite?: boolean;
   visualKind?: BookmarkVisualKind;
   visualValue?: string;
 };
 
 export interface BookmarkEditorOptions {
+  description?: string;
+  tags?: string[];
   favorite?: boolean;
   visualKind?: BookmarkVisualKind;
   visualValue?: string;
@@ -58,6 +62,21 @@ class BookmarkEditorModal extends Modal {
       attr: { type: "url", placeholder: "https://…", "aria-label": "Bookmark URL" },
     });
     url.value = this.initialUrl;
+
+    const descriptionField = this.contentEl.createEl("label", { cls: "ubc-prompt-field" });
+    descriptionField.createSpan({ cls: "ubc-prompt-label", text: "Description" });
+    const description = descriptionField.createEl("input", {
+      cls: "ubc-prompt-input",
+      attr: { type: "text", "aria-label": "Bookmark description" },
+    });
+    description.value = this.options.description ?? "";
+    const tagsField = this.contentEl.createEl("label", { cls: "ubc-prompt-field" });
+    tagsField.createSpan({ cls: "ubc-prompt-label", text: "Tags" });
+    const tags = tagsField.createEl("input", {
+      cls: "ubc-prompt-input",
+      attr: { type: "text", placeholder: "Separate tags with spaces", "aria-label": "Bookmark tags" },
+    });
+    tags.value = (this.options.tags ?? []).join(" ");
 
     const favoriteField = this.contentEl.createEl("label", { cls: "ubc-prompt-check" });
     const favorite = favoriteField.createEl("input", { attr: { type: "checkbox" } });
@@ -124,6 +143,8 @@ class BookmarkEditorModal extends Modal {
       this.finish({
         title: title.value.trim() || nextUrl,
         url: nextUrl,
+        description: description.value.trim(),
+        tags: tags.value.trim() ? tags.value.trim().split(/\s+/) : [],
         favorite: favorite.checked,
         visualKind: kind,
         visualValue: kind === "favicon" ? undefined : visualValue.value.trim() || undefined,
