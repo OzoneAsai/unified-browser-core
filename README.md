@@ -138,3 +138,8 @@ Dragging inside the tab strip reorders tabs. Moving at least 32 px above/below t
 ### 0.2.3 drag safety
 
 Obsidian receives the original tab drag start and owns pane movement and split previews. UBC intercepts drag-over/drop only while the pointer is inside a browser tab strip and reorders the existing leaves there. The temporary full-window overlay and mid-drag call into Obsidian's private pane-drag method were removed because they could obscure native drop-target detection and cause a tab to land outside the visible workspace.
+
+
+### 0.2.4 native tabs
+
+Only UBC tab headers receive Firefox-style sizing and strip classes. If a tab group mixes UBC and ordinary Obsidian views, UBC keeps its own browser-tab decoration while the shared strip geometry and native tabs remain untouched. This also clears stale UBC layout classes from native tabs on refresh.

@@ -817,6 +817,9 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
         container?.color,
       );
     }
+    // Clean stale classes left by older releases from every pane, including
+    // native sidebars and panes that no longer contain a browser view.
+    this.tabStripAdapter.refreshAllStrips(this.app.workspace);
     this.revealActiveTab();
   }
 

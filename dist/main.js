@@ -776,9 +776,9 @@ var ObsidianTabStripAdapter = class {
     plugin.register(clear);
     plugin.registerDomEvent(document, "dragstart", (event) => {
       const target = event.target;
-      const header = target.closest?.(".workspace-tab-header.ubc-browser-tab-layout");
+      const header = target.closest?.(".workspace-tab-header.ubc-browser-tab");
       const strip = header?.parentElement;
-      if (!header || !strip?.hasClass("ubc-browser-tab-strip") || event.altKey) return;
+      if (!header || !strip?.querySelector(".workspace-tab-header.ubc-browser-tab") || event.altKey) return;
       let leaf;
       plugin.app.workspace.iterateAllLeaves((candidate) => {
         if (this.tabHeader(candidate) === header) leaf = candidate;
@@ -942,6 +942,14 @@ var ObsidianTabStripAdapter = class {
       else if (headerRect.right > stripRect.right) strip.scrollLeft += headerRect.right - stripRect.right;
     });
   }
+  refreshAllStrips(workspace) {
+    const strips = /* @__PURE__ */ new Set();
+    workspace.iterateAllLeaves((leaf) => {
+      const strip = this.tabHeader(leaf)?.parentElement;
+      if (strip instanceof HTMLElement) strips.add(strip);
+    });
+    for (const strip of strips) this.refreshStripStyle(strip);
+  }
   tabHeader(leaf) {
     return leaf.tabHeaderEl;
   }
@@ -962,7 +970,7 @@ var ObsidianTabStripAdapter = class {
     const headers = [...strip.querySelectorAll(".workspace-tab-header")];
     for (const header of headers) header.removeClass("ubc-browser-tab-layout");
     const browserHeaders = headers.filter((header) => header.hasClass("ubc-browser-tab"));
-    if (!headers.length || !browserHeaders.length) return;
+    if (!headers.length || !browserHeaders.length || browserHeaders.length !== headers.length) return;
     const overflowModes = new Set(browserHeaders.map((header) => header.dataset.ubcTabOverflow).filter(Boolean));
     if (overflowModes.size !== 1) return;
     const mode = [...overflowModes][0];
@@ -979,7 +987,7 @@ var ObsidianTabStripAdapter = class {
       const value = source.style.getPropertyValue(variable);
       if (value) strip.style.setProperty(variable, value);
     }
-    for (const header of headers) header.addClass("ubc-browser-tab-layout");
+    for (const header of browserHeaders) header.addClass("ubc-browser-tab-layout");
     strip.addClass("ubc-browser-tab-strip");
     strip.addClass(mode === "horizontal-scroll" ? "ubc-browser-tab-strip-scroll" : "ubc-browser-tab-strip-compress");
   }
@@ -9620,6 +9628,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian16.Plugin {
         container?.color
       );
     }
+    this.tabStripAdapter.refreshAllStrips(this.app.workspace);
     this.revealActiveTab();
   }
   revealActiveTab() {

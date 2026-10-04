@@ -47,9 +47,9 @@ export class ObsidianTabStripAdapter {
     plugin.register(clear);
     plugin.registerDomEvent(document, "dragstart", (event: DragEvent) => {
       const target = event.target as HTMLElement;
-      const header = target.closest?.<HTMLElement>(".workspace-tab-header.ubc-browser-tab-layout");
+      const header = target.closest?.<HTMLElement>(".workspace-tab-header.ubc-browser-tab");
       const strip = header?.parentElement;
-      if (!header || !strip?.hasClass("ubc-browser-tab-strip") || event.altKey) return;
+      if (!header || !strip?.querySelector(".workspace-tab-header.ubc-browser-tab") || event.altKey) return;
       let leaf: WorkspaceLeaf | undefined;
       plugin.app.workspace.iterateAllLeaves((candidate) => { if (this.tabHeader(candidate) === header) leaf = candidate; });
       const group = leaf?.parent as unknown as TabGroup | undefined;
@@ -226,6 +226,15 @@ export class ObsidianTabStripAdapter {
     });
   }
 
+  refreshAllStrips(workspace: { iterateAllLeaves(callback: (leaf: WorkspaceLeaf) => void): void }): void {
+    const strips = new Set<HTMLElement>();
+    workspace.iterateAllLeaves((leaf) => {
+      const strip = this.tabHeader(leaf)?.parentElement;
+      if (strip instanceof HTMLElement) strips.add(strip);
+    });
+    for (const strip of strips) this.refreshStripStyle(strip);
+  }
+
   private tabHeader(leaf: WorkspaceLeaf): HTMLElement | undefined {
     return (leaf as WorkspaceLeaf & { tabHeaderEl?: HTMLElement }).tabHeaderEl;
   }
@@ -247,7 +256,10 @@ export class ObsidianTabStripAdapter {
     const headers = [...strip.querySelectorAll<HTMLElement>(".workspace-tab-header")];
     for (const header of headers) header.removeClass("ubc-browser-tab-layout");
     const browserHeaders = headers.filter((header) => header.hasClass("ubc-browser-tab"));
-    if (!headers.length || !browserHeaders.length) return;
+    // A native tab group can contain both UBC views and ordinary Obsidian views.
+    // In a mixed strip, style only UBC headers above and leave the strip geometry
+    // and every native header under Obsidian's own theme/layout rules.
+    if (!headers.length || !browserHeaders.length || browserHeaders.length !== headers.length) return;
     const overflowModes = new Set(browserHeaders.map((header) => header.dataset.ubcTabOverflow).filter(Boolean));
     if (overflowModes.size !== 1) return;
     const mode = [...overflowModes][0];
@@ -264,7 +276,7 @@ export class ObsidianTabStripAdapter {
       const value = source.style.getPropertyValue(variable);
       if (value) strip.style.setProperty(variable, value);
     }
-    for (const header of headers) header.addClass("ubc-browser-tab-layout");
+    for (const header of browserHeaders) header.addClass("ubc-browser-tab-layout");
     strip.addClass("ubc-browser-tab-strip");
     strip.addClass(mode === "horizontal-scroll" ? "ubc-browser-tab-strip-scroll" : "ubc-browser-tab-strip-compress");
   }
