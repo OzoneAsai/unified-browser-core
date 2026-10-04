@@ -721,9 +721,17 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
 
   captureSessionCheckpoint(): void {
     const leaves = this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE).flatMap((leaf) => {
-      if (!(leaf.view instanceof BrowserView)) return [];
-      const state = leaf.view.getState();
+      const state = leaf.view.getState() as BrowserLeafViewState;
+      if (!(leaf.view instanceof BrowserView)) {
+        const previous = this.core.state.sessionCheckpoint.leaves.find((saved) => saved.sourceLifecycleId === state.lifecycleId);
+        if (!state.lifecycleId || !state.url) return previous ? [previous] : [];
+        return [{ ...previous, ...state, sourceLifecycleId: state.lifecycleId, url: state.url,
+          containerId: state.containerId || this.core.settings().defaultContainerId,
+          pinned: state.pinned ?? false, manualRetention: state.manualRetention ?? "default" }];
+      }
       return [{
+        title: state.title,
+        faviconDataUrl: state.faviconDataUrl,
         sourceLifecycleId: state.lifecycleId || leaf.view.lifecycleIdentity(),
         url: state.url || leaf.view.currentUrl(),
         containerId: state.containerId || this.core.settings().defaultContainerId,
@@ -756,6 +764,8 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
         containerId: saved.containerId,
         restoredFromLeafId: saved.sourceLifecycleId,
         state: {
+          title: saved.title,
+          faviconDataUrl: saved.faviconDataUrl,
           pinned: saved.pinned,
           manualRetention: saved.manualRetention,
           siteAssignmentBypassOrigin: saved.siteAssignmentBypassOrigin,
@@ -787,6 +797,15 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     const policy = resolveTabLayoutPolicy(settings.tabStyle);
     for (const leaf of this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE)) {
       const state = leaf.view.getState() as BrowserLeafViewState;
+      if (!(leaf.view instanceof BrowserView)) {
+        const saved = this.core.state.history.leaves[state.lifecycleId ?? state.restoredFromLeafId ?? ""];
+        const savedEntry = state.transientHistory?.[state.transientIndex ?? state.transientHistory.length - 1];
+        const title = state.title || (savedEntry?.kind === "web" ? savedEntry.title : undefined) || saved?.lastTitle || state.url || t("Browser");
+        this.tabStripAdapter.refreshLeafHeader(leaf, false, title);
+        const favicon = typeof state.faviconDataUrl === "string" && state.faviconDataUrl.length < 350000 && /^data:image\/(?:png|jpeg|webp|gif);base64,[a-zA-Z0-9+/=]+$/.test(state.faviconDataUrl) ? state.faviconDataUrl : undefined;
+        this.tabStripAdapter.applyLeafFavicon(leaf, favicon);
+        (leaf as typeof leaf & { tabHeaderEl?: HTMLElement }).tabHeaderEl?.addClass("ubc-browser-tab-pending");
+      }
       const container = settings.containerMode !== "off" && state.containerId
         ? this.core.containers.find(state.containerId)
         : undefined;

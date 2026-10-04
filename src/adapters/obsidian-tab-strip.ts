@@ -60,6 +60,7 @@ export class ObsidianTabStripAdapter {
     const strip = header.parentElement;
     header.removeClass(
       "ubc-browser-tab",
+      "ubc-browser-tab-pending",
       "ubc-browser-tab-layout",
       "ubc-browser-tab-pinned",
       "ubc-browser-tab-title-adaptive",
@@ -82,12 +83,12 @@ export class ObsidianTabStripAdapter {
     });
   }
 
-  refreshLeafHeader(leaf: WorkspaceLeaf, activeInWindow = false): void {
+  refreshLeafHeader(leaf: WorkspaceLeaf, activeInWindow = false, savedTitle?: string): void {
     const compatLeaf = leaf as WorkspaceLeaf & {
       updateHeader?: () => void;
       tabHeaderInnerTitleEl?: HTMLElement;
     };
-    const title = leaf.view.getDisplayText();
+    const title = savedTitle || leaf.view.getDisplayText();
     const viewCompat = leaf.view as typeof leaf.view & { titleEl?: HTMLElement };
     const viewTitleEl = viewCompat.titleEl ?? leaf.view.containerEl.querySelector<HTMLElement>(".view-header-title");
     if (viewTitleEl && viewTitleEl.innerText !== title) viewTitleEl.innerText = title;
@@ -97,6 +98,8 @@ export class ObsidianTabStripAdapter {
       // fallback isolated in the adapter so BrowserView never depends on it.
       compatLeaf.tabHeaderInnerTitleEl.innerText = title;
     }
+    this.tabHeader(leaf)?.setAttribute("aria-label", title);
+    this.tabHeader(leaf)?.setAttribute("title", title);
     if (activeInWindow) {
       const doc = leaf.getContainer().doc;
       const separator = doc.title.indexOf(" - ");

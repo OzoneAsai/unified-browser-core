@@ -212,6 +212,8 @@ export class BrowserView extends ItemView {
     return {
       lifecycleId: this.lifecycleId,
       bookmarkLayout: this.bookmarkLayout,
+      title: this.currentTitle,
+      faviconDataUrl: this.faviconDataUrl,
       url: this.currentUrlValue,
       containerId: this.containerId,
       siteAssignmentBypassOrigin: this.siteAssignmentBypassOrigin,
@@ -260,6 +262,12 @@ export class BrowserView extends ItemView {
     }
 
     if (initialState) {
+      const savedLeaf = this.plugin.core.state.history.leaves[state.lifecycleId ?? state.restoredFromLeafId ?? ""];
+      const savedEntry = state.transientHistory?.[state.transientIndex ?? state.transientHistory.length - 1];
+      const savedTitle = state.title ?? (savedEntry?.kind === "web" ? savedEntry.title : undefined) ?? savedLeaf?.lastTitle;
+      this.currentTitle = savedTitle?.trim() || url;
+      this.faviconDataUrl = validSavedFavicon(state.faviconDataUrl);
+      this.refreshLeafHeader();
       if (state.lifecycleId) this.lifecycleId = state.lifecycleId;
       this.containerId = requestedContainer;
       this.pinned = state.pinned ?? this.pinned;
@@ -331,7 +339,8 @@ export class BrowserView extends ItemView {
   refreshZoom(): void {
     const webview = this.readyWebview();
     if (!webview) return;
-    webview.setZoomFactor?.(this.plugin.core.zoom.factorForUrl(this.currentUrlValue));
+    const desired = this.plugin.core.zoom.factorForUrl(this.currentUrlValue);
+    if (!webview.getZoomFactor || Math.abs(webview.getZoomFactor() - desired) > .001) webview.setZoomFactor?.(desired);
   }
 
   inspectPage(): void {
@@ -968,6 +977,8 @@ export class BrowserView extends ItemView {
       stopped: "Stopped",
       restored: "Restored",
     } satisfies Record<NavigationStatus, string>)[status];
+    const header = (this.leaf as WorkspaceLeaf & { tabHeaderEl?: HTMLElement }).tabHeaderEl;
+    header?.toggleClass("ubc-browser-tab-pending", status === "waiting" || status === "loading" || status === "failed" || status === "offline" || status === "stopped");
     if (this.statusEl) {
       this.statusEl.textContent = t(label);
       this.statusEl.dataset.status = status;
@@ -1569,7 +1580,7 @@ export class BrowserView extends ItemView {
   private async handleDomReady(): Promise<void> {
     const webview = this.readyWebview();
     if (!webview) return;
-    webview.setZoomFactor?.(this.plugin.core.zoom.factorForUrl(this.currentUrlValue));
+    this.refreshZoom();
     if (!this.faviconDataUrl) void this.captureFavicon(webview, []);
     if (this.formRecoveryEnabledForSite()) {
       await this.installFormRecoveryInstrumentation(webview);
@@ -1633,6 +1644,7 @@ export class BrowserView extends ItemView {
       if (liveUrl !== expectedUrl) return;
       if (result.sourceUrl) this.rememberFaviconSource([result.sourceUrl], liveUrl);
       this.faviconDataUrl = result.dataUrl;
+      this.plugin.scheduleSessionCheckpoint();
       this.refreshLeafHeader();
     } catch {
       // Favicons are a presentation enhancement; navigation must not depend on them.
@@ -3598,4 +3610,8 @@ function residualLabel(kind: "reload" | "redirect" | "in-page" | "other"): strin
   if (kind === "redirect") return "Redirect";
   if (kind === "in-page") return "In-page navigation";
   return "Browser event";
+}
+
+function validSavedFavicon(value: unknown): string | undefined {
+  return typeof value === "string" && value.length < 350000 && /^data:image\/(?:png|jpeg|webp|gif);base64,[a-zA-Z0-9+/=]+$/.test(value) ? value : undefined;
 }

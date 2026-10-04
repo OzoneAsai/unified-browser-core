@@ -165,6 +165,8 @@ export interface PermissionRecord {
 }
 
 export interface BrowserSessionLeaf {
+  title?: string;
+  faviconDataUrl?: string;
   sourceLifecycleId: LeafId;
   url: string;
   containerId: ContainerId;
@@ -260,6 +262,8 @@ export interface SurfingMigrationRecord {
 }
 
 export interface BrowserLeafViewState extends Record<string, unknown> {
+  title?: string;
+  faviconDataUrl?: string;
   bookmarkLayout?: "type" | "folder" | "selected";
   lifecycleId?: LeafId;
   url?: string;

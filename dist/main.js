@@ -786,6 +786,7 @@ var ObsidianTabStripAdapter = class {
     const strip = header.parentElement;
     header.removeClass(
       "ubc-browser-tab",
+      "ubc-browser-tab-pending",
       "ubc-browser-tab-layout",
       "ubc-browser-tab-pinned",
       "ubc-browser-tab-title-adaptive",
@@ -807,9 +808,9 @@ var ObsidianTabStripAdapter = class {
       this.refreshStripStyle(strip);
     });
   }
-  refreshLeafHeader(leaf, activeInWindow = false) {
+  refreshLeafHeader(leaf, activeInWindow = false, savedTitle) {
     const compatLeaf = leaf;
-    const title = leaf.view.getDisplayText();
+    const title = savedTitle || leaf.view.getDisplayText();
     const viewCompat = leaf.view;
     const viewTitleEl = viewCompat.titleEl ?? leaf.view.containerEl.querySelector(".view-header-title");
     if (viewTitleEl && viewTitleEl.innerText !== title) viewTitleEl.innerText = title;
@@ -817,6 +818,8 @@ var ObsidianTabStripAdapter = class {
     if (compatLeaf.tabHeaderInnerTitleEl && compatLeaf.tabHeaderInnerTitleEl.innerText !== title) {
       compatLeaf.tabHeaderInnerTitleEl.innerText = title;
     }
+    this.tabHeader(leaf)?.setAttribute("aria-label", title);
+    this.tabHeader(leaf)?.setAttribute("title", title);
     if (activeInWindow) {
       const doc = leaf.getContainer().doc;
       const separator = doc.title.indexOf(" - ");
@@ -5268,6 +5271,8 @@ var BrowserView = class _BrowserView extends import_obsidian13.ItemView {
     return {
       lifecycleId: this.lifecycleId,
       bookmarkLayout: this.bookmarkLayout,
+      title: this.currentTitle,
+      faviconDataUrl: this.faviconDataUrl,
       url: this.currentUrlValue,
       containerId: this.containerId,
       siteAssignmentBypassOrigin: this.siteAssignmentBypassOrigin,
@@ -5312,6 +5317,12 @@ var BrowserView = class _BrowserView extends import_obsidian13.ItemView {
       return;
     }
     if (initialState) {
+      const savedLeaf = this.plugin.core.state.history.leaves[state.lifecycleId ?? state.restoredFromLeafId ?? ""];
+      const savedEntry = state.transientHistory?.[state.transientIndex ?? state.transientHistory.length - 1];
+      const savedTitle = state.title ?? (savedEntry?.kind === "web" ? savedEntry.title : void 0) ?? savedLeaf?.lastTitle;
+      this.currentTitle = savedTitle?.trim() || url;
+      this.faviconDataUrl = validSavedFavicon(state.faviconDataUrl);
+      this.refreshLeafHeader();
       if (state.lifecycleId) this.lifecycleId = state.lifecycleId;
       this.containerId = requestedContainer;
       this.pinned = state.pinned ?? this.pinned;
@@ -5370,7 +5381,8 @@ var BrowserView = class _BrowserView extends import_obsidian13.ItemView {
   refreshZoom() {
     const webview = this.readyWebview();
     if (!webview) return;
-    webview.setZoomFactor?.(this.plugin.core.zoom.factorForUrl(this.currentUrlValue));
+    const desired = this.plugin.core.zoom.factorForUrl(this.currentUrlValue);
+    if (!webview.getZoomFactor || Math.abs(webview.getZoomFactor() - desired) > 1e-3) webview.setZoomFactor?.(desired);
   }
   inspectPage() {
     this.readyWebview()?.openDevTools?.();
@@ -5903,6 +5915,8 @@ var BrowserView = class _BrowserView extends import_obsidian13.ItemView {
       stopped: "Stopped",
       restored: "Restored"
     }[status];
+    const header = this.leaf.tabHeaderEl;
+    header?.toggleClass("ubc-browser-tab-pending", status === "waiting" || status === "loading" || status === "failed" || status === "offline" || status === "stopped");
     if (this.statusEl) {
       this.statusEl.textContent = t(label);
       this.statusEl.dataset.status = status;
@@ -6441,7 +6455,7 @@ ${item.url}` }
   async handleDomReady() {
     const webview = this.readyWebview();
     if (!webview) return;
-    webview.setZoomFactor?.(this.plugin.core.zoom.factorForUrl(this.currentUrlValue));
+    this.refreshZoom();
     if (!this.faviconDataUrl) void this.captureFavicon(webview, []);
     if (this.formRecoveryEnabledForSite()) {
       await this.installFormRecoveryInstrumentation(webview);
@@ -6502,6 +6516,7 @@ ${item.url}` }
       if (liveUrl !== expectedUrl) return;
       if (result.sourceUrl) this.rememberFaviconSource([result.sourceUrl], liveUrl);
       this.faviconDataUrl = result.dataUrl;
+      this.plugin.scheduleSessionCheckpoint();
       this.refreshLeafHeader();
     } catch {
     }
@@ -8257,6 +8272,9 @@ function residualLabel(kind) {
   if (kind === "in-page") return "In-page navigation";
   return "Browser event";
 }
+function validSavedFavicon(value) {
+  return typeof value === "string" && value.length < 35e4 && /^data:image\/(?:png|jpeg|webp|gif);base64,[a-zA-Z0-9+/=]+$/.test(value) ? value : void 0;
+}
 
 // src/ui/permission-prompt.ts
 var import_obsidian14 = require("obsidian");
@@ -9242,9 +9260,23 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian16.Plugin {
   }
   captureSessionCheckpoint() {
     const leaves = this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE).flatMap((leaf) => {
-      if (!(leaf.view instanceof BrowserView)) return [];
       const state = leaf.view.getState();
+      if (!(leaf.view instanceof BrowserView)) {
+        const previous = this.core.state.sessionCheckpoint.leaves.find((saved) => saved.sourceLifecycleId === state.lifecycleId);
+        if (!state.lifecycleId || !state.url) return previous ? [previous] : [];
+        return [{
+          ...previous,
+          ...state,
+          sourceLifecycleId: state.lifecycleId,
+          url: state.url,
+          containerId: state.containerId || this.core.settings().defaultContainerId,
+          pinned: state.pinned ?? false,
+          manualRetention: state.manualRetention ?? "default"
+        }];
+      }
       return [{
+        title: state.title,
+        faviconDataUrl: state.faviconDataUrl,
         sourceLifecycleId: state.lifecycleId || leaf.view.lifecycleIdentity(),
         url: state.url || leaf.view.currentUrl(),
         containerId: state.containerId || this.core.settings().defaultContainerId,
@@ -9276,6 +9308,8 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian16.Plugin {
         containerId: saved.containerId,
         restoredFromLeafId: saved.sourceLifecycleId,
         state: {
+          title: saved.title,
+          faviconDataUrl: saved.faviconDataUrl,
           pinned: saved.pinned,
           manualRetention: saved.manualRetention,
           siteAssignmentBypassOrigin: saved.siteAssignmentBypassOrigin,
@@ -9305,6 +9339,15 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian16.Plugin {
     const policy = resolveTabLayoutPolicy(settings.tabStyle);
     for (const leaf of this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE)) {
       const state = leaf.view.getState();
+      if (!(leaf.view instanceof BrowserView)) {
+        const saved = this.core.state.history.leaves[state.lifecycleId ?? state.restoredFromLeafId ?? ""];
+        const savedEntry = state.transientHistory?.[state.transientIndex ?? state.transientHistory.length - 1];
+        const title = state.title || (savedEntry?.kind === "web" ? savedEntry.title : void 0) || saved?.lastTitle || state.url || t("Browser");
+        this.tabStripAdapter.refreshLeafHeader(leaf, false, title);
+        const favicon = typeof state.faviconDataUrl === "string" && state.faviconDataUrl.length < 35e4 && /^data:image\/(?:png|jpeg|webp|gif);base64,[a-zA-Z0-9+/=]+$/.test(state.faviconDataUrl) ? state.faviconDataUrl : void 0;
+        this.tabStripAdapter.applyLeafFavicon(leaf, favicon);
+        leaf.tabHeaderEl?.addClass("ubc-browser-tab-pending");
+      }
       const container = settings.containerMode !== "off" && state.containerId ? this.core.containers.find(state.containerId) : void 0;
       this.tabStripAdapter.applyLeafStyle(
         leaf,
