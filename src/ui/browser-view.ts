@@ -11,6 +11,7 @@ import type {
   HistoryNode,
   NavigationNode,
 } from "../core/model";
+import { hostZoomFactor } from "../adapters/electron-zoom";
 import { ElectronNavigationHistoryAdapter } from "../adapters/electron-navigation-history";
 import { historyDayKey } from "../history/day-key";
 import { classifyInPageNavigation } from "../history/navigation-classifier";
@@ -339,7 +340,7 @@ export class BrowserView extends ItemView {
   refreshZoom(): void {
     const webview = this.readyWebview();
     if (!webview) return;
-    const desired = this.plugin.core.zoom.factorForUrl(this.currentUrlValue);
+    const desired = hostZoomFactor(this.rootEl.ownerDocument) * this.plugin.core.zoom.factorForUrl(this.currentUrlValue);
     if (!webview.getZoomFactor || Math.abs(webview.getZoomFactor() - desired) > .001) webview.setZoomFactor?.(desired);
   }
 
@@ -887,7 +888,7 @@ export class BrowserView extends ItemView {
       this.showNavigationHistoryMenu(1, event);
     });
     this.reloadButtonEl = this.addToolbarButton("rotate-cw", t("Reload"), () => {
-      if (this.rootEl.hasClass("is-loading")) this.stopLoading();
+      if (this.rootEl.hasClass("ubc-is-loading")) this.stopLoading();
       else this.reload();
     });
     this.reloadButtonEl.addEventListener("contextmenu", (event) => {
@@ -961,7 +962,7 @@ export class BrowserView extends ItemView {
   }
 
   private applyZoom(factor: number): void {
-    this.readyWebview()?.setZoomFactor?.(factor);
+    this.readyWebview()?.setZoomFactor?.(hostZoomFactor(this.rootEl.ownerDocument) * factor);
     this.plugin.core.scheduleSave();
     this.setNavigationStatus("loaded", `Zoom ${Math.round(factor * 100)}%`);
   }
@@ -1184,7 +1185,7 @@ export class BrowserView extends ItemView {
 
   stopLoading(): void {
     this.readyWebview()?.stop();
-    this.rootEl.removeClass("is-loading");
+    this.rootEl.removeClass("ubc-is-loading");
     this.hideLoadingShield();
     this.setNavigationStatus("stopped");
   }
@@ -1252,6 +1253,7 @@ export class BrowserView extends ItemView {
       const webview = this.plugin.managedWebviewBackend.create(
         this.plugin.core.containers.get(this.containerId).partition,
         () => this.plugin.core.settings(),
+        this.rootEl.ownerDocument,
       );
       this.webview = webview;
       this.webviewDomReady = false;
@@ -1387,13 +1389,13 @@ export class BrowserView extends ItemView {
       });
     });
     webview.addEventListener("did-start-loading", () => {
-      this.rootEl.addClass("is-loading");
+      this.rootEl.addClass("ubc-is-loading");
       this.showLoadingShield();
       this.setNavigationStatus("loading");
     });
     webview.addEventListener("did-stop-loading", () => {
       if (this.ignoreBootstrapAboutBlank && this.safeWebviewUrl(webview) === "about:blank") return;
-      this.rootEl.removeClass("is-loading");
+      this.rootEl.removeClass("ubc-is-loading");
       this.hideLoadingShield();
       this.setNavigationStatus("loaded");
       this.syncWebviewTitle(webview);

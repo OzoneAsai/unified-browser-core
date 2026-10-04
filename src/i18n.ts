@@ -12,6 +12,7 @@ export function t(source: string, values: Record<string, string | number> = {}):
 }
 
 const ja: Record<string, string> = {
+  "Relative to this Obsidian window. Used by sites without a site-specific zoom override.": "このObsidianウィンドウの倍率を基準にします。サイト固有の倍率がない場合に適用されます。",
   "No override": "上書きなし", "Follow theme": "テーマに合わせる", "Custom color": "任意の色",
   "Initial background color": "初期背景色",
   "Choose the background before the site paints. The site's own colors remain in control once painted.": "サイトが描画される前の背景色を選択します。描画後はサイト自身の色が優先されます。",

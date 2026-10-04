@@ -480,7 +480,7 @@ export class BrowserSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName(t("Default web content zoom"))
-      .setDesc(t("Used by sites without a site-specific zoom override."))
+      .setDesc(t("Relative to this Obsidian window. Used by sites without a site-specific zoom override."))
       .addSlider((slider) =>
         slider
           .setLimits(50, 200, 10)

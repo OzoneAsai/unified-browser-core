@@ -683,10 +683,10 @@ var ManagedWebviewBackend = class {
   liveGuests = /* @__PURE__ */ new Set();
   policySessions = /* @__PURE__ */ new Map();
   settings;
-  create(partition, settings) {
+  create(partition, settings, doc = document) {
     this.settings = settings ?? this.settings;
     this.bindPolicy(partition);
-    const webview = document.createElement("webview");
+    const webview = doc.createElement("webview");
     webview.addClass("ubc-webview");
     webview.partition = partition;
     webview.setAttribute("allowpopups", "");
@@ -2927,6 +2927,7 @@ function t(source, values = {}) {
   return result.replace(/\{(\w+)\}/g, (match, key) => String(values[key] ?? match));
 }
 var ja = {
+  "Relative to this Obsidian window. Used by sites without a site-specific zoom override.": "\u3053\u306EObsidian\u30A6\u30A3\u30F3\u30C9\u30A6\u306E\u500D\u7387\u3092\u57FA\u6E96\u306B\u3057\u307E\u3059\u3002\u30B5\u30A4\u30C8\u56FA\u6709\u306E\u500D\u7387\u304C\u306A\u3044\u5834\u5408\u306B\u9069\u7528\u3055\u308C\u307E\u3059\u3002",
   "No override": "\u4E0A\u66F8\u304D\u306A\u3057",
   "Follow theme": "\u30C6\u30FC\u30DE\u306B\u5408\u308F\u305B\u308B",
   "Custom color": "\u4EFB\u610F\u306E\u8272",
@@ -3872,7 +3873,7 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.plugin.applyAccessibilityClasses();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName(t("Default web content zoom")).setDesc(t("Used by sites without a site-specific zoom override.")).addSlider(
+    new import_obsidian3.Setting(containerEl).setName(t("Default web content zoom")).setDesc(t("Relative to this Obsidian window. Used by sites without a site-specific zoom override.")).addSlider(
       (slider) => slider.setLimits(50, 200, 10).setDynamicTooltip().setValue(Math.round(this.plugin.core.settings().defaultZoomFactor * 100)).onChange((value) => {
         this.plugin.core.updateSettings({ defaultZoomFactor: value / 100 });
         this.plugin.refreshBrowserZoom();
@@ -4021,6 +4022,17 @@ function searchPresetForTemplate(template) {
 
 // src/ui/browser-view.ts
 var import_obsidian13 = require("obsidian");
+
+// src/adapters/electron-zoom.ts
+function hostZoomFactor(doc) {
+  try {
+    const win = doc.defaultView;
+    const value = win?.require?.("electron")?.webFrame?.getZoomFactor?.();
+    return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 1;
+  } catch {
+    return 1;
+  }
+}
 
 // src/adapters/electron-navigation-history.ts
 var ElectronNavigationHistoryAdapter = class {
@@ -5381,7 +5393,7 @@ var BrowserView = class _BrowserView extends import_obsidian13.ItemView {
   refreshZoom() {
     const webview = this.readyWebview();
     if (!webview) return;
-    const desired = this.plugin.core.zoom.factorForUrl(this.currentUrlValue);
+    const desired = hostZoomFactor(this.rootEl.ownerDocument) * this.plugin.core.zoom.factorForUrl(this.currentUrlValue);
     if (!webview.getZoomFactor || Math.abs(webview.getZoomFactor() - desired) > 1e-3) webview.setZoomFactor?.(desired);
   }
   inspectPage() {
@@ -5832,7 +5844,7 @@ var BrowserView = class _BrowserView extends import_obsidian13.ItemView {
       this.showNavigationHistoryMenu(1, event);
     });
     this.reloadButtonEl = this.addToolbarButton("rotate-cw", t("Reload"), () => {
-      if (this.rootEl.hasClass("is-loading")) this.stopLoading();
+      if (this.rootEl.hasClass("ubc-is-loading")) this.stopLoading();
       else this.reload();
     });
     this.reloadButtonEl.addEventListener("contextmenu", (event) => {
@@ -5900,7 +5912,7 @@ var BrowserView = class _BrowserView extends import_obsidian13.ItemView {
     return button;
   }
   applyZoom(factor) {
-    this.readyWebview()?.setZoomFactor?.(factor);
+    this.readyWebview()?.setZoomFactor?.(hostZoomFactor(this.rootEl.ownerDocument) * factor);
     this.plugin.core.scheduleSave();
     this.setNavigationStatus("loaded", `Zoom ${Math.round(factor * 100)}%`);
   }
@@ -6113,7 +6125,7 @@ ${item.url}` }
   }
   stopLoading() {
     this.readyWebview()?.stop();
-    this.rootEl.removeClass("is-loading");
+    this.rootEl.removeClass("ubc-is-loading");
     this.hideLoadingShield();
     this.setNavigationStatus("stopped");
   }
@@ -6170,7 +6182,8 @@ ${item.url}` }
     if (!this.webview) {
       const webview2 = this.plugin.managedWebviewBackend.create(
         this.plugin.core.containers.get(this.containerId).partition,
-        () => this.plugin.core.settings()
+        () => this.plugin.core.settings(),
+        this.rootEl.ownerDocument
       );
       this.webview = webview2;
       this.webviewDomReady = false;
@@ -6298,13 +6311,13 @@ ${item.url}` }
       });
     });
     webview.addEventListener("did-start-loading", () => {
-      this.rootEl.addClass("is-loading");
+      this.rootEl.addClass("ubc-is-loading");
       this.showLoadingShield();
       this.setNavigationStatus("loading");
     });
     webview.addEventListener("did-stop-loading", () => {
       if (this.ignoreBootstrapAboutBlank && this.safeWebviewUrl(webview) === "about:blank") return;
-      this.rootEl.removeClass("is-loading");
+      this.rootEl.removeClass("ubc-is-loading");
       this.hideLoadingShield();
       this.setNavigationStatus("loaded");
       this.syncWebviewTitle(webview);

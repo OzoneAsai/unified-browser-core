@@ -133,6 +133,10 @@
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  /* Clip host/theme loading decoration; never let it resize the guest. */
+  position: relative;
+  overflow: hidden !important;
+  min-width: 0;
   /* ItemView's contentEl is Obsidian's padded .view-content. */
   padding: 0 !important;
   background: var(--background-primary);
@@ -521,7 +525,7 @@
 .ubc-bar-library { border-right: 1px solid var(--background-modifier-border); border-radius: 0; padding-right: 12px; }
 .ubc-reduced-motion .ubc-bookmark-card { transition: none; }
 
-.ubc-browser-view.is-loading .ubc-content::before {
+.ubc-browser-view.ubc-is-loading .ubc-content::before {
   content: "";
   position: absolute;
   z-index: 1;

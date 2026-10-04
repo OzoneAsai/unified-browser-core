@@ -13,10 +13,10 @@ export class ManagedWebviewBackend {
   private readonly policySessions = new Map<string, PolicySession>();
   private settings?: () => BrowserSettings;
 
-  create(partition: string, settings?: () => BrowserSettings): WebviewElement {
+  create(partition: string, settings?: () => BrowserSettings, doc: Document = document): WebviewElement {
     this.settings = settings ?? this.settings;
     this.bindPolicy(partition);
-    const webview = document.createElement("webview") as WebviewElement;
+    const webview = doc.createElement("webview") as WebviewElement;
     webview.addClass("ubc-webview");
     webview.partition = partition;
     // Keep the Surfing-compatible popup capability available while the guest
