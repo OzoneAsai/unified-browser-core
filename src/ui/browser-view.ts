@@ -1550,7 +1550,10 @@ export class BrowserView extends ItemView {
     // created. Install input observers alongside the other guest-bound
     // adapters, after did-attach/dom-ready exposes the guest contents.
     if (!this.popupInteractionDisposer) {
-      this.popupInteractionDisposer = observeGuestInteraction(webview, () => this.dismissTransientPopups());
+      this.popupInteractionDisposer = observeGuestInteraction(webview, () => {
+        this.dismissTransientPopups();
+        this.bookmarkPopoverClose?.();
+      });
     }
     if (!this.popupDisposer) {
       this.popupDisposer = this.plugin.windowOpenAdapter.bind(webview, (url, disposition) => {
@@ -2030,7 +2033,6 @@ export class BrowserView extends ItemView {
     const doc = this.containerEl.ownerDocument;
     dismissOpenMenus(doc);
     this.activeContainerMenu?.hide();
-    this.bookmarkPopoverClose?.();
   }
 
   private showLoadingShield(): void {

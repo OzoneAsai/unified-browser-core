@@ -403,6 +403,7 @@
   inset: 0;
   z-index: 10;
   background: transparent;
+  pointer-events: none;
 }
 
 .ubc-web-layer,

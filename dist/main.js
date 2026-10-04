@@ -6695,7 +6695,10 @@ ${item.url}` }
   }
   bindGuestRuntime(webview, finalAttempt) {
     if (!this.popupInteractionDisposer) {
-      this.popupInteractionDisposer = observeGuestInteraction(webview, () => this.dismissTransientPopups());
+      this.popupInteractionDisposer = observeGuestInteraction(webview, () => {
+        this.dismissTransientPopups();
+        this.bookmarkPopoverClose?.();
+      });
     }
     if (!this.popupDisposer) {
       this.popupDisposer = this.plugin.windowOpenAdapter.bind(webview, (url, disposition) => {
@@ -7145,7 +7148,6 @@ ${item.url}` }
     const doc = this.containerEl.ownerDocument;
     dismissOpenMenus(doc);
     this.activeContainerMenu?.hide();
-    this.bookmarkPopoverClose?.();
   }
   showLoadingShield() {
     if (!this.plugin.core.settings().fullPageLoadingShield) return;

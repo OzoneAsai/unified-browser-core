@@ -145,6 +145,11 @@ Obsidian receives the original tab drag start and owns pane movement and split p
 Only UBC tab headers receive Firefox-style sizing and strip classes. If a tab group mixes UBC and ordinary Obsidian views, UBC keeps its own browser-tab decoration while the shared strip geometry and native tabs remain untouched. This also clears stale UBC layout classes from native tabs on refresh.
 
 
+### 0.2.8 bookmark deletion
+
+- Clicking Delete bookmark inside the editor no longer gets intercepted by outside-popup dismissal.
+- Dismiss layers let clicks and scroll input reach the page underneath, so internal pages such as browser://bookmarks remain usable while a popup is open.
+
 ### 0.2.7 pane menu dismissal
 
 - The Obsidian pane header's three-dot menu now closes on interactions inside regular web pages as well as Browser Core's internal pages.
