@@ -1,6 +1,8 @@
 import type { Plugin, WorkspaceLeaf } from "obsidian";
 import type { TabLayoutPolicy } from "../tabs/tab-layout-policy";
 
+type PaneDragWorkspace = { onDragLeaf?: (event: DragEvent, leaf: WorkspaceLeaf) => void };
+
 type TabGroup = { children: WorkspaceLeaf[]; currentTab: number; updateTabDisplay(): void };
 
 export class ObsidianTabStripAdapter {
@@ -31,33 +33,85 @@ export class ObsidianTabStripAdapter {
     let sourceStrip: HTMLElement | undefined;
     let marker: HTMLElement | undefined;
     let insertion = 0;
+    let startEvent: DragEvent | undefined;
+    let nativePaneDrag = false;
+    let completionFrame: number | undefined;
+    let dragSurface: HTMLElement | undefined;
+    const overStrip = (event: DragEvent) => {
+      if (!sourceStrip) return false;
+      const rect = sourceStrip.getBoundingClientRect();
+      return event.clientX >= rect.left && event.clientX <= rect.right
+        && event.clientY >= rect.top && event.clientY <= rect.bottom;
+    };
+    const win = document.defaultView ?? window;
+    const workspace = plugin.app.workspace as unknown as PaneDragWorkspace;
     const clear = () => {
       marker?.removeClass("ubc-drop-before", "ubc-drop-after");
       if (source) this.tabHeader(source)?.removeClass("ubc-tab-dragging");
       source = undefined; sourceStrip = undefined; marker = undefined;
+      dragSurface?.remove();
+      dragSurface = undefined;
+      startEvent = undefined;
+      nativePaneDrag = false;
       this.dragging = false;
+      this.isReordering = false;
     };
-    plugin.register(clear);
+    const finishNativeDrag = () => {
+      if (completionFrame !== undefined) return;
+      // The native drop handler runs on window during bubbling. Let its whole
+      // remove/split/insert operation finish before UBC handles layout changes.
+      completionFrame = win.requestAnimationFrame(() => {
+        completionFrame = undefined;
+        clear();
+        plugin.app.workspace.requestSaveLayout();
+        plugin.app.workspace.trigger("layout-change");
+      });
+    };
+    plugin.register(() => {
+      if (completionFrame !== undefined) win.cancelAnimationFrame(completionFrame);
+      clear();
+    });
     plugin.registerDomEvent(document, "dragstart", (event: DragEvent) => {
       const target = event.target as HTMLElement;
       const header = target.closest?.<HTMLElement>(".workspace-tab-header.ubc-browser-tab-layout");
       const strip = header?.parentElement;
       // Alt keeps Obsidian's pane/split gesture available intentionally.
-      if (!header || !strip?.hasClass("ubc-browser-tab-strip") || event.altKey) return;
+      if (!header || !strip?.hasClass("ubc-browser-tab-strip") || event.altKey || !workspace.onDragLeaf) return;
       let leaf: WorkspaceLeaf | undefined;
       plugin.app.workspace.iterateAllLeaves((candidate) => { if (this.tabHeader(candidate) === header) leaf = candidate; });
       if (!leaf || this.leavesInSameGroup(leaf).length < 2 || typeof (leaf.parent as unknown as TabGroup).updateTabDisplay !== "function") return;
       clear(); source = leaf; sourceStrip = strip; insertion = this.leavesInSameGroup(leaf).indexOf(leaf); this.dragging = true;
+      startEvent = event;
+      // Keep drag events in the host even when the pointer crosses a guest
+      // webview. This transparent surface exists only during this tab gesture.
+      dragSurface = header.ownerDocument.body.createDiv({ cls: "ubc-tab-drag-surface", attr: { "aria-hidden": "true" } });
       header.addClass("ubc-tab-dragging");
       event.stopImmediatePropagation();
       event.dataTransfer?.setData("application/x-ubc-tab", "reorder");
       if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
     }, true);
     plugin.registerDomEvent(document, "dragover", (event: DragEvent) => {
-      if (!source || !sourceStrip) return;
+      if (!source || !sourceStrip || nativePaneDrag) return;
+      const rect = sourceStrip.getBoundingClientRect();
+      const outside = event.clientY < rect.top - 32 || event.clientY > rect.bottom + 32
+        || event.clientX < rect.left - 48 || event.clientX > rect.right + 48;
+      if (outside && startEvent && workspace.onDragLeaf) {
+        marker?.removeClass("ubc-drop-before", "ubc-drop-after");
+        this.tabHeader(source)?.removeClass("ubc-tab-dragging");
+        // Obsidian installs its dragover/drop/dragend handlers from the original
+        // start event. The current dragover then reaches those native handlers.
+        nativePaneDrag = true;
+        this.isReordering = true;
+        workspace.onDragLeaf(startEvent, source);
+        return;
+      }
       event.stopImmediatePropagation();
-      const target = event.target as HTMLElement;
-      if (!sourceStrip.contains(target)) { marker?.removeClass("ubc-drop-before", "ubc-drop-after"); return; }
+      if (!overStrip(event)) {
+        marker?.removeClass("ubc-drop-before", "ubc-drop-after");
+        event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
+        return;
+      }
       event.preventDefault();
       if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
       const others = this.leavesInSameGroup(source).filter((leaf) => leaf !== source);
@@ -69,14 +123,14 @@ export class ObsidianTabStripAdapter {
       marker?.removeClass("ubc-drop-before", "ubc-drop-after");
       marker = this.tabHeader(others[Math.min(insertion, others.length - 1)]!);
       marker?.addClass(insertion === others.length ? "ubc-drop-after" : "ubc-drop-before");
-      const rect = sourceStrip.getBoundingClientRect();
       if (event.clientX < rect.left + 24) sourceStrip.scrollLeft -= 16;
       else if (event.clientX > rect.right - 24) sourceStrip.scrollLeft += 16;
     }, true);
     plugin.registerDomEvent(document, "drop", (event: DragEvent) => {
+      if (nativePaneDrag) { finishNativeDrag(); return; }
       if (!source || !sourceStrip) return;
       event.stopImmediatePropagation();
-      if (!sourceStrip.contains(event.target as Node)) { clear(); return; }
+      if (!overStrip(event)) { clear(); return; }
       event.preventDefault();
       const leaf = source;
       const group = leaf.parent as unknown as TabGroup;
@@ -96,7 +150,10 @@ export class ObsidianTabStripAdapter {
       plugin.app.workspace.requestSaveLayout();
       plugin.app.workspace.trigger("layout-change");
     }, true);
-    plugin.registerDomEvent(document, "dragend", clear, true);
+    plugin.registerDomEvent(document, "dragend", () => {
+      if (nativePaneDrag) finishNativeDrag();
+      else clear();
+    }, true);
     plugin.registerDomEvent(document, "contextmenu", (event: MouseEvent) => {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;

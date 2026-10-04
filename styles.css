@@ -1180,3 +1180,6 @@
 .ubc-suggestion-title, .ubc-suggestion-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ubc-suggestion-url { color: var(--text-muted); font-size: var(--font-ui-smaller); }
 .ubc-suggestion-source { position: absolute; right: 10px; top: 10px; color: var(--text-muted); font-size: var(--font-ui-smaller); }
+
+/* Keep a tab drag in the host while crossing Electron guest contents. */
+.ubc-tab-drag-surface { position: fixed; inset: 0; z-index: 10000; background: transparent; }

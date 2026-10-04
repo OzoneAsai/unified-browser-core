@@ -125,6 +125,11 @@ Site zoom is relative to the containing Obsidian window (100% matches Surfing's 
 ### 0.2.1 interaction improvements
 
 - Recovery notifications float above the page, disappear on page interaction, and offer “Never show again”. The setting can be re-enabled in plugin settings.
-- Drag a browser tab within its tab strip to reorder it. Hold Alt while dragging to use Obsidian pane movement. Reordering commits once on drop and preserves the selected tab.
+- Drag a browser tab within its tab strip to reorder it. Drag outside the strip (32 px vertically or 48 px horizontally) to switch to Obsidian pane movement. Alt-drag also starts pane movement immediately. Reordering commits once on drop and preserves the selected tab.
 - Address suggestions use local bookmarks and browsing history. Choose with Arrow Up/Down and Enter, or dismiss with Escape. Typed text is not sent to a suggestion service.
 - Home bookmark cards wrap long titles and keep URLs inside each card, including with themes that set a fixed button height.
+
+
+### 0.2.2 pane dragging
+
+Dragging inside the tab strip reorders tabs. Moving at least 32 px above/below the strip or 48 px beyond either horizontal edge hands the gesture to Obsidian's native pane movement and split preview. Once handed over, the rest of the gesture uses native pane behavior; Alt-drag also starts native movement immediately. A transparent drag surface keeps host drag events available across Electron webviews and is removed when the gesture finishes. UBC defers its home takeover and session/style reactions until the native layout operation completes.
