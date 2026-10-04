@@ -145,6 +145,10 @@ Obsidian receives the original tab drag start and owns pane movement and split p
 Only UBC tab headers receive Firefox-style sizing and strip classes. If a tab group mixes UBC and ordinary Obsidian views, UBC keeps its own browser-tab decoration while the shared strip geometry and native tabs remain untouched. This also clears stale UBC layout classes from native tabs on refresh.
 
 
+### 0.2.7 pane menu dismissal
+
+- The Obsidian pane header's three-dot menu now closes on interactions inside regular web pages as well as Browser Core's internal pages.
+
 ### 0.2.6 popup dismissal
 
 - Browser menus, including the three-dot menu and container menu, close when the user interacts with the page or another part of the Obsidian UI.

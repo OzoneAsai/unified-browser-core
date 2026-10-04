@@ -4853,8 +4853,15 @@ function buildWebContentMenuEntries(plugin, view, params) {
 // src/ui/popup-dismissal.ts
 var openMenus = /* @__PURE__ */ new Map();
 var installedDocuments = /* @__PURE__ */ new WeakSet();
+var trackedMenus = /* @__PURE__ */ new WeakSet();
 function showDismissibleMenu(menu, show, doc = document) {
   dismissOpenMenus(doc);
+  trackDismissibleMenu(menu, doc);
+  show();
+}
+function trackDismissibleMenu(menu, doc = document) {
+  if (trackedMenus.has(menu)) return;
+  trackedMenus.add(menu);
   let menus = openMenus.get(doc);
   if (!menus) {
     menus = /* @__PURE__ */ new Set();
@@ -4873,7 +4880,6 @@ function showDismissibleMenu(menu, show, doc = document) {
       dismissOpenMenus(doc);
     }, true);
   }
-  show();
 }
 function dismissOpenMenus(doc = document) {
   for (const menu of [...openMenus.get(doc) ?? []]) menu.hide();
@@ -5993,6 +5999,7 @@ var BrowserView = class _BrowserView extends import_obsidian13.ItemView {
   }
   onPaneMenu(menu, source) {
     super.onPaneMenu(menu, source);
+    trackDismissibleMenu(menu, this.rootEl?.ownerDocument ?? document);
     menu.addSeparator();
     menu.addItem((item) => item.setTitle(t("Home")).setIcon("home").onClick(() => this.showInternal("home")));
     menu.addItem((item) => item.setTitle(t("History")).setIcon("history").onClick(() => this.showInternal("history")));

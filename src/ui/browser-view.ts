@@ -48,7 +48,7 @@ import { promptText } from "./text-prompt";
 import { permissionDecisionLabel, permissionLabel } from "./permission-label";
 import { fallbackFaviconUrl, renderBookmarkVisual } from "./bookmark-visual";
 import { resolveBookmarkUrl } from "../bookmarks/bookmark-url";
-import { dismissOpenMenus, showDismissibleMenu } from "./popup-dismissal";
+import { dismissOpenMenus, showDismissibleMenu, trackDismissibleMenu } from "./popup-dismissal";
 
 export const BROWSER_VIEW_TYPE = "unified-browser-core-view";
 
@@ -721,6 +721,7 @@ export class BrowserView extends ItemView {
 
   onPaneMenu(menu: Menu, source: string): void {
     super.onPaneMenu(menu, source);
+    trackDismissibleMenu(menu, this.rootEl?.ownerDocument ?? document);
     menu.addSeparator();
     menu.addItem((item) => item.setTitle(t("Home")).setIcon("home").onClick(() => this.showInternal("home")));
     menu.addItem((item) => item.setTitle(t("History")).setIcon("history").onClick(() => this.showInternal("history")));
