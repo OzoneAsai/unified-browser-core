@@ -1,3 +1,5 @@
+import { bindAddressSuggestions } from "./address-suggestions";
+import { observeGuestInteraction } from "../adapters/guest-interaction";
 import { ItemView, Menu, Notice, setIcon, type ViewStateResult, type WorkspaceLeaf } from "obsidian";
 import type UnifiedBrowserCorePlugin from "../main";
 import type { BrowserOpenRequest } from "../main";
@@ -112,6 +114,7 @@ export class BrowserView extends ItemView {
   private bookmarkSearchQuery = "";
   private bookmarkLayout: "type" | "folder" | "selected" = "type";
   private bookmarkPopoverClose?: () => void;
+  private recoveryInteractionDisposer?: () => void;
   private readonly navigationHistoryAdapter = new ElectronNavigationHistoryAdapter();
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: UnifiedBrowserCorePlugin) {
@@ -904,8 +907,9 @@ export class BrowserView extends ItemView {
       cls: "ubc-address",
       attr: { type: "text", spellcheck: "false", "aria-label": t("Address and search") },
     });
+    this.register(bindAddressSuggestions(this.addressEl, this.plugin.core, (value) => this.navigate(value)));
     this.addressEl.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter") return;
+      if (event.isComposing || event.key !== "Enter") return;
       event.preventDefault();
       this.navigate(this.normalizeAddress(this.addressEl.value));
     });
@@ -934,6 +938,12 @@ export class BrowserView extends ItemView {
     });
     this.recoveryBannerEl = this.rootEl.createDiv({ cls: "ubc-recovery-banner is-hidden", attr: { role: "status" } });
     this.browserContentEl = this.rootEl.createDiv({ cls: "ubc-content" });
+    this.browserContentEl.appendChild(this.recoveryBannerEl);
+    for (const event of ["pointerdown", "wheel", "keydown"]) {
+      this.browserContentEl.addEventListener(event, (input) => {
+        if (!this.recoveryBannerEl.contains(input.target as Node)) this.hideRecoveryBanner();
+      }, { capture: true, passive: true });
+    }
     this.webLayerEl = this.browserContentEl.createDiv({ cls: "ubc-web-layer is-hidden" });
     this.loadingShieldEl = this.webLayerEl.createDiv({
       cls: "ubc-loading-shield is-hidden",
@@ -1506,6 +1516,7 @@ export class BrowserView extends ItemView {
       webview.removeAttribute("allowpopups");
     }
     this.plugin.bindPermissions(webview, this.containerId);
+    this.watchRecoveryInteractions();
   }
 
   private syncWebviewTitle(webview: WebviewElement, eventTitle?: string): void {
@@ -1666,10 +1677,11 @@ export class BrowserView extends ItemView {
 
   private showRecoveryBanner(message: string, tone: "success" | "warning"): void {
     if (!this.recoveryBannerEl) return;
+    if (!this.plugin.core.settings().showRecoveryNotifications) { this.hideRecoveryBanner(); return; }
     this.recoveryBannerEl.empty();
     this.recoveryBannerEl.removeClass("is-hidden", "is-success", "is-warning");
     this.recoveryBannerEl.addClass(tone === "success" ? "is-success" : "is-warning");
-    this.recoveryBannerEl.createSpan({ cls: "ubc-recovery-message", text: message });
+    this.recoveryBannerEl.createSpan({ cls: "ubc-recovery-message", text: t(message) });
     const actions = this.recoveryBannerEl.createDiv({ cls: "ubc-recovery-actions" });
 
     if (tone === "warning") {
@@ -1703,10 +1715,26 @@ export class BrowserView extends ItemView {
       );
     });
     actions.createEl("button", { text: t("Dismiss"), attr: { "aria-label": t("Dismiss recovery message") } }).addEventListener("click", () => this.hideRecoveryBanner());
+    actions.createEl("button", { text: t("Never show again") }).addEventListener("click", () => {
+      this.plugin.core.updateSettings({ showRecoveryNotifications: false });
+      this.plugin.refreshBrowserViews();
+    });
+    this.watchRecoveryInteractions();
+  }
+
+  private watchRecoveryInteractions(): void {
+    if (this.recoveryInteractionDisposer || !this.webview || !this.recoveryBannerEl || this.recoveryBannerEl.hasClass("is-hidden")) return;
+    this.recoveryInteractionDisposer = observeGuestInteraction(this.webview, () => this.hideRecoveryBanner());
+  }
+
+  refreshRecoveryNotification(): void {
+    if (!this.plugin.core.settings().showRecoveryNotifications) this.hideRecoveryBanner();
   }
 
   private hideRecoveryBanner(): void {
     this.recoveryBannerEl?.addClass("is-hidden");
+    this.recoveryInteractionDisposer?.();
+    this.recoveryInteractionDisposer = undefined;
   }
 
   private async retryRichRestore(): Promise<void> {
@@ -1935,6 +1963,7 @@ export class BrowserView extends ItemView {
 
   private destroyWebview(): void {
     this.bookmarkPopoverClose?.();
+    this.hideRecoveryBanner();
     if (this.checkpointTimer !== undefined) {
       window.clearInterval(this.checkpointTimer);
       this.checkpointTimer = undefined;
@@ -2054,7 +2083,7 @@ export class BrowserView extends ItemView {
       webMode.toggleClass("is-active", mode === "web");
       vaultMode.setAttribute("aria-pressed", String(mode === "vault"));
       webMode.setAttribute("aria-pressed", String(mode === "web"));
-      search.placeholder = mode === "vault" ? "Search files in your vault" : "Search the web or enter an address";
+      search.placeholder = mode === "vault" ? t("Search files in your vault") : t("Search the web or enter an address");
       searchResults.empty();
       homeSections.removeClass("is-hidden");
       if (persist && this.plugin.core.settings().homeSearchMode !== mode) {

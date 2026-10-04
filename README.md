@@ -120,3 +120,11 @@ Restored tab state preserves the page title and a bounded raster favicon. Deferr
 UBC uses its own loading-state class instead of Obsidian's `is-loading`. The latter enables host progress decorations and positioning changes; with a scrollable view container, those decorations can introduce both scrollbars and shrink the guest during subresource loads. The outer browser surface now clips overflow consistently. Website content remains scrollable inside the guest.
 
 Site zoom is relative to the containing Obsidian window (100% matches Surfing's inherited scale). The guest inherits the containing window scale, and at the default 100% UBC keeps that inherited factor instead of switching to an absolute 1.0 at DOM ready. Explicit site zoom settings remain relative to the containing window.
+
+
+### 0.2.1 interaction improvements
+
+- Recovery notifications float above the page, disappear on page interaction, and offer “Never show again”. The setting can be re-enabled in plugin settings.
+- Drag a browser tab within its tab strip to reorder it. Hold Alt while dragging to use Obsidian pane movement. Reordering commits once on drop and preserves the selected tab.
+- Address suggestions use local bookmarks and browsing history. Choose with Arrow Up/Down and Enter, or dismiss with Escape. Typed text is not sent to a suggestion service.
+- Home bookmark cards wrap long titles and keep URLs inside each card, including with themes that set a fixed button height.

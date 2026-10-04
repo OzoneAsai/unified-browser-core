@@ -741,11 +741,106 @@ var ManagedWebviewBackend = class {
 
 // src/adapters/obsidian-tab-strip.ts
 var ObsidianTabStripAdapter = class {
+  isReordering = false;
+  dragging = false;
+  pendingStrips = /* @__PURE__ */ new Set();
+  scheduleStripStyle(strip) {
+    if (this.pendingStrips.has(strip)) return;
+    this.pendingStrips.add(strip);
+    strip.ownerDocument.defaultView?.requestAnimationFrame(() => {
+      this.pendingStrips.delete(strip);
+      if (strip.isConnected) this.refreshStripStyle(strip);
+    });
+  }
   leavesInSameGroup(leaf) {
     const parent = leaf.parent;
     return Array.isArray(parent.children) ? parent.children.filter(Boolean) : [leaf];
   }
   bind(plugin, shouldHandle, onContextMenu) {
+    let source;
+    let sourceStrip;
+    let marker;
+    let insertion = 0;
+    const clear = () => {
+      marker?.removeClass("ubc-drop-before", "ubc-drop-after");
+      if (source) this.tabHeader(source)?.removeClass("ubc-tab-dragging");
+      source = void 0;
+      sourceStrip = void 0;
+      marker = void 0;
+      this.dragging = false;
+    };
+    plugin.register(clear);
+    plugin.registerDomEvent(document, "dragstart", (event) => {
+      const target = event.target;
+      const header = target.closest?.(".workspace-tab-header.ubc-browser-tab-layout");
+      const strip = header?.parentElement;
+      if (!header || !strip?.hasClass("ubc-browser-tab-strip") || event.altKey) return;
+      let leaf;
+      plugin.app.workspace.iterateAllLeaves((candidate) => {
+        if (this.tabHeader(candidate) === header) leaf = candidate;
+      });
+      if (!leaf || this.leavesInSameGroup(leaf).length < 2 || typeof leaf.parent.updateTabDisplay !== "function") return;
+      clear();
+      source = leaf;
+      sourceStrip = strip;
+      insertion = this.leavesInSameGroup(leaf).indexOf(leaf);
+      this.dragging = true;
+      header.addClass("ubc-tab-dragging");
+      event.stopImmediatePropagation();
+      event.dataTransfer?.setData("application/x-ubc-tab", "reorder");
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+    }, true);
+    plugin.registerDomEvent(document, "dragover", (event) => {
+      if (!source || !sourceStrip) return;
+      event.stopImmediatePropagation();
+      const target = event.target;
+      if (!sourceStrip.contains(target)) {
+        marker?.removeClass("ubc-drop-before", "ubc-drop-after");
+        return;
+      }
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+      const others = this.leavesInSameGroup(source).filter((leaf) => leaf !== source);
+      insertion = others.findIndex((leaf) => {
+        const rect2 = this.tabHeader(leaf)?.getBoundingClientRect();
+        return rect2 ? event.clientX < rect2.left + rect2.width / 2 : false;
+      });
+      if (insertion < 0) insertion = others.length;
+      marker?.removeClass("ubc-drop-before", "ubc-drop-after");
+      marker = this.tabHeader(others[Math.min(insertion, others.length - 1)]);
+      marker?.addClass(insertion === others.length ? "ubc-drop-after" : "ubc-drop-before");
+      const rect = sourceStrip.getBoundingClientRect();
+      if (event.clientX < rect.left + 24) sourceStrip.scrollLeft -= 16;
+      else if (event.clientX > rect.right - 24) sourceStrip.scrollLeft += 16;
+    }, true);
+    plugin.registerDomEvent(document, "drop", (event) => {
+      if (!source || !sourceStrip) return;
+      event.stopImmediatePropagation();
+      if (!sourceStrip.contains(event.target)) {
+        clear();
+        return;
+      }
+      event.preventDefault();
+      const leaf = source;
+      const group = leaf.parent;
+      const selected = group.children[group.currentTab];
+      const oldIndex = group.children.indexOf(leaf);
+      this.isReordering = true;
+      try {
+        if (oldIndex >= 0 && oldIndex !== insertion && group.children.length > 1) {
+          group.children.splice(oldIndex, 1);
+          group.children.splice(insertion, 0, leaf);
+          group.currentTab = selected ? group.children.indexOf(selected) : insertion;
+          group.updateTabDisplay();
+        }
+      } finally {
+        this.isReordering = false;
+        clear();
+      }
+      plugin.app.workspace.requestSaveLayout();
+      plugin.app.workspace.trigger("layout-change");
+    }, true);
+    plugin.registerDomEvent(document, "dragend", clear, true);
     plugin.registerDomEvent(document, "contextmenu", (event) => {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
@@ -778,7 +873,7 @@ var ObsidianTabStripAdapter = class {
     else header.style.removeProperty("--ubc-tab-container-color");
     const strip = header.parentElement;
     if (!(strip instanceof HTMLElement)) return;
-    this.refreshStripStyle(strip);
+    this.scheduleStripStyle(strip);
   }
   clearLeafStyle(leaf) {
     const header = this.tabHeader(leaf);
@@ -804,9 +899,7 @@ var ObsidianTabStripAdapter = class {
     header.style.removeProperty("--ubc-tab-container-color");
     this.applyLeafFavicon(leaf);
     if (!(strip instanceof HTMLElement)) return;
-    window.requestAnimationFrame(() => {
-      this.refreshStripStyle(strip);
-    });
+    this.scheduleStripStyle(strip);
   }
   refreshLeafHeader(leaf, activeInWindow = false, savedTitle) {
     const compatLeaf = leaf;
@@ -841,6 +934,7 @@ var ObsidianTabStripAdapter = class {
     icon.appendChild(image);
   }
   revealActiveTab(leaf) {
+    if (this.dragging) return;
     const header = this.tabHeader(leaf);
     const strip = header?.parentElement;
     if (!header || !(strip instanceof HTMLElement) || !strip.hasClass("ubc-browser-tab-strip-scroll")) return;
@@ -2684,6 +2778,7 @@ var DEFAULT_SETTINGS = {
   formRecoveryMaxUrls: 200,
   reducedMotion: false,
   fullPageLoadingShield: false,
+  showRecoveryNotifications: true,
   defaultZoomFactor: 1,
   defaultContainerId: "default",
   containerMode: "automatic",
@@ -2927,6 +3022,15 @@ function t(source, values = {}) {
   return result.replace(/\{(\w+)\}/g, (match, key) => String(values[key] ?? match));
 }
 var ja = {
+  "Search files in your vault": "Vault\u5185\u306E\u30D5\u30A1\u30A4\u30EB\u3092\u691C\u7D22",
+  "Search the web or enter an address": "\u30A6\u30A7\u30D6\u3092\u691C\u7D22\u3001\u307E\u305F\u306F\u30A2\u30C9\u30EC\u30B9\u3092\u5165\u529B",
+  "Never show again": "\u4ECA\u5F8C\u8868\u793A\u3057\u306A\u3044",
+  "Show recovery notifications": "\u5FA9\u5143\u901A\u77E5\u3092\u8868\u793A",
+  "Recovery notifications disappear when you interact with the page. Turn this on to show them again after choosing Never show again.": "\u30DA\u30FC\u30B8\u3092\u64CD\u4F5C\u3059\u308B\u3068\u5FA9\u5143\u901A\u77E5\u304C\u6D88\u3048\u307E\u3059\u3002\u300C\u4ECA\u5F8C\u8868\u793A\u3057\u306A\u3044\u300D\u3092\u9078\u629E\u3057\u305F\u5F8C\u306F\u3001\u3053\u3053\u3067\u518D\u8868\u793A\u3092\u6709\u52B9\u306B\u3067\u304D\u307E\u3059\u3002",
+  "Detailed tab recovery is no longer available. Browser Core is reopening the saved URL from browsing history.": "\u8A73\u7D30\u306A\u30BF\u30D6\u5FA9\u5143\u30C7\u30FC\u30BF\u304C\u306A\u3044\u305F\u3081\u3001\u5C65\u6B74\u306B\u4FDD\u5B58\u3057\u305FURL\u3092\u958B\u304D\u76F4\u3057\u307E\u3057\u305F\u3002",
+  "Detailed tab recovery could not be applied. Browser Core is reopening the saved URL and can still use form recovery or the website's own saved state.": "\u8A73\u7D30\u306A\u30BF\u30D6\u5FA9\u5143\u3092\u9069\u7528\u3067\u304D\u306A\u304B\u3063\u305F\u305F\u3081\u3001\u4FDD\u5B58\u3057\u305FURL\u3092\u958B\u304D\u76F4\u3057\u307E\u3057\u305F\u3002\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u3084\u30B5\u30A4\u30C8\u81EA\u8EAB\u306E\u4FDD\u5B58\u72B6\u614B\u3092\u5229\u7528\u3067\u304D\u307E\u3059\u3002",
+  "Navigation state restored from the closed tab. Some live page state may still need to reload.": "\u9589\u3058\u305F\u30BF\u30D6\u306E\u79FB\u52D5\u5C65\u6B74\u3092\u5FA9\u5143\u3057\u307E\u3057\u305F\u3002\u30DA\u30FC\u30B8\u306E\u4E00\u90E8\u306F\u518D\u8AAD\u307F\u8FBC\u307F\u304C\u5FC5\u8981\u306A\u5834\u5408\u304C\u3042\u308A\u307E\u3059\u3002",
+  "Detailed tab state restored. Some page state may still depend on the website.": "\u8A73\u7D30\u306A\u30BF\u30D6\u72B6\u614B\u3092\u5FA9\u5143\u3057\u307E\u3057\u305F\u3002\u4E00\u90E8\u306E\u72B6\u614B\u306F\u30B5\u30A4\u30C8\u81EA\u8EAB\u306E\u51E6\u7406\u306B\u4F9D\u5B58\u3057\u307E\u3059\u3002",
   "Relative to this Obsidian window. Used by sites without a site-specific zoom override.": "\u3053\u306EObsidian\u30A6\u30A3\u30F3\u30C9\u30A6\u306E\u500D\u7387\u3092\u57FA\u6E96\u306B\u3057\u307E\u3059\u3002\u30B5\u30A4\u30C8\u56FA\u6709\u306E\u500D\u7387\u304C\u306A\u3044\u5834\u5408\u306B\u9069\u7528\u3055\u308C\u307E\u3059\u3002",
   "No override": "\u4E0A\u66F8\u304D\u306A\u3057",
   "Follow theme": "\u30C6\u30FC\u30DE\u306B\u5408\u308F\u305B\u308B",
@@ -3729,6 +3833,10 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
         }
       })
     );
+    new import_obsidian3.Setting(containerEl).setName(t("Show recovery notifications")).setDesc(t("Recovery notifications disappear when you interact with the page. Turn this on to show them again after choosing Never show again.")).addToggle((toggle) => toggle.setValue(this.plugin.core.settings().showRecoveryNotifications).onChange((value) => {
+      this.plugin.core.updateSettings({ showRecoveryNotifications: value });
+      this.plugin.refreshBrowserViews();
+    }));
     new import_obsidian3.Setting(containerEl).setName(t("Detailed tab recovery retention (days)")).setDesc(t("How long Browser Core should keep extra state that can restore recently closed tabs more accurately.")).addText(
       (text) => text.setValue(String(this.plugin.core.settings().restoreRetentionDays)).onChange((value) => {
         const days = Number(value);
@@ -4018,6 +4126,124 @@ var SEARCH_PRESETS = [
 ];
 function searchPresetForTemplate(template) {
   return SEARCH_PRESETS.find((preset) => preset.template === template);
+}
+
+// src/ui/address-suggestions.ts
+function bindAddressSuggestions(input, core, navigate) {
+  const doc = input.ownerDocument;
+  const wrapper = doc.createElement("div");
+  wrapper.className = "ubc-address-wrapper";
+  input.replaceWith(wrapper);
+  wrapper.appendChild(input);
+  const list = wrapper.createDiv({ cls: "ubc-address-suggestions is-hidden", attr: { role: "listbox" } });
+  list.id = `ubc-suggestions-${Math.random().toString(36).slice(2)}`;
+  input.setAttribute("role", "combobox");
+  input.setAttribute("aria-autocomplete", "list");
+  input.setAttribute("aria-controls", list.id);
+  input.setAttribute("autocomplete", "off");
+  let choices = [];
+  let selected = -1;
+  const close = () => {
+    list.addClass("is-hidden");
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+    selected = -1;
+  };
+  const highlight = () => {
+    [...list.children].forEach((row, index) => {
+      row.classList.toggle("is-selected", index === selected);
+      row.setAttribute("aria-selected", String(index === selected));
+    });
+    if (selected >= 0) {
+      const row = list.children[selected];
+      input.setAttribute("aria-activedescendant", row.id);
+      row.scrollIntoView({ block: "nearest" });
+    } else input.removeAttribute("aria-activedescendant");
+  };
+  const update = () => {
+    const query = input.value.trim().toLocaleLowerCase();
+    list.empty();
+    selected = -1;
+    if (!query) {
+      close();
+      return;
+    }
+    const candidates = /* @__PURE__ */ new Map();
+    const add = (url, title, source) => {
+      if (!/^https?:\/\//i.test(url) || candidates.has(url)) return;
+      if ((title + " " + url).toLocaleLowerCase().includes(query)) candidates.set(url, { url, title, source });
+    };
+    for (const bookmark of core.bookmarks.allBookmarks()) add(bookmark.url, bookmark.title, t("Bookmarks"));
+    for (const node of core.history.allNodes().sort((a, b) => b.timestamp - a.timestamp)) {
+      if (node.kind === "navigation") add(node.url, node.title, t("History"));
+    }
+    choices = [...candidates.values()].slice(0, 8);
+    for (const [index, choice] of choices.entries()) {
+      const row = list.createDiv({ cls: "ubc-address-suggestion", attr: { role: "option", id: `${list.id}-${index}`, "aria-selected": "false" } });
+      row.createDiv({ cls: "ubc-suggestion-title", text: choice.title || choice.url });
+      row.createDiv({ cls: "ubc-suggestion-url", text: choice.url });
+      row.createSpan({ cls: "ubc-suggestion-source", text: choice.source });
+      row.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        input.value = choice.url;
+        close();
+        navigate(choice.url);
+      });
+    }
+    list.toggleClass("is-hidden", !choices.length);
+    input.setAttribute("aria-expanded", String(Boolean(choices.length)));
+  };
+  const keydown = (event) => {
+    if (event.isComposing) return;
+    if (event.key === "Escape") {
+      close();
+      event.preventDefault();
+      return;
+    }
+    if (list.hasClass("is-hidden")) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      selected = (selected + (event.key === "ArrowDown" ? 1 : -1) + choices.length) % choices.length;
+      highlight();
+    } else if (event.key === "Enter" && selected >= 0) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const choice = choices[selected];
+      if (!choice) return;
+      input.value = choice.url;
+      close();
+      navigate(choice.url);
+    } else if (event.key === "Enter" || event.key === "Tab") close();
+  };
+  input.addEventListener("input", update);
+  input.addEventListener("keydown", keydown, true);
+  input.addEventListener("blur", close);
+  close();
+  return () => {
+    input.removeEventListener("input", update);
+    input.removeEventListener("keydown", keydown, true);
+    input.removeEventListener("blur", close);
+    list.remove();
+  };
+}
+
+// src/adapters/guest-interaction.ts
+function observeGuestInteraction(webview, dismiss) {
+  const contents = resolveGuestWebContents(webview);
+  if (!contents?.on || !contents.removeListener) return void 0;
+  const interact = (_event, input) => {
+    if (["mouseDown", "mouseWheel", "touchStart", "gestureScrollBegin", "keyDown", "rawKeyDown"].includes(input.type ?? "")) dismiss();
+  };
+  for (const event of ["before-mouse-event", "before-input-event", "input-event"]) contents.on(event, interact);
+  return () => {
+    for (const event of ["before-mouse-event", "before-input-event", "input-event"]) {
+      try {
+        contents.removeListener(event, interact);
+      } catch {
+      }
+    }
+  };
 }
 
 // src/ui/browser-view.ts
@@ -5206,6 +5432,7 @@ var BrowserView = class _BrowserView extends import_obsidian13.ItemView {
   bookmarkSearchQuery = "";
   bookmarkLayout = "type";
   bookmarkPopoverClose;
+  recoveryInteractionDisposer;
   navigationHistoryAdapter = new ElectronNavigationHistoryAdapter();
   leafId() {
     return this.lifecycleId;
@@ -5859,8 +6086,9 @@ var BrowserView = class _BrowserView extends import_obsidian13.ItemView {
       cls: "ubc-address",
       attr: { type: "text", spellcheck: "false", "aria-label": t("Address and search") }
     });
+    this.register(bindAddressSuggestions(this.addressEl, this.plugin.core, (value) => this.navigate(value)));
     this.addressEl.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter") return;
+      if (event.isComposing || event.key !== "Enter") return;
       event.preventDefault();
       this.navigate(this.normalizeAddress(this.addressEl.value));
     });
@@ -5886,6 +6114,12 @@ var BrowserView = class _BrowserView extends import_obsidian13.ItemView {
     });
     this.recoveryBannerEl = this.rootEl.createDiv({ cls: "ubc-recovery-banner is-hidden", attr: { role: "status" } });
     this.browserContentEl = this.rootEl.createDiv({ cls: "ubc-content" });
+    this.browserContentEl.appendChild(this.recoveryBannerEl);
+    for (const event of ["pointerdown", "wheel", "keydown"]) {
+      this.browserContentEl.addEventListener(event, (input) => {
+        if (!this.recoveryBannerEl.contains(input.target)) this.hideRecoveryBanner();
+      }, { capture: true, passive: true });
+    }
     this.webLayerEl = this.browserContentEl.createDiv({ cls: "ubc-web-layer is-hidden" });
     this.loadingShieldEl = this.webLayerEl.createDiv({
       cls: "ubc-loading-shield is-hidden",
@@ -6399,6 +6633,7 @@ ${item.url}` }
       webview.removeAttribute("allowpopups");
     }
     this.plugin.bindPermissions(webview, this.containerId);
+    this.watchRecoveryInteractions();
   }
   syncWebviewTitle(webview, eventTitle) {
     const title = eventTitle?.trim() || this.safeWebviewTitle(webview)?.trim();
@@ -6546,10 +6781,14 @@ ${item.url}` }
   }
   showRecoveryBanner(message, tone) {
     if (!this.recoveryBannerEl) return;
+    if (!this.plugin.core.settings().showRecoveryNotifications) {
+      this.hideRecoveryBanner();
+      return;
+    }
     this.recoveryBannerEl.empty();
     this.recoveryBannerEl.removeClass("is-hidden", "is-success", "is-warning");
     this.recoveryBannerEl.addClass(tone === "success" ? "is-success" : "is-warning");
-    this.recoveryBannerEl.createSpan({ cls: "ubc-recovery-message", text: message });
+    this.recoveryBannerEl.createSpan({ cls: "ubc-recovery-message", text: t(message) });
     const actions = this.recoveryBannerEl.createDiv({ cls: "ubc-recovery-actions" });
     if (tone === "warning") {
       actions.createEl("button", { text: t("Retry restore") }).addEventListener("click", () => void this.retryRichRestore());
@@ -6580,9 +6819,23 @@ ${item.url}` }
       );
     });
     actions.createEl("button", { text: t("Dismiss"), attr: { "aria-label": t("Dismiss recovery message") } }).addEventListener("click", () => this.hideRecoveryBanner());
+    actions.createEl("button", { text: t("Never show again") }).addEventListener("click", () => {
+      this.plugin.core.updateSettings({ showRecoveryNotifications: false });
+      this.plugin.refreshBrowserViews();
+    });
+    this.watchRecoveryInteractions();
+  }
+  watchRecoveryInteractions() {
+    if (this.recoveryInteractionDisposer || !this.webview || !this.recoveryBannerEl || this.recoveryBannerEl.hasClass("is-hidden")) return;
+    this.recoveryInteractionDisposer = observeGuestInteraction(this.webview, () => this.hideRecoveryBanner());
+  }
+  refreshRecoveryNotification() {
+    if (!this.plugin.core.settings().showRecoveryNotifications) this.hideRecoveryBanner();
   }
   hideRecoveryBanner() {
     this.recoveryBannerEl?.addClass("is-hidden");
+    this.recoveryInteractionDisposer?.();
+    this.recoveryInteractionDisposer = void 0;
   }
   async retryRichRestore() {
     const webview = this.readyWebview();
@@ -6798,6 +7051,7 @@ ${item.url}` }
   }
   destroyWebview() {
     this.bookmarkPopoverClose?.();
+    this.hideRecoveryBanner();
     if (this.checkpointTimer !== void 0) {
       window.clearInterval(this.checkpointTimer);
       this.checkpointTimer = void 0;
@@ -6907,7 +7161,7 @@ ${item.url}` }
       webMode.toggleClass("is-active", mode === "web");
       vaultMode.setAttribute("aria-pressed", String(mode === "vault"));
       webMode.setAttribute("aria-pressed", String(mode === "web"));
-      search.placeholder = mode === "vault" ? "Search files in your vault" : "Search the web or enter an address";
+      search.placeholder = mode === "vault" ? t("Search files in your vault") : t("Search the web or enter an address");
       searchResults.empty();
       homeSections.removeClass("is-hidden");
       if (persist && this.plugin.core.settings().homeSearchMode !== mode) {
@@ -8980,6 +9234,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian16.Plugin {
     });
     this.registerEvent(
       this.app.workspace.on("layout-change", () => {
+        if (this.tabStripAdapter.isReordering) return;
         if (!this.sessionCheckpointArmed && this.app.workspace.layoutReady) {
           void this.initializeLayout();
         }
@@ -9389,7 +9644,10 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian16.Plugin {
   refreshBrowserViews() {
     for (const leaf of this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE)) {
       const view = leaf.view;
-      if (view instanceof BrowserView) view.renderFavoritesBar();
+      if (view instanceof BrowserView) {
+        view.renderFavoritesBar();
+        view.refreshRecoveryNotification();
+      }
     }
   }
   refreshBrowserZoom() {

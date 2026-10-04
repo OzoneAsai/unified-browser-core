@@ -371,6 +371,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     });
     this.registerEvent(
       this.app.workspace.on("layout-change", () => {
+        if (this.tabStripAdapter.isReordering) return;
         if (!this.sessionCheckpointArmed && this.app.workspace.layoutReady) {
           void this.initializeLayout();
         }
@@ -840,7 +841,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
   refreshBrowserViews(): void {
     for (const leaf of this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE)) {
       const view = leaf.view;
-      if (view instanceof BrowserView) view.renderFavoritesBar();
+      if (view instanceof BrowserView) { view.renderFavoritesBar(); view.refreshRecoveryNotification(); }
     }
   }
 

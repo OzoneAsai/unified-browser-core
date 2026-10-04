@@ -12,6 +12,16 @@ export function t(source: string, values: Record<string, string | number> = {}):
 }
 
 const ja: Record<string, string> = {
+  "Search files in your vault": "Vault内のファイルを検索",
+  "Search the web or enter an address": "ウェブを検索、またはアドレスを入力",
+  "Never show again": "今後表示しない",
+  "Show recovery notifications": "復元通知を表示",
+  "Recovery notifications disappear when you interact with the page. Turn this on to show them again after choosing Never show again.": "ページを操作すると復元通知が消えます。「今後表示しない」を選択した後は、ここで再表示を有効にできます。",
+  "Detailed tab recovery is no longer available. Browser Core is reopening the saved URL from browsing history.": "詳細なタブ復元データがないため、履歴に保存したURLを開き直しました。",
+  "Detailed tab recovery could not be applied. Browser Core is reopening the saved URL and can still use form recovery or the website's own saved state.": "詳細なタブ復元を適用できなかったため、保存したURLを開き直しました。フォーム復元やサイト自身の保存状態を利用できます。",
+  "Navigation state restored from the closed tab. Some live page state may still need to reload.": "閉じたタブの移動履歴を復元しました。ページの一部は再読み込みが必要な場合があります。",
+  "Detailed tab state restored. Some page state may still depend on the website.": "詳細なタブ状態を復元しました。一部の状態はサイト自身の処理に依存します。",
+
   "Relative to this Obsidian window. Used by sites without a site-specific zoom override.": "このObsidianウィンドウの倍率を基準にします。サイト固有の倍率がない場合に適用されます。",
   "No override": "上書きなし", "Follow theme": "テーマに合わせる", "Custom color": "任意の色",
   "Initial background color": "初期背景色",

@@ -235,6 +235,12 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName(t("Show recovery notifications"))
+      .setDesc(t("Recovery notifications disappear when you interact with the page. Turn this on to show them again after choosing Never show again."))
+      .addToggle((toggle) => toggle.setValue(this.plugin.core.settings().showRecoveryNotifications)
+        .onChange((value) => { this.plugin.core.updateSettings({ showRecoveryNotifications: value }); this.plugin.refreshBrowserViews(); }));
+
+    new Setting(containerEl)
       .setName(t("Detailed tab recovery retention (days)"))
       .setDesc(t("How long Browser Core should keep extra state that can restore recently closed tabs more accurately."))
       .addText((text) =>

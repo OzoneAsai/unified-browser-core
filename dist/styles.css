@@ -1131,3 +1131,52 @@
   max-height: 100%;
   flex: none;
 }
+
+/* Non-modal recovery notice: no guest resizing and no input shield. */
+.ubc-content > .ubc-recovery-banner {
+  position: absolute;
+  z-index: 20;
+  top: 12px;
+  right: 12px;
+  width: min(540px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+  overflow: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  box-shadow: 0 6px 24px #0003;
+  padding: 14px;
+}
+
+/* Drag feedback does not change tab widths or trigger pane layout. */
+.ubc-tab-dragging { opacity: .55; }
+.ubc-drop-before { box-shadow: inset 3px 0 var(--interactive-accent) !important; }
+.ubc-drop-after { box-shadow: inset -3px 0 var(--interactive-accent) !important; }
+
+.ubc-home .ubc-card {
+  height: auto !important;
+  min-height: 76px;
+  align-items: stretch;
+  justify-content: flex-start;
+  white-space: normal !important;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+  box-shadow: none;
+}
+.ubc-home .ubc-card-subtitle { display: block; width: 100%; flex-shrink: 0; }
+.ubc-home-search-modes { display: flex; width: fit-content; }
+.ubc-home input.ubc-home-search { display: block; max-width: 100%; }
+.ubc-address-wrapper { position: relative; flex: 1; min-width: 80px; }
+.ubc-address-wrapper .ubc-address { width: 100%; }
+.ubc-address-suggestions {
+  position: absolute; top: calc(100% + 5px); left: 0; right: 0; z-index: 40;
+  max-height: min(380px, 65vh); overflow: auto;
+  padding: 5px; border: 1px solid var(--background-modifier-border); border-radius: 10px;
+  background: var(--background-primary); box-shadow: 0 8px 24px #0003;
+}
+.ubc-address-suggestions.is-hidden { display: none; }
+.ubc-address-suggestion { position: relative; padding: 8px 80px 8px 10px; border-radius: 6px; cursor: pointer; }
+.ubc-address-suggestion:hover, .ubc-address-suggestion.is-selected { background: var(--background-modifier-hover); }
+.ubc-suggestion-title, .ubc-suggestion-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ubc-suggestion-url { color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.ubc-suggestion-source { position: absolute; right: 10px; top: 10px; color: var(--text-muted); font-size: var(--font-ui-smaller); }

@@ -1,7 +1,22 @@
 import type { Plugin, WorkspaceLeaf } from "obsidian";
 import type { TabLayoutPolicy } from "../tabs/tab-layout-policy";
 
+type TabGroup = { children: WorkspaceLeaf[]; currentTab: number; updateTabDisplay(): void };
+
 export class ObsidianTabStripAdapter {
+  isReordering = false;
+  private dragging = false;
+  private pendingStrips = new Set<HTMLElement>();
+
+  private scheduleStripStyle(strip: HTMLElement): void {
+    if (this.pendingStrips.has(strip)) return;
+    this.pendingStrips.add(strip);
+    strip.ownerDocument.defaultView?.requestAnimationFrame(() => {
+      this.pendingStrips.delete(strip);
+      if (strip.isConnected) this.refreshStripStyle(strip);
+    });
+  }
+
   leavesInSameGroup(leaf: WorkspaceLeaf): WorkspaceLeaf[] {
     const parent = leaf.parent as unknown as { children?: WorkspaceLeaf[] };
     return Array.isArray(parent.children) ? parent.children.filter(Boolean) : [leaf];
@@ -12,6 +27,76 @@ export class ObsidianTabStripAdapter {
     shouldHandle: (strip: HTMLElement) => boolean,
     onContextMenu: (event: MouseEvent) => void,
   ): void {
+    let source: WorkspaceLeaf | undefined;
+    let sourceStrip: HTMLElement | undefined;
+    let marker: HTMLElement | undefined;
+    let insertion = 0;
+    const clear = () => {
+      marker?.removeClass("ubc-drop-before", "ubc-drop-after");
+      if (source) this.tabHeader(source)?.removeClass("ubc-tab-dragging");
+      source = undefined; sourceStrip = undefined; marker = undefined;
+      this.dragging = false;
+    };
+    plugin.register(clear);
+    plugin.registerDomEvent(document, "dragstart", (event: DragEvent) => {
+      const target = event.target as HTMLElement;
+      const header = target.closest?.<HTMLElement>(".workspace-tab-header.ubc-browser-tab-layout");
+      const strip = header?.parentElement;
+      // Alt keeps Obsidian's pane/split gesture available intentionally.
+      if (!header || !strip?.hasClass("ubc-browser-tab-strip") || event.altKey) return;
+      let leaf: WorkspaceLeaf | undefined;
+      plugin.app.workspace.iterateAllLeaves((candidate) => { if (this.tabHeader(candidate) === header) leaf = candidate; });
+      if (!leaf || this.leavesInSameGroup(leaf).length < 2 || typeof (leaf.parent as unknown as TabGroup).updateTabDisplay !== "function") return;
+      clear(); source = leaf; sourceStrip = strip; insertion = this.leavesInSameGroup(leaf).indexOf(leaf); this.dragging = true;
+      header.addClass("ubc-tab-dragging");
+      event.stopImmediatePropagation();
+      event.dataTransfer?.setData("application/x-ubc-tab", "reorder");
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+    }, true);
+    plugin.registerDomEvent(document, "dragover", (event: DragEvent) => {
+      if (!source || !sourceStrip) return;
+      event.stopImmediatePropagation();
+      const target = event.target as HTMLElement;
+      if (!sourceStrip.contains(target)) { marker?.removeClass("ubc-drop-before", "ubc-drop-after"); return; }
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+      const others = this.leavesInSameGroup(source).filter((leaf) => leaf !== source);
+      insertion = others.findIndex((leaf) => {
+        const rect = this.tabHeader(leaf)?.getBoundingClientRect();
+        return rect ? event.clientX < rect.left + rect.width / 2 : false;
+      });
+      if (insertion < 0) insertion = others.length;
+      marker?.removeClass("ubc-drop-before", "ubc-drop-after");
+      marker = this.tabHeader(others[Math.min(insertion, others.length - 1)]!);
+      marker?.addClass(insertion === others.length ? "ubc-drop-after" : "ubc-drop-before");
+      const rect = sourceStrip.getBoundingClientRect();
+      if (event.clientX < rect.left + 24) sourceStrip.scrollLeft -= 16;
+      else if (event.clientX > rect.right - 24) sourceStrip.scrollLeft += 16;
+    }, true);
+    plugin.registerDomEvent(document, "drop", (event: DragEvent) => {
+      if (!source || !sourceStrip) return;
+      event.stopImmediatePropagation();
+      if (!sourceStrip.contains(event.target as Node)) { clear(); return; }
+      event.preventDefault();
+      const leaf = source;
+      const group = leaf.parent as unknown as TabGroup;
+      const selected = group.children[group.currentTab];
+      const oldIndex = group.children.indexOf(leaf);
+      this.isReordering = true;
+      try {
+        if (oldIndex >= 0 && oldIndex !== insertion && group.children.length > 1) {
+          // Reorder the existing group atomically: no detach, transient empty pane,
+          // home takeover, or guest destruction while dragging.
+          group.children.splice(oldIndex, 1);
+          group.children.splice(insertion, 0, leaf);
+          group.currentTab = selected ? group.children.indexOf(selected) : insertion;
+          group.updateTabDisplay();
+        }
+      } finally { this.isReordering = false; clear(); }
+      plugin.app.workspace.requestSaveLayout();
+      plugin.app.workspace.trigger("layout-change");
+    }, true);
+    plugin.registerDomEvent(document, "dragend", clear, true);
     plugin.registerDomEvent(document, "contextmenu", (event: MouseEvent) => {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
@@ -51,7 +136,7 @@ export class ObsidianTabStripAdapter {
     else header.style.removeProperty("--ubc-tab-container-color");
     const strip = header.parentElement;
     if (!(strip instanceof HTMLElement)) return;
-    this.refreshStripStyle(strip);
+    this.scheduleStripStyle(strip);
   }
 
   clearLeafStyle(leaf: WorkspaceLeaf): void {
@@ -78,9 +163,7 @@ export class ObsidianTabStripAdapter {
     header.style.removeProperty("--ubc-tab-container-color");
     this.applyLeafFavicon(leaf);
     if (!(strip instanceof HTMLElement)) return;
-    window.requestAnimationFrame(() => {
-      this.refreshStripStyle(strip);
-    });
+    this.scheduleStripStyle(strip);
   }
 
   refreshLeafHeader(leaf: WorkspaceLeaf, activeInWindow = false, savedTitle?: string): void {
@@ -123,6 +206,7 @@ export class ObsidianTabStripAdapter {
   }
 
   revealActiveTab(leaf: WorkspaceLeaf): void {
+    if (this.dragging) return;
     const header = this.tabHeader(leaf);
     const strip = header?.parentElement;
     if (!header || !(strip instanceof HTMLElement) || !strip.hasClass("ubc-browser-tab-strip-scroll")) return;
