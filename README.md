@@ -143,3 +143,8 @@ Obsidian receives the original tab drag start and owns pane movement and split p
 ### 0.2.4 native tabs
 
 Only UBC tab headers receive Firefox-style sizing and strip classes. If a tab group mixes UBC and ordinary Obsidian views, UBC keeps its own browser-tab decoration while the shared strip geometry and native tabs remain untouched. This also clears stale UBC layout classes from native tabs on refresh.
+
+
+### 0.2.5 explicit navigation during restore
+
+Typing or choosing a URL while a saved tab is still bootstrapping cancels its pending recovery attempt and hides any stale recovery notice. A restore already awaiting Electron navigation history checks a generation token and reapplies the user's requested URL when it finishes.

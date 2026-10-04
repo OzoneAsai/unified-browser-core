@@ -99,6 +99,7 @@ export class BrowserView extends ItemView {
   private contextMenuDisposer: (() => void) | undefined;
   private formRecoveryWatchEnabled = false;
   private richRestoreAttempted = false;
+  private restoreIntentGeneration = 0;
   private pendingInitialWebUrl: string | undefined;
   private ignoreBootstrapAboutBlank = false;
   private clearBootstrapHistoryAfterFallback = false;
@@ -316,6 +317,7 @@ export class BrowserView extends ItemView {
       this.showInternal(
         (url.slice("browser://".length) || "home") as BrowserLeafViewState["internalSurface"],
         this.transientHistory.length === 0,
+        false,
       );
     } else {
       this.navigate(url);
@@ -1074,6 +1076,7 @@ export class BrowserView extends ItemView {
 
   navigate(rawUrl: string): void {
     this.bookmarkPopoverClose?.();
+    this.discardPendingRestore();
     const url = this.normalizeAddress(rawUrl);
     if (url.startsWith("browser://")) {
       this.showInternal((url.slice("browser://".length) || "home") as BrowserLeafViewState["internalSurface"]);
@@ -1104,7 +1107,12 @@ export class BrowserView extends ItemView {
     this.ensureWebview(url);
   }
 
-  showInternal(surface: BrowserLeafViewState["internalSurface"] = "home", recordTransient = true): void {
+  showInternal(
+    surface: BrowserLeafViewState["internalSurface"] = "home",
+    recordTransient = true,
+    discardRestore = true,
+  ): void {
+    if (discardRestore) this.discardPendingRestore();
     const resolvedSurface = surface ?? "home";
     this.disconnectHistoryObserver();
     this.internalSurface = resolvedSurface;
@@ -1441,7 +1449,20 @@ export class BrowserView extends ItemView {
     });
   }
 
+  private discardPendingRestore(): void {
+    this.restoreIntentGeneration += 1;
+    this.restoredFromLeafId = undefined;
+    this.restoreTargetUrl = undefined;
+    this.restoreTargetIndex = undefined;
+    this.richRestoreAttempted = true;
+    this.pendingInitialWebUrl = undefined;
+    this.ignoreBootstrapAboutBlank = false;
+    this.clearBootstrapHistoryAfterFallback = false;
+    this.hideRecoveryBanner();
+  }
+
   private async initializeAttachedWebview(webview: WebviewElement): Promise<void> {
+    const restoreGeneration = this.restoreIntentGeneration;
     const fallbackUrl = this.pendingInitialWebUrl;
     this.pendingInitialWebUrl = undefined;
     if (!this.richRestoreAttempted && this.restoredFromLeafId) {
@@ -1468,6 +1489,16 @@ export class BrowserView extends ItemView {
         typeof targetIndex === "number" &&
         await this.navigationHistoryAdapter.restore(webview, capsule, targetIndex)
       );
+      if (restoreGeneration !== this.restoreIntentGeneration) {
+        // A user navigation won while session recovery was awaiting Electron.
+        // Reassert that requested URL after the stale history restore settles.
+        const currentUrl = this.currentUrlValue;
+        if (!currentUrl.startsWith("browser://")) {
+          if (this.isReadyWebview(webview) && webview.loadURL) void webview.loadURL(currentUrl);
+          else webview.src = currentUrl;
+        }
+        return;
+      }
       if (
         capsule &&
         targetIsRestorable &&

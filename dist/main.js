@@ -5421,6 +5421,7 @@ var BrowserView = class _BrowserView extends import_obsidian13.ItemView {
   contextMenuDisposer;
   formRecoveryWatchEnabled = false;
   richRestoreAttempted = false;
+  restoreIntentGeneration = 0;
   pendingInitialWebUrl;
   ignoreBootstrapAboutBlank = false;
   clearBootstrapHistoryAfterFallback = false;
@@ -5601,7 +5602,8 @@ var BrowserView = class _BrowserView extends import_obsidian13.ItemView {
     if (url.startsWith("browser://")) {
       this.showInternal(
         url.slice("browser://".length) || "home",
-        this.transientHistory.length === 0
+        this.transientHistory.length === 0,
+        false
       );
     } else {
       this.navigate(url);
@@ -6257,6 +6259,7 @@ ${item.url}` }
   }
   navigate(rawUrl) {
     this.bookmarkPopoverClose?.();
+    this.discardPendingRestore();
     const url = this.normalizeAddress(rawUrl);
     if (url.startsWith("browser://")) {
       this.showInternal(url.slice("browser://".length) || "home");
@@ -6282,7 +6285,8 @@ ${item.url}` }
     this.webLayerEl.removeClass("is-hidden");
     this.ensureWebview(url);
   }
-  showInternal(surface = "home", recordTransient = true) {
+  showInternal(surface = "home", recordTransient = true, discardRestore = true) {
+    if (discardRestore) this.discardPendingRestore();
     const resolvedSurface = surface ?? "home";
     this.disconnectHistoryObserver();
     this.internalSurface = resolvedSurface;
@@ -6583,7 +6587,19 @@ ${item.url}` }
       void this.handleDomReady();
     });
   }
+  discardPendingRestore() {
+    this.restoreIntentGeneration += 1;
+    this.restoredFromLeafId = void 0;
+    this.restoreTargetUrl = void 0;
+    this.restoreTargetIndex = void 0;
+    this.richRestoreAttempted = true;
+    this.pendingInitialWebUrl = void 0;
+    this.ignoreBootstrapAboutBlank = false;
+    this.clearBootstrapHistoryAfterFallback = false;
+    this.hideRecoveryBanner();
+  }
   async initializeAttachedWebview(webview) {
+    const restoreGeneration = this.restoreIntentGeneration;
     const fallbackUrl = this.pendingInitialWebUrl;
     this.pendingInitialWebUrl = void 0;
     if (!this.richRestoreAttempted && this.restoredFromLeafId) {
@@ -6598,6 +6614,14 @@ ${item.url}` }
       const restored = Boolean(
         capsule && targetIsRestorable && typeof targetIndex === "number" && await this.navigationHistoryAdapter.restore(webview, capsule, targetIndex)
       );
+      if (restoreGeneration !== this.restoreIntentGeneration) {
+        const currentUrl = this.currentUrlValue;
+        if (!currentUrl.startsWith("browser://")) {
+          if (this.isReadyWebview(webview) && webview.loadURL) void webview.loadURL(currentUrl);
+          else webview.src = currentUrl;
+        }
+        return;
+      }
       if (capsule && targetIsRestorable && typeof targetIndex === "number" && restored) {
         if (this.transientHistory.length === 0) {
           this.transientHistory = capsule.entries.map((entry, index) => ({
