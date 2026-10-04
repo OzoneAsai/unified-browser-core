@@ -15,6 +15,16 @@ Unified Browser Core is a desktop-only browser plugin for [Obsidian](https://obs
 - Optionally recover form contents for sites you explicitly allow. Form recovery is off by default and excludes password, payment, one-time-code, WebAuthn, file, and hidden fields.
 - Expose a public API for other Obsidian plugins.
 
+## Bookmark library and selected members
+
+The star in the browser toolbar saves a page and opens a lightweight editor. Choose a folder, change its type, or add it to **Selected members**. Changes are saved as you edit; **Done**, Escape, or a click outside closes the editor. Click the star on an existing bookmark to edit it; remove it with **Delete bookmark** in the editor.
+
+The bookmark library has visual cards grouped by type, a folder tree, and a **Selected members** screen where you choose your everyday pages from existing bookmarks. Search matches names, URLs, descriptions, tags, and folder paths. Type detection uses URL extensions, query filenames, and known domains. Google services are references, Gmail and other mail services are mail, and YouTube is video. Common audio, image, PDF, document, blog, and forum links have separate groups. Automatic results can be overridden in either bookmark editor.
+
+In Settings, enable **Show bookmark bar** and select **Bookmark bar** to show the root bookmarks and folders, or **Selected members** to show only the pages you selected. Existing favorites become selected members. **Initial background color override** can be disabled to stop painting the Obsidian theme color behind initial web content; the full-page loading shield remains a separate option.
+
+**Language** offers English, Japanese, or automatic selection from Obsidian's language. The settings, bookmark screens, browser menus, dialogs, and primary command labels support both languages; command labels are registered when the plugin loads.
+
 ## Import from Web viewer Bookmarks
 
 In a vault that has Web viewer Bookmarks installed, open Unified Browser Core's Bookmarks page and choose **Import Web viewer Bookmarks**, or run **Import bookmarks from Web viewer Bookmarks** from the command palette. UBC reads that plugin's `data.json` from the same vault and leaves it unchanged. Repeating the import skips URLs already in UBC.

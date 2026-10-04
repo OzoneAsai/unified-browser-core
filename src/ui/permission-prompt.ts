@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { Modal, type App } from "obsidian";
 import type { PermissionDecision } from "../core/model";
 import { permissionLabel } from "./permission-label";
@@ -21,20 +22,20 @@ class PermissionPromptModal extends Modal {
   }
 
   onOpen(): void {
-    this.contentEl.createEl("h2", { text: "Site permission" });
+    this.contentEl.createEl("h2", { text: t("Site permission") });
     this.contentEl.createEl("p", {
-      text: `${this.origin} is requesting “${permissionLabel(this.permission)}”.`,
+      text: t("{v0} is requesting “{v1}”.", { v0: this.origin, v1: permissionLabel(this.permission) }),
     });
     this.contentEl.createEl("p", {
-      text: "Allow and Block are remembered for this site in the current container. Not now denies this request without saving a decision.",
+      text: t("Allow and Block are remembered for this site in the current container. Not now denies this request without saving a decision."),
     });
     const actions = this.contentEl.createDiv({ cls: "ubc-permission-actions" });
-    const notNow = actions.createEl("button", { text: "Not now" });
+    const notNow = actions.createEl("button", { text: t("Not now") });
     notNow.addEventListener("click", () => this.finish("ask"));
     actions
-      .createEl("button", { text: "Block" })
+      .createEl("button", { text: t("Block") })
       .addEventListener("click", () => this.finish("block"));
-    const allow = actions.createEl("button", { text: "Allow", cls: "mod-cta" });
+    const allow = actions.createEl("button", { text: t("Allow"), cls: "mod-cta" });
     allow.addEventListener("click", () => this.finish("allow"));
     notNow.focus();
   }

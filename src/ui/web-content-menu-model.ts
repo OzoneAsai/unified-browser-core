@@ -1,6 +1,7 @@
 import type UnifiedBrowserCorePlugin from "../main";
 import type { BrowserView } from "./browser-view";
 import type { WebviewContextMenuParams } from "./webview-types";
+import { t } from "../i18n";
 
 export type WebContentMenuEntry =
   | {
@@ -22,7 +23,7 @@ export function buildWebContentMenuEntries(
     title: string,
     action: () => void,
     options: { icon?: string; disabled?: boolean } = {},
-  ) => entries.push({ kind: "item", title, action, ...options });
+  ) => entries.push({ kind: "item", title: t(title), action, ...options });
   const separator = () => {
     if (entries.length > 0 && entries[entries.length - 1]?.kind !== "separator") {
       entries.push({ kind: "separator" });
@@ -43,7 +44,7 @@ export function buildWebContentMenuEntries(
     add("Open link in new window", () => void plugin.openBrowser({ url: link, placement: "window" }), { icon: "picture-in-picture" });
     if (containerMode !== "off") {
       for (const container of plugin.core.containers.list()) {
-        add("Open link in " + container.name, () => void plugin.openBrowser({ url: link, containerId: container.id }), { icon: "box" });
+        add(t("Open link in {name}", { name: container.name }), () => void plugin.openBrowser({ url: link, containerId: container.id }), { icon: "box" });
       }
     }
     const linkedBookmark = bookmarkStore?.findByUrl?.(link);
@@ -72,7 +73,7 @@ export function buildWebContentMenuEntries(
 
   if (selection && !params.isEditable) {
     const shown = selection.slice(0, 40) + (selection.length > 40 ? "…" : "");
-    add("Search “" + shown + "”", () => void plugin.openBrowser({ url: plugin.core.searchUrl(selection) }), { icon: "search" });
+    add(t("Search “{query}”", { query: shown }), () => void plugin.openBrowser({ url: plugin.core.searchUrl(selection) }), { icon: "search" });
     add("Copy selected text", () => void navigator.clipboard.writeText(selection), { icon: "copy" });
     separator();
   }
@@ -90,7 +91,7 @@ export function buildWebContentMenuEntries(
     separator();
     if (selection) {
       const shown = selection.slice(0, 40) + (selection.length > 40 ? "…" : "");
-      add("Search “" + shown + "”", () => void plugin.openBrowser({ url: plugin.core.searchUrl(selection) }), { icon: "search" });
+      add(t("Search “{query}”", { query: shown }), () => void plugin.openBrowser({ url: plugin.core.searchUrl(selection) }), { icon: "search" });
       separator();
     }
   }
@@ -122,7 +123,7 @@ export function buildWebContentMenuEntries(
     add("Stop loading", () => view.stopLoading());
     separator();
     add("Home", () => view.showInternal("home"), { icon: "home" });
-    add(currentPageBookmarked ? "Remove bookmark" : "Bookmark this page", () => view.bookmarkCurrentPage(), {
+    add(currentPageBookmarked ? "Edit bookmark" : "Bookmark this page", () => view.bookmarkCurrentPage(), {
       icon: currentPageBookmarked ? "bookmark-check" : "bookmark",
     });
     add("Copy page URL", () => void navigator.clipboard.writeText(view.currentUrl()), { icon: "copy" });

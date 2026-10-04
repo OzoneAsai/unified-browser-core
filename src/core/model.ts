@@ -8,6 +8,7 @@ export type TabStyle = "firefox" | "chrome";
 export type BrowserStartupBehavior = "restore" | "home" | "none";
 export type ContainerMode = "off" | "manual" | "automatic";
 export type BookmarkVisualKind = "favicon" | "image" | "text" | "icon";
+export type BookmarkMediaType = "reference" | "video" | "audio" | "image" | "pdf" | "document" | "mail" | "blog" | "forum" | "website";
 export type SiteAssignmentBypassReason = "explicit" | "opener";
 export type PermissionDecision = "ask" | "allow" | "block";
 export type ManualRetention = "default" | "preserve";
@@ -36,6 +37,9 @@ export interface BrowserSettings {
   defaultContainerId: ContainerId;
   containerMode: ContainerMode;
   showFavoritesBar: boolean;
+  bookmarkBarMode: "all" | "selected";
+  initialBackgroundOverride: boolean;
+  language: "auto" | "en" | "ja";
 }
 
 export interface BrowserContainer {
@@ -135,6 +139,7 @@ export interface BookmarkEntry {
   createdAt: number;
   description?: string;
   tags?: string[];
+  mediaType?: BookmarkMediaType;
   favorite: boolean;
   favoriteOrder?: number;
   visualKind: BookmarkVisualKind;
@@ -251,6 +256,7 @@ export interface SurfingMigrationRecord {
 }
 
 export interface BrowserLeafViewState extends Record<string, unknown> {
+  bookmarkLayout?: "type" | "folder" | "selected";
   lifecycleId?: LeafId;
   url?: string;
   containerId?: ContainerId;
@@ -303,6 +309,9 @@ export const DEFAULT_SETTINGS: BrowserSettings = {
   defaultContainerId: "default",
   containerMode: "automatic",
   showFavoritesBar: true,
+  bookmarkBarMode: "selected",
+  initialBackgroundOverride: true,
+  language: "auto",
 };
 
 export const EMPTY_HISTORY: HistoryGraphState = {

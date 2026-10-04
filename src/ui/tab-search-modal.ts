@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { FuzzySuggestModal, Menu, Notice, type App, type FuzzyMatch, type WorkspaceLeaf } from "obsidian";
 import type UnifiedBrowserCorePlugin from "../main";
 import { BrowserView, BROWSER_VIEW_TYPE } from "./browser-view";
@@ -36,11 +37,11 @@ export class TabSearchModal extends FuzzySuggestModal<TabSearchItem> {
     const bridge = this.resultContainerEl.ownerDocument.createElement("div");
     bridge.className = "ubc-tab-search-bridge";
     const text = bridge.createDiv({ cls: "ubc-tab-search-bridge-copy" });
-    text.createEl("strong", { text: "Looking for a Vault file?" });
-    text.createSpan({ text: "Use Obsidian's Quick Switcher for notes and files." });
+    text.createEl("strong", { text: t("Looking for a Vault file?") });
+    text.createSpan({ text: t("Use Obsidian's Quick Switcher for notes and files.") });
     const button = bridge.createEl("button", {
-      text: "Quick Switcher",
-      attr: { type: "button", "aria-label": "Open Obsidian Quick Switcher" },
+      text: t("Quick Switcher"),
+      attr: { type: "button", "aria-label": t("Open Obsidian Quick Switcher") },
     });
     button.disabled = !this.plugin.commandAdapter.has(this.app, "switcher:open");
     button.addEventListener("click", () => {
@@ -101,7 +102,7 @@ export class TabSearchModal extends FuzzySuggestModal<TabSearchItem> {
     primary.createEl("strong", { text: match.item.title || "Browser tab" });
     primary.createSpan({
       cls: "ubc-tab-search-url",
-      text: match.item.url.startsWith("browser://") ? "Browser Core page" : match.item.url,
+      text: match.item.url.startsWith("browser://") ? t("Browser Core page") : match.item.url,
     });
     const meta = el.createDiv({ cls: "ubc-tab-search-meta" });
     const parts = [
@@ -119,13 +120,13 @@ export class TabSearchModal extends FuzzySuggestModal<TabSearchItem> {
       const { leaf, title, url } = match.item;
       const view = leaf.view instanceof BrowserView ? leaf.view : undefined;
       const menu = new Menu();
-      menu.addItem((item) => item.setTitle("Switch to tab").setIcon("mouse-pointer-click").onClick(() => this.plugin.app.workspace.revealLeaf(leaf)));
-      menu.addItem((item) => item.setTitle(match.item.pinned ? "Unpin" : "Pin").setIcon("pin").onClick(() => leaf.setPinned(!match.item.pinned)));
-      menu.addItem((item) => item.setTitle("Move to new window").setIcon("picture-in-picture").onClick(() => {
+      menu.addItem((item) => item.setTitle(t("Switch to tab")).setIcon("mouse-pointer-click").onClick(() => this.plugin.app.workspace.revealLeaf(leaf)));
+      menu.addItem((item) => item.setTitle(match.item.pinned ? t("Unpin") : t("Pin")).setIcon("pin").onClick(() => leaf.setPinned(!match.item.pinned)));
+      menu.addItem((item) => item.setTitle(t("Move to new window")).setIcon("picture-in-picture").onClick(() => {
         try {
           this.plugin.app.workspace.moveLeafToPopout(leaf);
         } catch {
-          new Notice("This Obsidian build cannot move the tab to a new window.");
+          new Notice(t("This Obsidian build cannot move the tab to a new window."));
         }
       }));
       if (view) {
@@ -142,23 +143,23 @@ export class TabSearchModal extends FuzzySuggestModal<TabSearchItem> {
         }
         if (!url.startsWith("browser://")) {
           const bookmark = this.plugin.core.bookmarks.findByUrl(url);
-          menu.addItem((item) => item.setTitle(bookmark ? "Remove bookmark" : "Bookmark").setIcon(bookmark ? "bookmark-check" : "bookmark").onClick(() => {
+          menu.addItem((item) => item.setTitle(bookmark ? t("Remove bookmark") : t("Bookmark")).setIcon(bookmark ? "bookmark-check" : "bookmark").onClick(() => {
             this.plugin.core.bookmarks.toggleBookmark({ title, url });
             this.plugin.core.scheduleSave();
             this.plugin.refreshBrowserViews();
           }));
-          menu.addItem((item) => item.setTitle("Copy URL").setIcon("copy").onClick(() => {
+          menu.addItem((item) => item.setTitle(t("Copy URL")).setIcon("copy").onClick(() => {
             void navigator.clipboard.writeText(url);
           }));
         }
       }
       menu.addSeparator();
-      menu.addItem((item) => item.setTitle("Open Quick Switcher").setIcon("file-search-2").onClick(() => {
+      menu.addItem((item) => item.setTitle(t("Open Quick Switcher")).setIcon("file-search-2").onClick(() => {
         this.close();
         const hostWindow = this.modalEl.ownerDocument.defaultView ?? window;
         hostWindow.requestAnimationFrame(() => this.plugin.openQuickSwitcher());
       }));
-      menu.addItem((item) => item.setTitle("Close tab").setIcon("x").onClick(() => leaf.detach()));
+      menu.addItem((item) => item.setTitle(t("Close tab")).setIcon("x").onClick(() => leaf.detach()));
       menu.showAtMouseEvent(event);
     });
   }

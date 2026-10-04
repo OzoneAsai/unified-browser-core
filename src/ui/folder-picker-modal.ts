@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { FuzzySuggestModal, type App } from "obsidian";
 import type { BookmarkStore } from "../bookmarks/bookmark-store";
 import type { BookmarkFolderId } from "../core/model";
@@ -27,11 +28,11 @@ class BookmarkFolderPickerModal extends FuzzySuggestModal<FolderChoice> {
     private readonly resolveChoice: (value: BookmarkFolderId | null | undefined) => void,
   ) {
     super(app);
-    this.setPlaceholder("Choose bookmark folder");
+    this.setPlaceholder(t("Choose bookmark folder"));
   }
 
   getItems(): FolderChoice[] {
-    const choices: FolderChoice[] = [{ id: null, label: "Bookmarks root" }];
+    const choices: FolderChoice[] = [{ id: null, label: t("Bookmarks root") }];
     for (const folder of this.store.folders()) {
       if (this.excludeFolderId && !this.store.canMoveFolder(this.excludeFolderId, folder.id)) continue;
       choices.push({ id: folder.id, label: this.store.folderPath(folder.id) });
@@ -50,6 +51,10 @@ class BookmarkFolderPickerModal extends FuzzySuggestModal<FolderChoice> {
 
   onClose(): void {
     super.onClose();
-    if (!this.chosen) this.resolveChoice(undefined);
+    // Obsidian can close the suggestion modal before calling onChooseItem.
+    // Defer cancellation until that selection callback has had a turn.
+    window.setTimeout(() => {
+      if (!this.chosen) this.resolveChoice(undefined);
+    }, 0);
   }
 }

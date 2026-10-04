@@ -3,6 +3,8 @@ import { HistoryGraph } from "../src/history/history-graph";
 import { historyDayKey } from "../src/history/day-key";
 import { ContainerStore } from "../src/containers/container-store";
 import { BookmarkStore } from "../src/bookmarks/bookmark-store";
+import { inferBookmarkMedia, classifyBookmark } from "../src/bookmarks/bookmark-media";
+import { t, setLanguage, setLocaleResolver } from "../src/i18n";
 import { RestoreStore } from "../src/core/restore-store";
 import { BrowserCore } from "../src/core/browser-core";
 import { PermissionStore } from "../src/core/permission-store";
@@ -26,6 +28,27 @@ import { normalizeObsidianBookmarkItems } from "../src/adapters/obsidian-bookmar
 import { WebViewerBookmarksAdapter, normalizeWebViewerBookmarks } from "../src/adapters/webviewer-bookmarks";
 
 (globalThis as typeof globalThis & { window?: typeof globalThis }).window = globalThis;
+setLanguage("en");
+for (const [url, expected] of [
+  ["https://www.google.com/", "reference"], ["https://docs.google.com/document/d/123", "reference"],
+  ["https://mail.google.com/mail/u/0/", "mail"], ["https://gmail.com/", "mail"], ["https://outlook.office.com/mail/", "mail"],
+  ["https://outlook.live.com/mail/", "mail"], ["https://mail.yahoo.co.jp/", "mail"],
+  ["https://youtube.com/watch?v=123", "video"], ["https://youtu.be/123", "video"],
+  ["https://example.com/clip.MP4?download=1", "video"], ["https://example.com/download?file=clip.mp4", "video"],
+  ["https://example.com/manual.pdf", "pdf"], ["https://example.com/image.webp", "image"],
+  ["https://example.com/audio.mp3", "audio"], ["https://example.com/doc.docx", "document"],
+  ["https://note.com/example/n/123", "blog"], ["https://reddit.com/r/obsidian", "forum"],
+  ["https://qiita.com/example/items/123", "blog"], ["https://forum.obsidian.md/t/topic/123", "forum"],
+  ["https://manaba.example.ac.jp/", "reference"], ["https://evilgoogle.com/", "website"],
+  ["https://example.com/page?text=.mp4-discussion", "website"],
+] as const) assert.equal(inferBookmarkMedia(url), expected, url);
+assert.equal(classifyBookmark({ url: "https://youtube.com/", mediaType: "reference" }), "reference", "manual categories override heuristics");
+setLanguage("ja");
+assert.equal(t("Selected members"), "選抜メンバー");
+assert.equal(t("{count} bookmarks", { count: 3 }), "3件のブックマーク");
+setLocaleResolver(() => "ja"); setLanguage("auto");
+assert.equal(t("Bookmarks"), "ブックマーク");
+setLanguage("en");
 
 const sessionCheckpoint = {
   capturedAt: 123,
@@ -859,7 +882,7 @@ const legacyBookmarkState = BrowserCore.normalize({
     },
   },
 } as any);
-assert.equal(legacyBookmarkState.version, 5);
+assert.equal(legacyBookmarkState.version, 6);
 assert.equal(legacyBookmarkState.settings.showFavoritesBar, false, "legacy bookmark-bar visibility must migrate to favorites bar visibility");
 assert.equal(legacyBookmarkState.bookmarks.bookmarks.legacy?.favorite, true, "legacy root bookmarks must remain visible as favorites after migration");
 assert.equal(legacyBookmarkState.bookmarks.bookmarks.legacy?.visualKind, "favicon");
@@ -911,7 +934,7 @@ modeState.settings.containerMode = "automatic";
 assert.equal(modeCore.resolveContainerForNavigation("https://example.com", "default"), modeWork.id);
 modeState.settings.containerMode = "off";
 modeState.settings.defaultContainerId = modeWork.id;
-assert.equal(modeCore.defaultContainerForNewTab(), "default", "container-off mode must create ordinary tabs in the default browser session");
+assert.equal(modeCore.defaultContainerForNewTab(), modeWork.id, "container-off mode must retain the selected default profile, including a migrated Surfing profile");
 
 const restore = new RestoreStore(state);
 state.history.leaves["leaf-a"]!.pinned = true;

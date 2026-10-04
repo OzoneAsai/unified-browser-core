@@ -1,4 +1,5 @@
 import type { PermissionDecision } from "../core/model";
+import { t } from "../i18n";
 
 const PERMISSION_LABELS: Record<string, string> = {
   camera: "Camera",
@@ -29,7 +30,7 @@ const PERMISSION_LABELS: Record<string, string> = {
 
 export function permissionLabel(permission: string): string {
   const known = PERMISSION_LABELS[permission];
-  if (known) return known;
+  if (known) return t(known);
   const words = permission
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .replace(/[-_]+/g, " ")
@@ -39,7 +40,7 @@ export function permissionLabel(permission: string): string {
 }
 
 export function permissionDecisionLabel(decision: PermissionDecision): string {
-  if (decision === "allow") return "Allow";
-  if (decision === "block") return "Block";
-  return "Ask next time";
+  if (decision === "allow") return t("Allow");
+  if (decision === "block") return t("Block");
+  return t("Ask next time");
 }

@@ -6,6 +6,7 @@ import type {
   BookmarkFolderId,
   BookmarkState,
   BookmarkVisualKind,
+  BookmarkMediaType,
 } from "../core/model";
 
 export interface BookmarkInput {
@@ -19,6 +20,7 @@ export interface BookmarkInput {
   description?: string;
   tags?: string[];
   createdAt?: number;
+  mediaType?: BookmarkMediaType;
 }
 
 export interface ImportedWebBookmark {
@@ -80,6 +82,7 @@ export class BookmarkStore {
       createdAt: input.createdAt ?? Date.now(),
       description: input.description,
       tags: input.tags ? [...input.tags] : undefined,
+      mediaType: input.mediaType,
       favorite: input.favorite ?? false,
       favoriteOrder: input.favorite ? this.nextFavoriteOrder() : undefined,
       visualKind: input.visualKind ?? "favicon",
@@ -226,7 +229,7 @@ export class BookmarkStore {
 
   updateBookmark(
     id: string,
-    patch: Partial<Pick<BookmarkEntry, "title" | "url" | "favorite" | "visualKind" | "visualValue" | "faviconUrl" | "description" | "tags">>,
+    patch: Partial<Pick<BookmarkEntry, "title" | "url" | "favorite" | "visualKind" | "visualValue" | "faviconUrl" | "description" | "tags" | "mediaType">>,
   ): boolean {
     const bookmark = this.state.bookmarks[id];
     if (!bookmark) return false;
@@ -236,6 +239,7 @@ export class BookmarkStore {
     if (patch.title !== undefined) bookmark.title = patch.title.trim() || bookmark.url;
     if (patch.description !== undefined) bookmark.description = patch.description.trim() || undefined;
     if (patch.tags !== undefined) bookmark.tags = [...patch.tags];
+    if ("mediaType" in patch) bookmark.mediaType = patch.mediaType;
     if (patch.favorite !== undefined) bookmark.favorite = patch.favorite;
     if (patch.visualKind !== undefined) {
       bookmark.visualKind = patch.visualKind;

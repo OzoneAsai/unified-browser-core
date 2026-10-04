@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { Modal, type App } from "obsidian";
 
 export interface RecoveryDetails {
@@ -18,7 +19,7 @@ class RecoveryDetailsModal extends Modal {
   }
 
   onOpen(): void {
-    this.contentEl.createEl("h2", { text: "Recovery details" });
+    this.contentEl.createEl("h2", { text: t("Recovery details") });
     const list = this.contentEl.createEl("dl", { cls: "ubc-recovery-details" });
     addRow(list, "URL", this.details.url || "Unknown");
     addRow(list, "Detailed tab state", this.details.richRestoreAvailable ? "Available" : "Not available");
@@ -40,10 +41,10 @@ class RecoveryDetailsModal extends Modal {
         : "Restore detailed tab state when possible",
     );
     this.contentEl.createEl("p", {
-      text: "Browser Core does not save a full live copy of the page. Some page state can only be restored by the browser engine, while saved form values and the website's own drafts are recovered separately.",
+      text: t("Browser Core does not save a full live copy of the page. Some page state can only be restored by the browser engine, while saved form values and the website's own drafts are recovered separately."),
     });
     const actions = this.contentEl.createDiv({ cls: "ubc-modal-actions" });
-    actions.createEl("button", { text: "Close" }).addEventListener("click", () => this.close());
+    actions.createEl("button", { text: t("Close") }).addEventListener("click", () => this.close());
   }
 
   onClose(): void {

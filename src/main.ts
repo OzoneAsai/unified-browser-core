@@ -1,4 +1,4 @@
-import { Menu, Notice, Plugin, type App, type WorkspaceLeaf } from "obsidian";
+import { Menu, Notice, Plugin, getLanguage, type App, type WorkspaceLeaf } from "obsidian";
 import { ElectronPermissionAdapter } from "./adapters/electron-permissions";
 import { ElectronSessionDataAdapter } from "./adapters/electron-session-data";
 import { ElectronWindowOpenAdapter } from "./adapters/electron-window-open";
@@ -22,6 +22,7 @@ import {
 } from "./api/browser-api";
 import { BrowserCore } from "./core/browser-core";
 import { createId } from "./core/id";
+import { t, setLanguage, setLocaleResolver } from "./i18n";
 import type {
   BookmarkEntry,
   BrowserCoreState,
@@ -126,6 +127,8 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     );
     const raw = await this.persistence.load();
     const state = BrowserCore.normalize(raw);
+    setLocaleResolver(getLanguage);
+    setLanguage(state.settings.language);
     this.core = new BrowserCore(
       this.app,
       state,
@@ -187,55 +190,55 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
 
     this.registerView(BROWSER_VIEW_TYPE, (leaf) => new BrowserView(leaf, this));
     this.addSettingTab(new BrowserSettingTab(this.app, this));
-    this.addRibbonIcon("globe", "Open browser", () => this.openBrowser());
+    this.addRibbonIcon("globe", t("Open browser"), () => this.openBrowser());
 
     this.addCommand({
       id: "open-browser",
-      name: "Open browser",
+      name: t("Open browser"),
       callback: () => this.openBrowser(),
     });
     this.addCommand({
       id: "open-history",
-      name: "Open browser history",
+      name: t("Open browser history"),
       callback: () => this.openBrowser({ url: "browser://history" }),
     });
     this.addCommand({
       id: "open-bookmarks",
-      name: "Open browser bookmarks",
+      name: t("Open browser bookmarks"),
       callback: () => this.openBrowser({ url: "browser://bookmarks" }),
     });
     this.addCommand({
       id: "import-obsidian-bookmarks",
-      name: "Import web bookmarks from Obsidian Bookmarks",
+      name: t("Import web bookmarks from Obsidian Bookmarks"),
       callback: () => void this.importObsidianBookmarks(),
     });
     this.addCommand({
       id: "import-webviewer-bookmarks",
-      name: "Import bookmarks from Web viewer Bookmarks",
+      name: t("Import bookmarks from Web viewer Bookmarks"),
       callback: () => void this.importWebViewerBookmarks(),
     });
     this.addCommand({
       id: "migrate-from-surfing",
-      name: "Migrate browsing data from Surfing",
+      name: t("Migrate browsing data from Surfing"),
       callback: () => void this.migrateFromSurfing(),
     });
     this.addCommand({
       id: "reopen-closed-tab",
-      name: "Reopen last closed browser tab",
+      name: t("Reopen last closed browser tab"),
       callback: () => {
         const closed = this.core.history.recentlyClosed(1)[0];
         if (closed) void this.restoreLeaf(closed.id);
-        else new Notice("No recently closed browser tab.");
+        else new Notice(t("No recently closed browser tab."));
       },
     });
     this.addCommand({
       id: "search-browser-tabs",
-      name: "Search browser tabs",
+      name: t("Search browser tabs"),
       callback: () => this.openBrowserTabSearch(),
     });
     this.addCommand({
       id: "next-browser-tab",
-      name: "Next browser tab",
+      name: t("Next browser tab"),
       checkCallback: (checking) => {
         if (this.browserTabsInActiveGroup().length < 2) return false;
         if (!checking) this.cycleBrowserTab(1);
@@ -244,7 +247,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     });
     this.addCommand({
       id: "previous-browser-tab",
-      name: "Previous browser tab",
+      name: t("Previous browser tab"),
       checkCallback: (checking) => {
         if (this.browserTabsInActiveGroup().length < 2) return false;
         if (!checking) this.cycleBrowserTab(-1);
@@ -253,7 +256,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     });
     this.addCommand({
       id: "close-browser-tab",
-      name: "Close current browser tab",
+      name: t("Close current browser tab"),
       checkCallback: (checking) => {
         const leaf = this.app.workspace.activeLeaf;
         if (!(leaf?.view instanceof BrowserView)) return false;
@@ -263,7 +266,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     });
     this.addCommand({
       id: "browser-zoom-in",
-      name: "Browser zoom in",
+      name: t("Browser zoom in"),
       checkCallback: (checking) => {
         const view = this.activeBrowserView();
         if (!view) return false;
@@ -273,7 +276,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     });
     this.addCommand({
       id: "browser-zoom-out",
-      name: "Browser zoom out",
+      name: t("Browser zoom out"),
       checkCallback: (checking) => {
         const view = this.activeBrowserView();
         if (!view) return false;
@@ -283,7 +286,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     });
     this.addCommand({
       id: "browser-zoom-reset",
-      name: "Reset browser zoom for site",
+      name: t("Reset browser zoom for site"),
       checkCallback: (checking) => {
         const view = this.activeBrowserView();
         if (!view) return false;
@@ -293,7 +296,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     });
     this.addCommand({
       id: "browser-focus-address",
-      name: "Focus browser address bar",
+      name: t("Focus browser address bar"),
       checkCallback: (checking) => {
         const view = this.activeBrowserView();
         if (!view) return false;
@@ -303,7 +306,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     });
     this.addCommand({
       id: "browser-back",
-      name: "Browser back",
+      name: t("Browser back"),
       checkCallback: (checking) => {
         const view = this.activeBrowserView();
         if (!view) return false;
@@ -313,7 +316,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     });
     this.addCommand({
       id: "browser-forward",
-      name: "Browser forward",
+      name: t("Browser forward"),
       checkCallback: (checking) => {
         const view = this.activeBrowserView();
         if (!view) return false;
@@ -323,7 +326,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     });
     this.addCommand({
       id: "browser-reload",
-      name: "Reload browser page",
+      name: t("Reload browser page"),
       checkCallback: (checking) => {
         const view = this.activeBrowserView();
         if (!view) return false;
@@ -333,7 +336,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     });
     this.addCommand({
       id: "browser-bookmark-page",
-      name: "Bookmark current browser page",
+      name: t("Bookmark current browser page"),
       checkCallback: (checking) => {
         const view = this.activeBrowserView();
         if (!view) return false;
@@ -343,7 +346,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     });
     this.addCommand({
       id: "browser-container-picker",
-      name: "Open browser container picker",
+      name: t("Open browser container picker"),
       checkCallback: (checking) => {
         const view = this.activeBrowserView();
         if (!view) return false;
@@ -353,7 +356,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     });
     this.addCommand({
       id: "browser-search-history",
-      name: "Search browser history",
+      name: t("Search browser history"),
       checkCallback: (checking) => {
         const view = this.activeBrowserView();
         if (!view) return false;
@@ -363,7 +366,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     });
     this.addCommand({
       id: "restore-browser-session",
-      name: "Restore previous browser session",
+      name: t("Restore previous browser session"),
       callback: () => void this.restorePreviousSession(true),
     });
     this.registerEvent(
@@ -580,7 +583,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
   ): Promise<void> {
     const record = this.core.state.history.leaves[oldLeafId];
     if (!record?.lastUrl) {
-      new Notice("This tab has no restorable URL.");
+      new Notice(t("This tab has no restorable URL."));
       return;
     }
     const pinned = options.pinned ?? record.pinned;
@@ -636,14 +639,14 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       return leaf.view instanceof BrowserView && leaf.view.getState().containerId === containerId;
     });
     if (hasLiveLeaf) {
-      new Notice("Close or reopen tabs using this container before deleting it.");
+      new Notice(t("Close or reopen tabs using this container before deleting it."));
       return false;
     }
 
     this.permissionAdapter.release(containerId);
     const cleared = await this.sessionDataAdapter.clearPartition(container.partition);
     if (!cleared) {
-      new Notice("Could not clear this container's browsing data, so the container was not deleted.");
+      new Notice(t("Could not clear this container's browsing data, so the container was not deleted."));
       return false;
     }
     this.core.permissions.resetContainer(containerId);
@@ -651,7 +654,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     const removed = this.core.containers.remove(containerId);
     if (removed) {
       this.core.scheduleSave();
-      new Notice(`Deleted container “${container.name}” and cleared its browsing data.`);
+      new Notice(t("Deleted container “{v0}” and cleared its browsing data.", { v0: container.name }));
     }
     return removed;
   }
@@ -707,12 +710,12 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     if (!container) return false;
     const cleared = await this.sessionDataAdapter.clearPartition(container.partition);
     if (!cleared) {
-      new Notice(`Could not clear browsing data for “${container.name}”.`);
+      new Notice(t("Could not clear browsing data for “{v0}”.", { v0: container.name }));
       return false;
     }
     this.core.permissions.resetContainer(containerId);
     this.core.scheduleSave();
-    new Notice(`Cleared browsing data and saved permissions for “${container.name}”.`);
+    new Notice(t("Cleared browsing data and saved permissions for “{v0}”.", { v0: container.name }));
     return true;
   }
 
@@ -739,12 +742,12 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
   async restorePreviousSession(notify: boolean): Promise<void> {
     const checkpoint = this.previousSessionCheckpoint;
     if (!checkpoint.leaves.length) {
-      if (notify) new Notice("No previous browser session is available.");
+      if (notify) new Notice(t("No previous browser session is available."));
       return;
     }
     const leavesToRestore = this.pendingPreviousSessionLeaves();
     if (!leavesToRestore.length) {
-      if (notify) new Notice("The previous browser session is already restored.");
+      if (notify) new Notice(t("The previous browser session is already restored."));
       return;
     }
     for (const saved of leavesToRestore) {
@@ -764,7 +767,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       });
       leaf.setPinned(saved.pinned);
     }
-    if (notify) new Notice(`Restored ${leavesToRestore.length} browser tab(s).`);
+    if (notify) new Notice(t("Restored {v0} browser tab(s).", { v0: leavesToRestore.length }));
   }
 
   private pendingPreviousSessionLeaves() {
@@ -842,7 +845,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
 
   openSettings(): void {
     if (!this.settingsAdapter.openPluginSettings(this.app, this.manifest.id)) {
-      new Notice("Open Obsidian Settings → Community plugins → Unified Browser Core.");
+      new Notice(t("Open Obsidian Settings → Community plugins → Unified Browser Core."));
     }
   }
 
@@ -855,7 +858,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
   }> {
     const snapshot = await this.bookmarksAdapter.scan();
     if (!snapshot.available) {
-      if (notify) new Notice("Obsidian Bookmarks is unavailable or has no readable bookmark data.");
+      if (notify) new Notice(t("Obsidian Bookmarks is unavailable or has no readable bookmark data."));
       return { available: false, added: 0, reused: 0, foldersCreated: 0, skippedNonWeb: 0 };
     }
 
@@ -876,6 +879,12 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     return { available: true, ...imported, skippedNonWeb: snapshot.skippedNonWeb };
   }
 
+  refreshLanguage(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE)) {
+      if (leaf.view instanceof BrowserView) leaf.view.refreshLanguage();
+    }
+  }
+
   async importWebViewerBookmarks(notify = true): Promise<{
     available: boolean;
     added: number;
@@ -884,7 +893,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
   }> {
     const snapshot = await this.webViewerBookmarksAdapter.scan();
     if (!snapshot.available) {
-      if (notify) new Notice("Web viewer Bookmarks has no readable data in this vault.");
+      if (notify) new Notice(t("Web viewer Bookmarks has no readable data in this vault."));
       return { available: false, added: 0, reused: 0, skippedInvalid: 0 };
     }
 
@@ -910,16 +919,16 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     try {
       const previous = this.core.state.surfingMigration;
       if (previous?.completedAt) {
-        new Notice(`Surfing migration already completed. Backup: ${previous.backupPath}`);
+        new Notice(t("Surfing migration already completed. Backup: {v0}", { v0: previous.backupPath }));
         return;
       }
       const snapshot = previous ? null : await this.surfingMigrationAdapter.scan();
       if (snapshot && !snapshot.settingsFound && !snapshot.bookmarksFound && snapshot.tabs.length === 0) {
-        new Notice("No Surfing data was found in this vault. Run migration before uninstalling Surfing.");
+        new Notice(t("No Surfing data was found in this vault. Run migration before uninstalling Surfing."));
         return;
       }
       if (snapshot && (snapshot.settingsFound && !snapshot.settings || snapshot.bookmarksFound && !snapshot.bookmarksValid)) {
-        new Notice("Surfing data could not be read safely. No changes were made.");
+        new Notice(t("Surfing data could not be read safely. No changes were made."));
         return;
       }
       const tabs = previous?.tabs ?? snapshot?.tabs ?? [];
@@ -928,7 +937,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
         : `Adopt Surfing's persistent browsing profile, import ${snapshot!.bookmarks.length} bookmark(s), ` +
           `apply compatible settings and open ${tabs.length} saved tab(s)? Browser Core will save a backup first. ` +
           `Surfing data will remain untouched.${snapshot!.warnings.length ? ` Warnings: ${snapshot!.warnings.join(" ")}` : ""}`;
-      const confirmed = await confirmAction(this.app, "Migrate from Surfing", message, "Migrate");
+      const confirmed = await confirmAction(this.app, t("Migrate from Surfing"), message, t("Migrate"));
       if (!confirmed) return;
 
       let record = previous;
@@ -1065,7 +1074,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
         `${record.tabs.length} tab(s) opened. Backup: ${record.backupPath}`, 12000);
     } catch (error) {
       console.error("Unified Browser Core: Surfing migration failed.", error);
-      new Notice("Surfing migration stopped. Source data was not deleted; run the command again to resume.", 12000);
+      new Notice(t("Surfing migration stopped. Source data was not deleted; run the command again to resume."), 12000);
     } finally {
       this.surfingMigrationRunning = false;
     }
@@ -1171,13 +1180,13 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
 
   openQuickSwitcher(): void {
     if (!this.commandAdapter.openQuickSwitcher(this.app)) {
-      new Notice("Obsidian Quick Switcher is not available.");
+      new Notice(t("Obsidian Quick Switcher is not available."));
     }
   }
 
   private showTabStripMenu(event: MouseEvent): void {
     const menu = new Menu();
-    menu.addItem((item) => item.setTitle("New browser tab").setIcon("plus").onClick(() => void this.openBrowser()));
+    menu.addItem((item) => item.setTitle(t("New browser tab")).setIcon("plus").onClick(() => void this.openBrowser()));
     for (const container of this.core.containers.list()) {
       menu.addItem((item) =>
         item
@@ -1189,24 +1198,24 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     const closed = this.core.history.recentlyClosed(1)[0];
     menu.addItem((item) =>
       item
-        .setTitle("Reopen closed tab")
+        .setTitle(t("Reopen closed tab"))
         .setIcon("rotate-ccw")
         .setDisabled(!closed)
         .onClick(() => { if (closed) void this.restoreLeaf(closed.id); }),
     );
-    menu.addItem((item) => item.setTitle("Search browser tabs").setIcon("search").onClick(() => this.openBrowserTabSearch()));
-    menu.addItem((item) => item.setTitle("Open Quick Switcher").setIcon("file-search-2").onClick(() => this.openQuickSwitcher()));
+    menu.addItem((item) => item.setTitle(t("Search browser tabs")).setIcon("search").onClick(() => this.openBrowserTabSearch()));
+    menu.addItem((item) => item.setTitle(t("Open Quick Switcher")).setIcon("file-search-2").onClick(() => this.openQuickSwitcher()));
     const active = this.activeBrowserView();
     menu.addItem((item) =>
       item
-        .setTitle("Bookmark all open browser tabs")
+        .setTitle(t("Bookmark all open browser tabs"))
         .setIcon("book-marked")
         .setDisabled(!active)
         .onClick(() => active?.bookmarkAllOpenTabs()),
     );
     menu.addItem((item) =>
       item
-        .setTitle("Restore previous browser session")
+        .setTitle(t("Restore previous browser session"))
         .setDisabled(this.pendingPreviousSessionLeaves().length === 0)
         .onClick(() => void this.restorePreviousSession(true)),
     );

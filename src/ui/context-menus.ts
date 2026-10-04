@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { Menu, Notice } from "obsidian";
 import type UnifiedBrowserCorePlugin from "../main";
 import type { BrowserView } from "./browser-view";
@@ -13,51 +14,51 @@ import { confirmAction } from "./confirm-modal";
 export function showPageMenu(plugin: UnifiedBrowserCorePlugin, view: BrowserView, event: MouseEvent): void {
   const menu = new Menu();
   menu.addItem((item) =>
-    item.setTitle("Back").setIcon("arrow-left").setDisabled(!view.canGoBack()).onClick(() => view.goBack()),
+    item.setTitle(t("Back")).setIcon("arrow-left").setDisabled(!view.canGoBack()).onClick(() => view.goBack()),
   );
   menu.addItem((item) =>
-    item.setTitle("Forward").setIcon("arrow-right").setDisabled(!view.canGoForward()).onClick(() => view.goForward()),
+    item.setTitle(t("Forward")).setIcon("arrow-right").setDisabled(!view.canGoForward()).onClick(() => view.goForward()),
   );
-  menu.addItem((item) => item.setTitle("Reload").setIcon("rotate-cw").onClick(() => view.reload()));
-  menu.addItem((item) => item.setTitle("Stop loading").setIcon("square").onClick(() => view.stopLoading()));
+  menu.addItem((item) => item.setTitle(t("Reload")).setIcon("rotate-cw").onClick(() => view.reload()));
+  menu.addItem((item) => item.setTitle(t("Stop loading")).setIcon("square").onClick(() => view.stopLoading()));
   menu.addSeparator();
-  menu.addItem((item) => item.setTitle("Open home").setIcon("home").onClick(() => view.showInternal("home")));
-  menu.addItem((item) => item.setTitle("Search browser tabs").setIcon("search").onClick(() => plugin.openBrowserTabSearch()));
-  menu.addItem((item) => item.setTitle("Open Quick Switcher").setIcon("file-search-2").onClick(() => plugin.openQuickSwitcher()));
+  menu.addItem((item) => item.setTitle(t("Open home")).setIcon("home").onClick(() => view.showInternal("home")));
+  menu.addItem((item) => item.setTitle(t("Search browser tabs")).setIcon("search").onClick(() => plugin.openBrowserTabSearch()));
+  menu.addItem((item) => item.setTitle(t("Open Quick Switcher")).setIcon("file-search-2").onClick(() => plugin.openQuickSwitcher()));
   menu.addItem((item) =>
     item
-      .setTitle(view.currentPageBookmarked() ? "Remove bookmark" : "Bookmark this page")
+      .setTitle(view.currentPageBookmarked() ? t("Edit bookmark") : t("Bookmark this page"))
       .setIcon(view.currentPageBookmarked() ? "bookmark-check" : "bookmark")
       .onClick(() => view.bookmarkCurrentPage()),
   );
-  menu.addItem((item) => item.setTitle("Copy page URL").setIcon("copy").onClick(async () => {
+  menu.addItem((item) => item.setTitle(t("Copy page URL")).setIcon("copy").onClick(async () => {
     await navigator.clipboard.writeText(view.currentUrl());
-    new Notice("URL copied.");
+    new Notice(t("URL copied."));
   }));
   menu.addItem((item) =>
     item
-      .setTitle("View page in history")
+      .setTitle(t("View page in history"))
       .setIcon("history")
       .onClick(() => view.showHistoryQuery(view.currentUrl())),
   );
   if (view.hasRecoverableFormValues()) {
     menu.addItem((item) =>
       item
-        .setTitle("Restore saved form values")
+        .setTitle(t("Restore saved form values"))
         .setIcon("form-input")
         .onClick(() => view.restoreFormValues()),
     );
   }
   menu.addSeparator();
-  menu.addItem((item) => item.setTitle("Zoom in").setIcon("zoom-in").onClick(() => view.zoomIn()));
-  menu.addItem((item) => item.setTitle("Zoom out").setIcon("zoom-out").onClick(() => view.zoomOut()));
-  menu.addItem((item) => item.setTitle("Reset site zoom").onClick(() => view.resetZoom()));
-  menu.addItem((item) => item.setTitle("Inspect page").setIcon("code").onClick(() => view.inspectPage()));
+  menu.addItem((item) => item.setTitle(t("Zoom in")).setIcon("zoom-in").onClick(() => view.zoomIn()));
+  menu.addItem((item) => item.setTitle(t("Zoom out")).setIcon("zoom-out").onClick(() => view.zoomOut()));
+  menu.addItem((item) => item.setTitle(t("Reset site zoom")).onClick(() => view.resetZoom()));
+  menu.addItem((item) => item.setTitle(t("Inspect page")).setIcon("code").onClick(() => view.inspectPage()));
   if (plugin.core.settings().containerMode !== "off") {
     menu.addSeparator();
     menu.addItem((item) =>
       item
-        .setTitle("Container…")
+        .setTitle(t("Container…"))
         .setIcon("boxes")
         .onClick(() => view.openContainerPicker()),
     );
@@ -94,23 +95,23 @@ export function showBookmarkMenu(
   event: MouseEvent,
 ): void {
   const menu = new Menu();
-  menu.addItem((item) => item.setTitle("Open").setIcon("external-link").onClick(() => view.navigate(resolveBookmarkUrl(bookmark.url, plugin.app))));
-  menu.addItem((item) => item.setTitle("Open in new tab").setIcon("plus").onClick(() => plugin.openBrowser({ url: resolveBookmarkUrl(bookmark.url, plugin.app) })));
+  menu.addItem((item) => item.setTitle(t("Open")).setIcon("external-link").onClick(() => view.navigate(resolveBookmarkUrl(bookmark.url, plugin.app))));
+  menu.addItem((item) => item.setTitle(t("Open in new tab")).setIcon("plus").onClick(() => plugin.openBrowser({ url: resolveBookmarkUrl(bookmark.url, plugin.app) })));
   if (plugin.core.settings().containerMode !== "off") {
     for (const container of plugin.core.containers.list()) {
       menu.addItem((item) =>
         item
-          .setTitle(`Open in ${container.name}`)
+          .setTitle(t("Open in {v0}", { v0: container.name }))
           .setIcon("box")
           .onClick(() => plugin.openBrowser({ url: resolveBookmarkUrl(bookmark.url, plugin.app), containerId: container.id })),
       );
     }
   }
-  menu.addItem((item) => item.setTitle("Copy URL").setIcon("copy").onClick(() => navigator.clipboard.writeText(bookmark.url)));
+  menu.addItem((item) => item.setTitle(t("Copy URL")).setIcon("copy").onClick(() => navigator.clipboard.writeText(bookmark.url)));
   menu.addSeparator();
   menu.addItem((item) =>
     item
-      .setTitle(bookmark.favorite ? "Remove from favorites" : "Add to favorites")
+      .setTitle(bookmark.favorite ? t("Remove from favorites") : t("Add to favorites"))
       .setIcon(bookmark.favorite ? "star-off" : "star")
       .onClick(() => {
         plugin.core.bookmarks.setFavorite(bookmark.id, !bookmark.favorite);
@@ -118,8 +119,11 @@ export function showBookmarkMenu(
         view.refreshBookmarks();
       }),
   );
-  menu.addItem((item) => item.setTitle("Edit").setIcon("pencil").onClick(async () => {
-    const draft = await editBookmark(plugin.app, bookmark.title, bookmark.url, "Edit bookmark", {
+  menu.addItem((item) => item.setTitle(t("Edit")).setIcon("pencil").onClick(async () => {
+    const draft = await editBookmark(plugin.app, bookmark.title, bookmark.url, t("Edit bookmark"), {
+      store: plugin.core.bookmarks,
+      parentId: bookmark.parentId,
+      mediaType: bookmark.mediaType,
       favorite: bookmark.favorite,
       visualKind: bookmark.visualKind,
       visualValue: bookmark.visualValue,
@@ -128,25 +132,26 @@ export function showBookmarkMenu(
     });
     if (!draft) return;
     if (!plugin.core.bookmarks.updateBookmark(bookmark.id, draft)) return;
+    if (draft.parentId !== undefined) plugin.core.bookmarks.moveBookmark(bookmark.id, draft.parentId);
     plugin.core.scheduleSave();
     view.refreshBookmarks();
   }));
-  menu.addItem((item) => item.setTitle("Move to folder").setIcon("folder-input").onClick(async () => {
+  menu.addItem((item) => item.setTitle(t("Move to folder")).setIcon("folder-input").onClick(async () => {
     const parentId = await pickBookmarkFolder(plugin.app, plugin.core.bookmarks);
     if (parentId === undefined) return;
     plugin.core.bookmarks.moveBookmark(bookmark.id, parentId);
     plugin.core.scheduleSave();
     view.refreshBookmarks();
   }));
-  menu.addItem((item) => item.setTitle("Show in history").setIcon("history").onClick(() => view.showHistoryQuery(bookmark.url)));
+  menu.addItem((item) => item.setTitle(t("Show in history")).setIcon("history").onClick(() => view.showHistoryQuery(bookmark.url)));
   menu.addSeparator();
-  menu.addItem((item) => item.setTitle("Delete").setIcon("trash").onClick(() => {
+  menu.addItem((item) => item.setTitle(t("Delete")).setIcon("trash").onClick(() => {
     void (async () => {
       const confirmed = await confirmAction(
         plugin.app,
-        "Delete bookmark",
-        `Delete “${bookmark.title || bookmark.url}” from your bookmarks?`,
-        "Delete bookmark",
+        t("Delete bookmark"),
+        t("Delete “{v0}” from your bookmarks?", { v0: bookmark.title || bookmark.url }),
+        t("Delete bookmark"),
       );
       if (!confirmed) return;
       plugin.core.bookmarks.deleteBookmark(bookmark.id);
@@ -168,13 +173,13 @@ export function showBookmarkFolderMenu(
   const bookmarks = plugin.core.bookmarks.descendantBookmarks(folder.id);
   menu.addItem((item) =>
     item
-      .setTitle("Open all")
+      .setTitle(t("Open all"))
       .setDisabled(bookmarks.length === 0)
       .onClick(() => view.openBookmarkSet(bookmarks, undefined, true)),
   );
   menu.addItem((item) =>
     item
-      .setTitle("Open all in new tabs")
+      .setTitle(t("Open all in new tabs"))
       .setDisabled(bookmarks.length === 0)
       .onClick(() => view.openBookmarkSet(bookmarks)),
   );
@@ -190,53 +195,53 @@ export function showBookmarkFolderMenu(
     }
   }
   menu.addSeparator();
-  menu.addItem((item) => item.setTitle("New bookmark").setIcon("bookmark-plus").onClick(async () => {
-    const draft = await editBookmark(plugin.app, "", "", "New bookmark");
+  menu.addItem((item) => item.setTitle(t("New bookmark")).setIcon("bookmark-plus").onClick(async () => {
+    const draft = await editBookmark(plugin.app, "", "", t("New bookmark"), { store: plugin.core.bookmarks, parentId: folder.id });
     if (!draft) return;
-    plugin.core.bookmarks.addBookmark({ ...draft, parentId: folder.id });
+    plugin.core.bookmarks.addBookmark(draft);
     plugin.core.scheduleSave();
     view.refreshBookmarks();
   }));
-  menu.addItem((item) => item.setTitle("New folder").setIcon("folder-plus").onClick(async () => {
-    const title = await promptText(plugin.app, "New bookmark folder", "", "Folder name");
+  menu.addItem((item) => item.setTitle(t("New folder")).setIcon("folder-plus").onClick(async () => {
+    const title = await promptText(plugin.app, t("New bookmark folder"), "", t("Folder name"));
     if (title === undefined) return;
     plugin.core.bookmarks.addFolder(title, folder.id);
     plugin.core.scheduleSave();
     view.refreshBookmarks();
   }));
   menu.addSeparator();
-  menu.addItem((item) => item.setTitle("Rename").setIcon("pencil").onClick(async () => {
-    const title = await promptText(plugin.app, "Rename bookmark folder", folder.title, "Folder name");
+  menu.addItem((item) => item.setTitle(t("Rename")).setIcon("pencil").onClick(async () => {
+    const title = await promptText(plugin.app, t("Rename bookmark folder"), folder.title, t("Folder name"));
     if (title === undefined) return;
     plugin.core.bookmarks.renameFolder(folder.id, title);
     plugin.core.scheduleSave();
     view.refreshBookmarks();
   }));
-  menu.addItem((item) => item.setTitle("Move").setIcon("folder-input").onClick(async () => {
+  menu.addItem((item) => item.setTitle(t("Move")).setIcon("folder-input").onClick(async () => {
     const parentId = await pickBookmarkFolder(plugin.app, plugin.core.bookmarks, { excludeFolderId: folder.id });
     if (parentId === undefined) return;
     if (!plugin.core.bookmarks.moveFolder(folder.id, parentId)) {
-      new Notice("That move would create an invalid bookmark-folder cycle.");
+      new Notice(t("That move would create an invalid bookmark-folder cycle."));
       return;
     }
     plugin.core.scheduleSave();
     view.refreshBookmarks();
   }));
-  menu.addItem((item) => item.setTitle("Sort contents").setIcon("arrow-down-a-z").onClick(() => {
+  menu.addItem((item) => item.setTitle(t("Sort contents")).setIcon("arrow-down-a-z").onClick(() => {
     plugin.core.bookmarks.sortChildren(folder.id);
     plugin.core.scheduleSave();
     view.refreshBookmarks();
   }));
-  menu.addItem((item) => item.setTitle("Delete folder").setIcon("trash").onClick(() => {
+  menu.addItem((item) => item.setTitle(t("Delete folder")).setIcon("trash").onClick(() => {
     void (async () => {
       const descendants = plugin.core.bookmarks.descendantBookmarks(folder.id);
       const confirmed = await confirmAction(
         plugin.app,
-        "Delete bookmark folder",
+        t("Delete bookmark folder"),
         descendants.length
-          ? `Delete “${folder.title}” and its ${descendants.length} bookmark${descendants.length === 1 ? "" : "s"}?`
-          : `Delete the empty folder “${folder.title}”?`,
-        "Delete folder",
+          ? t("Delete “{v0}” and its {v1} bookmark{v2}?", { v0: folder.title, v1: descendants.length, v2: descendants.length === 1 ? "" : "s" })
+          : t("Delete the empty folder “{v0}”?", { v0: folder.title }),
+        t("Delete folder"),
       );
       if (!confirmed) return;
       plugin.core.bookmarks.deleteFolder(folder.id);
@@ -254,11 +259,11 @@ export function showFavoritesBarMenu(
 ): void {
   const menu = new Menu();
   if (!view.currentUrl().startsWith("browser://")) {
-    menu.addItem((item) => item.setTitle("Add current page to favorites").setIcon("star").onClick(() => view.favoriteCurrentPage()));
+    menu.addItem((item) => item.setTitle(t("Add current page to favorites")).setIcon("star").onClick(() => view.favoriteCurrentPage()));
   }
-  menu.addItem((item) => item.setTitle("Open bookmarks").setIcon("book-open").onClick(() => view.showInternal("bookmarks")));
+  menu.addItem((item) => item.setTitle(t("Open bookmarks")).setIcon("book-open").onClick(() => view.showInternal("bookmarks")));
   menu.addSeparator();
-  menu.addItem((item) => item.setTitle("Hide favorites bar").onClick(() => {
+  menu.addItem((item) => item.setTitle(t("Hide favorites bar")).onClick(() => {
     plugin.core.updateSettings({ showFavoritesBar: false });
     plugin.refreshBrowserViews();
   }));

@@ -37,6 +37,10 @@ import { normalizeBrowserAddress } from "../navigation/address-normalizer";
 import type { VaultHomeFile } from "../adapters/obsidian-home";
 import { buildWebContentMenuEntries } from "./web-content-menu-model";
 import { editBookmark } from "./bookmark-editor";
+import { pickBookmarkFolder } from "./folder-picker-modal";
+import { showBookmarkPopover } from "./bookmark-popover";
+import { BOOKMARK_MEDIA, classifyBookmark } from "../bookmarks/bookmark-media";
+import { t } from "../i18n";
 import { promptText } from "./text-prompt";
 import { permissionDecisionLabel, permissionLabel } from "./permission-label";
 import { fallbackFaviconUrl, renderBookmarkVisual } from "./bookmark-visual";
@@ -105,6 +109,8 @@ export class BrowserView extends ItemView {
   private readonly expandedResidualParents = new Set<string>();
   private readonly collapsedBookmarkFolders = new Set<string>();
   private bookmarkSearchQuery = "";
+  private bookmarkLayout: "type" | "folder" | "selected" = "type";
+  private bookmarkPopoverClose?: () => void;
   private readonly navigationHistoryAdapter = new ElectronNavigationHistoryAdapter();
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: UnifiedBrowserCorePlugin) {
@@ -205,6 +211,7 @@ export class BrowserView extends ItemView {
   getState(): BrowserLeafViewState {
     return {
       lifecycleId: this.lifecycleId,
+      bookmarkLayout: this.bookmarkLayout,
       url: this.currentUrlValue,
       containerId: this.containerId,
       siteAssignmentBypassOrigin: this.siteAssignmentBypassOrigin,
@@ -228,6 +235,7 @@ export class BrowserView extends ItemView {
   }
 
   private applyViewState(state: BrowserLeafViewState): void {
+    if (state.bookmarkLayout) this.bookmarkLayout = state.bookmarkLayout;
     const url = state.url || (state.internalSurface ? "browser://" + state.internalSurface : "browser://home");
     const requestedContainer = this.plugin.core.normalizeContainer(state.containerId);
     const initialState = !this.stateInitialized;
@@ -383,12 +391,12 @@ export class BrowserView extends ItemView {
     );
     const webViews = views.filter((view) => !view.currentUrl().startsWith("browser://"));
     if (!webViews.length) {
-      new Notice("There are no web pages to bookmark.");
+      new Notice(t("There are no web pages to bookmark."));
       return;
     }
     const newViews = webViews.filter((view) => !this.plugin.core.bookmarks.isBookmarked(view.currentUrl()));
     if (!newViews.length) {
-      new Notice("All open web pages are already bookmarked.");
+      new Notice(t("All open web pages are already bookmarked."));
       return;
     }
     const folder = this.plugin.core.bookmarks.addFolder(
@@ -483,18 +491,18 @@ export class BrowserView extends ItemView {
 
   enableFormRecoveryForSite(): void {
     if (!this.plugin.core.formRecovery.enableSite(this.containerId, this.currentUrlValue)) {
-      new Notice("Form recovery is only available for web pages.");
+      new Notice(t("Form recovery is only available for web pages."));
       return;
     }
     this.plugin.core.scheduleSave();
     void this.syncFormRecoveryInstrumentation();
-    new Notice("Form recovery enabled for this site.");
+    new Notice(t("Form recovery enabled for this site."));
   }
 
   showRecoveryCandidates(): void {
     const fields = this.plugin.core.formRecovery.recoveryFieldsForDocument(this.containerId, this.currentUrlValue);
     if (!fields.length) {
-      new Notice("No saved form values are available for this page.");
+      new Notice(t("No saved form values are available for this page."));
       return;
     }
     showFormRecoveryCandidates(
@@ -506,13 +514,13 @@ export class BrowserView extends ItemView {
 
   disableFormRecoveryForSite(): void {
     if (!this.plugin.core.formRecovery.disableSite(this.containerId, this.currentUrlValue, true)) {
-      new Notice("Form recovery is only available for web pages.");
+      new Notice(t("Form recovery is only available for web pages."));
       return;
     }
     this.formRecoveryWatchEnabled = false;
     this.plugin.core.scheduleSave();
     void this.syncFormRecoveryInstrumentation();
-    new Notice("Form recovery disabled and stored form values cleared for this site.");
+    new Notice(t("Form recovery disabled and stored form values cleared for this site."));
   }
 
   async syncFormRecoveryInstrumentation(): Promise<void> {
@@ -544,18 +552,18 @@ export class BrowserView extends ItemView {
   async disableFocusedFormRecoveryField(): Promise<void> {
     const field = await this.focusedFormField();
     if (!field || !this.plugin.core.formRecovery.excludeField(this.containerId, this.currentUrlValue, field)) {
-      new Notice("Could not identify the focused form field.");
+      new Notice(t("Could not identify the focused form field."));
       return;
     }
     this.plugin.core.scheduleSave();
-    new Notice("This form field is excluded from recovery on this site.");
+    new Notice(t("This form field is excluded from recovery on this site."));
   }
 
   async restoreFocusedFormValue(): Promise<void> {
     const saved = this.plugin.core.formRecovery.recoveryFieldsForDocument(this.containerId, this.currentUrlValue);
     const webview = this.readyWebview();
     if (!saved.length || !webview?.executeJavaScript) {
-      new Notice("No saved form value is available for this page.");
+      new Notice(t("No saved form value is available for this page."));
       return;
     }
     const payload = JSON.stringify(saved);
@@ -594,14 +602,14 @@ export class BrowserView extends ItemView {
       el.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
     })()`);
-    new Notice(restored ? "Restored the previous value for this field." : "No matching saved value was found for this field.");
+    new Notice(restored ? t("Restored the previous value for this field.") : t("No matching saved value was found for this field."));
   }
 
   async restoreFormValues(options: { silent?: boolean; watchNextSteps?: boolean } = {}): Promise<void> {
     const recoveryFields = this.plugin.core.formRecovery.recoveryFieldsForDocument(this.containerId, this.currentUrlValue);
     const webview = this.readyWebview();
     if (!recoveryFields.length || !webview?.executeJavaScript) {
-      if (!options.silent) new Notice("No saved form values for this page.");
+      if (!options.silent) new Notice(t("No saved form values for this page."));
       return;
     }
     const watchNextSteps = options.watchNextSteps ?? true;
@@ -683,8 +691,8 @@ export class BrowserView extends ItemView {
     if (!options.silent) {
       new Notice(
         restored > 0
-          ? `Restored ${restored} form field(s).${watchNextSteps ? " Matching fields in later form steps will also be restored when they appear." : ""}`
-          : "No matching fields were found for the saved form values.",
+          ? t("Restored {v0} form field(s).{v1}", { v0: restored, v1: watchNextSteps ? " Matching fields in later form steps will also be restored when they appear." : "" })
+          : t("No matching fields were found for the saved form values."),
       );
     }
   }
@@ -692,24 +700,24 @@ export class BrowserView extends ItemView {
   onPaneMenu(menu: Menu, source: string): void {
     super.onPaneMenu(menu, source);
     menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Home").setIcon("home").onClick(() => this.showInternal("home")));
-    menu.addItem((item) => item.setTitle("History").setIcon("history").onClick(() => this.showInternal("history")));
-    menu.addItem((item) => item.setTitle("Bookmarks").setIcon("book-open").onClick(() => this.showInternal("bookmarks")));
+    menu.addItem((item) => item.setTitle(t("Home")).setIcon("home").onClick(() => this.showInternal("home")));
+    menu.addItem((item) => item.setTitle(t("History")).setIcon("history").onClick(() => this.showInternal("history")));
+    menu.addItem((item) => item.setTitle(t("Bookmarks")).setIcon("book-open").onClick(() => this.showInternal("bookmarks")));
     const closed = this.plugin.core.history.recentlyClosed(1)[0];
-    menu.addItem((item) => item.setTitle("Reopen closed tab").setIcon("rotate-ccw").setDisabled(!closed)
+    menu.addItem((item) => item.setTitle(t("Reopen closed tab")).setIcon("rotate-ccw").setDisabled(!closed)
       .onClick(() => { if (closed) void this.plugin.restoreLeaf(closed.id); }));
     menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Site permissions…").setIcon("shield-check")
+    menu.addItem((item) => item.setTitle(t("Site permissions…")).setIcon("shield-check")
       .onClick((event) => this.showPermissionMenu(event)));
-    menu.addItem((item) => item.setTitle("Zoom in").setIcon("zoom-in").onClick(() => this.zoomIn()));
-    menu.addItem((item) => item.setTitle("Zoom out").setIcon("zoom-out").onClick(() => this.zoomOut()));
-    menu.addItem((item) => item.setTitle("Reset site zoom").onClick(() => this.resetZoom()));
-    menu.addItem((item) => item.setTitle("Settings").setIcon("settings").onClick(() => this.plugin.openSettings()));
-    menu.addItem((item) => item.setTitle("Inspect page").setIcon("code").onClick(() => this.inspectPage()));
+    menu.addItem((item) => item.setTitle(t("Zoom in")).setIcon("zoom-in").onClick(() => this.zoomIn()));
+    menu.addItem((item) => item.setTitle(t("Zoom out")).setIcon("zoom-out").onClick(() => this.zoomOut()));
+    menu.addItem((item) => item.setTitle(t("Reset site zoom")).onClick(() => this.resetZoom()));
+    menu.addItem((item) => item.setTitle(t("Settings")).setIcon("settings").onClick(() => this.plugin.openSettings()));
+    menu.addItem((item) => item.setTitle(t("Inspect page")).setIcon("code").onClick(() => this.inspectPage()));
     menu.addSeparator();
     menu.addItem((item) =>
       item
-        .setTitle("Reload")
+        .setTitle(t("Reload"))
         .setIcon("rotate-cw")
         .onClick(() => this.reload()),
     );
@@ -717,7 +725,7 @@ export class BrowserView extends ItemView {
     const pinned = this.pinned;
     menu.addItem((item) =>
       item
-        .setTitle(pinned ? "Unpin browser tab" : "Pin browser tab")
+        .setTitle(pinned ? t("Unpin browser tab") : t("Pin browser tab"))
         .setIcon("pin")
         .onClick(() => {
           this.leaf.setPinned(!pinned);
@@ -728,7 +736,7 @@ export class BrowserView extends ItemView {
 
     menu.addItem((item) =>
       item
-        .setTitle(this.manualRetention === "preserve" ? "Use normal recovery retention" : "Keep recovery data")
+        .setTitle(this.manualRetention === "preserve" ? t("Use normal recovery retention") : t("Keep recovery data"))
         .setIcon("archive-restore")
         .onClick(() => {
           this.manualRetention = this.manualRetention === "preserve" ? "default" : "preserve";
@@ -740,19 +748,19 @@ export class BrowserView extends ItemView {
 
     menu.addItem((item) =>
       item
-        .setTitle("Duplicate browser tab")
+        .setTitle(t("Duplicate browser tab"))
         .setIcon("copy")
         .onClick(() => this.plugin.openBrowser({ url: this.currentUrlValue, containerId: this.containerId })),
     );
     menu.addItem((item) =>
       item
-        .setTitle("Move browser tab to new window")
+        .setTitle(t("Move browser tab to new window"))
         .setIcon("picture-in-picture")
         .onClick(() => {
           try {
             this.plugin.app.workspace.moveLeafToPopout(this.leaf);
           } catch {
-            new Notice("This Obsidian build cannot move the tab to a new window.");
+            new Notice(t("This Obsidian build cannot move the tab to a new window."));
           }
         }),
     );
@@ -761,7 +769,7 @@ export class BrowserView extends ItemView {
       if (container.id === this.containerId) continue;
       menu.addItem((item) =>
         item
-          .setTitle(`Reopen in ${container.name}`)
+          .setTitle(t("Reopen in {v0}", { v0: container.name }))
           .setIcon("box")
           .onClick(() => this.reopenInContainer(container.id)),
       );
@@ -770,13 +778,13 @@ export class BrowserView extends ItemView {
     if (!this.currentUrlValue.startsWith("browser://")) {
       menu.addItem((item) =>
         item
-          .setTitle("Bookmark current page")
+          .setTitle(t("Bookmark current page"))
           .setIcon("bookmark")
           .onClick(() => this.bookmarkCurrentPage()),
       );
       menu.addItem((item) =>
         item
-          .setTitle("Copy page URL")
+          .setTitle(t("Copy page URL"))
           .setIcon("copy")
           .onClick(() => void navigator.clipboard.writeText(this.currentUrlValue)),
       );
@@ -785,13 +793,13 @@ export class BrowserView extends ItemView {
     menu.addSeparator();
     menu.addItem((item) =>
       item
-        .setTitle("Search browser tabs")
+        .setTitle(t("Search browser tabs"))
         .setIcon("search")
         .onClick(() => this.plugin.openBrowserTabSearch()),
     );
     menu.addItem((item) =>
       item
-        .setTitle("Open Quick Switcher")
+        .setTitle(t("Open Quick Switcher"))
         .setIcon("file-search-2")
         .onClick(() => this.plugin.openQuickSwitcher()),
     );
@@ -802,7 +810,7 @@ export class BrowserView extends ItemView {
     const selfIndex = siblings.indexOf(this.leaf);
     menu.addItem((item) =>
       item
-        .setTitle("Close browser tabs to the left")
+        .setTitle(t("Close browser tabs to the left"))
         .setIcon("panel-left-close")
         .setDisabled(selfIndex <= 0)
         .onClick(() => {
@@ -811,7 +819,7 @@ export class BrowserView extends ItemView {
     );
     menu.addItem((item) =>
       item
-        .setTitle("Close browser tabs to the right")
+        .setTitle(t("Close browser tabs to the right"))
         .setIcon("panel-right-close")
         .setDisabled(selfIndex < 0 || selfIndex >= siblings.length - 1)
         .onClick(() => {
@@ -820,7 +828,7 @@ export class BrowserView extends ItemView {
     );
     menu.addItem((item) =>
       item
-        .setTitle("Close other browser tabs")
+        .setTitle(t("Close other browser tabs"))
         .setIcon("x")
         .onClick(() => {
           for (const leaf of siblings) if (leaf !== this.leaf) leaf.detach();
@@ -828,7 +836,7 @@ export class BrowserView extends ItemView {
     );
     menu.addItem((item) =>
       item
-        .setTitle("Close unpinned browser tabs")
+        .setTitle(t("Close unpinned browser tabs"))
         .setIcon("x-circle")
         .onClick(() => {
           for (const leaf of siblings) {
@@ -838,7 +846,7 @@ export class BrowserView extends ItemView {
     );
     menu.addItem((item) =>
       item
-        .setTitle("Close browser tab")
+        .setTitle(t("Close browser tab"))
         .setIcon("x")
         .onClick(() => this.leaf.detach()),
     );
@@ -859,32 +867,32 @@ export class BrowserView extends ItemView {
       this.browserHeaderEl?.addClass("ubc-browser-view-header");
     }
     this.toolbarEl = toolbarHost.createDiv({ cls: "ubc-toolbar" });
-    this.backButtonEl = this.addToolbarButton("arrow-left", "Back", () => this.goBack());
+    this.backButtonEl = this.addToolbarButton("arrow-left", t("Back"), () => this.goBack());
     this.backButtonEl.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       this.showNavigationHistoryMenu(-1, event);
     });
-    this.forwardButtonEl = this.addToolbarButton("arrow-right", "Forward", () => this.goForward());
+    this.forwardButtonEl = this.addToolbarButton("arrow-right", t("Forward"), () => this.goForward());
     this.forwardButtonEl.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       this.showNavigationHistoryMenu(1, event);
     });
-    this.reloadButtonEl = this.addToolbarButton("rotate-cw", "Reload", () => {
+    this.reloadButtonEl = this.addToolbarButton("rotate-cw", t("Reload"), () => {
       if (this.rootEl.hasClass("is-loading")) this.stopLoading();
       else this.reload();
     });
     this.reloadButtonEl.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       const menu = new Menu();
-      menu.addItem((item) => item.setTitle("Reload").setIcon("rotate-cw").onClick(() => this.reload()));
-      menu.addItem((item) => item.setTitle("Hard reload").onClick(() => this.hardReload()));
-      menu.addItem((item) => item.setTitle("Stop loading").onClick(() => this.stopLoading()));
+      menu.addItem((item) => item.setTitle(t("Reload")).setIcon("rotate-cw").onClick(() => this.reload()));
+      menu.addItem((item) => item.setTitle(t("Hard reload")).onClick(() => this.hardReload()));
+      menu.addItem((item) => item.setTitle(t("Stop loading")).onClick(() => this.stopLoading()));
       menu.showAtMouseEvent(event);
     });
 
     this.addressEl = this.toolbarEl.createEl("input", {
       cls: "ubc-address",
-      attr: { type: "text", spellcheck: "false", "aria-label": "Address and search" },
+      attr: { type: "text", spellcheck: "false", "aria-label": t("Address and search") },
     });
     this.addressEl.addEventListener("keydown", (event) => {
       if (event.key !== "Enter") return;
@@ -898,13 +906,13 @@ export class BrowserView extends ItemView {
     });
     this.statusEl = this.toolbarEl.createSpan({
       cls: "ubc-navigation-status",
-      text: "Ready",
-      attr: { "aria-live": "polite", "aria-atomic": "true", title: "Navigation status" },
+      text: t("Ready"),
+      attr: { "aria-live": "polite", "aria-atomic": "true", title: t("Navigation status") },
     });
 
-    this.bookmarkButtonEl = this.addToolbarButton("bookmark", "Bookmark page", () => this.bookmarkCurrentPage());
+    this.bookmarkButtonEl = this.addToolbarButton("bookmark", t("Bookmark page"), () => this.bookmarkCurrentPage());
 
-    this.containerButtonEl = this.addToolbarButton("box", "Container", (event) => this.showContainerMenu(event));
+    this.containerButtonEl = this.addToolbarButton("box", t("Container"), (event) => this.showContainerMenu(event));
     this.containerButtonEl.addClass("ubc-container-button");
     this.updateContainerIndicator();
 
@@ -961,14 +969,14 @@ export class BrowserView extends ItemView {
       restored: "Restored",
     } satisfies Record<NavigationStatus, string>)[status];
     if (this.statusEl) {
-      this.statusEl.textContent = label;
+      this.statusEl.textContent = t(label);
       this.statusEl.dataset.status = status;
-      this.statusEl.title = label;
+      this.statusEl.title = t(label);
     }
     if (this.reloadButtonEl) {
       const loading = status === "waiting" || status === "loading";
       setIcon(this.reloadButtonEl, loading ? "x" : "rotate-cw");
-      const actionLabel = loading ? "Stop loading" : "Reload";
+      const actionLabel = t(loading ? "Stop loading" : "Reload");
       this.reloadButtonEl.setAttribute("aria-label", actionLabel);
       this.reloadButtonEl.title = actionLabel;
     }
@@ -976,13 +984,48 @@ export class BrowserView extends ItemView {
 
   renderFavoritesBar(): void {
     if (!this.favoritesBarEl) return;
+    this.rootEl.toggleClass("ubc-native-background", !this.plugin.core.settings().initialBackgroundOverride);
     this.updateBookmarkButton();
     this.favoritesBarEl.empty();
     const visible = this.plugin.core.settings().showFavoritesBar;
-    const favorites = this.plugin.core.bookmarks.favorites();
-    this.favoritesBarEl.toggleClass("is-hidden", !visible || favorites.length === 0);
-    if (!visible || !favorites.length) return;
+    const favorites = this.plugin.core.settings().bookmarkBarMode === "all"
+      ? this.plugin.core.bookmarks.children(null)
+      : this.plugin.core.bookmarks.favorites();
+    this.favoritesBarEl.toggleClass("is-hidden", !visible);
+    if (!visible) return;
+    const library = this.favoritesBarEl.createEl("button", { cls: "ubc-favorite-item ubc-bar-library", attr: { title: t("Open bookmarks"), "aria-label": t("Open bookmarks") } });
+    setIcon(library, "book-open");
+    library.addEventListener("click", () => this.showInternal("bookmarks"));
+    if (!favorites.length && this.plugin.core.settings().bookmarkBarMode === "selected") {
+      const choose = this.favoritesBarEl.createEl("button", { cls: "ubc-favorite-item", text: t("Choose members") });
+      choose.addEventListener("click", () => { this.bookmarkLayout = "selected"; this.showInternal("bookmarks"); });
+    }
     for (const item of favorites) {
+      if (item.kind === "folder") {
+        const folder = this.favoritesBarEl.createEl("button", { cls: "ubc-favorite-item" });
+        setIcon(folder.createSpan(), "folder");
+        folder.createSpan({ text: item.title });
+        folder.addEventListener("click", () => {
+          const menu = new Menu();
+          const append = (parentId: string, target: Menu) => {
+            for (const child of this.plugin.core.bookmarks.children(parentId)) {
+              target.addItem((entry) => {
+                entry.setTitle(child.title).setIcon(child.kind === "folder" ? "folder" : "bookmark");
+                if (child.kind === "folder") {
+                  const item = entry as unknown as { setSubmenu?: () => Menu };
+                  if (item.setSubmenu) append(child.id, item.setSubmenu());
+                  else entry.onClick(() => { this.bookmarkLayout = "folder"; this.showInternal("bookmarks"); });
+                } else entry.onClick(() => this.navigate(resolveBookmarkUrl(child.url, this.plugin.app)));
+              });
+            }
+          };
+          append(item.id, menu);
+          const rect = folder.getBoundingClientRect();
+          this.openContainerMenu(menu, { x: rect.left, y: rect.bottom });
+        });
+        folder.addEventListener("contextmenu", (event) => { event.preventDefault(); showBookmarkFolderMenu(this.plugin, this, item, event); });
+        continue;
+      }
       const bookmark = this.favoritesBarEl.createEl("button", {
         cls: "ubc-favorite-item",
         attr: { title: `${item.title || item.url}\n${item.url}` },
@@ -1004,6 +1047,7 @@ export class BrowserView extends ItemView {
   }
 
   navigate(rawUrl: string): void {
+    this.bookmarkPopoverClose?.();
     const url = this.normalizeAddress(rawUrl);
     if (url.startsWith("browser://")) {
       this.showInternal((url.slice("browser://".length) || "home") as BrowserLeafViewState["internalSurface"]);
@@ -1052,7 +1096,7 @@ export class BrowserView extends ItemView {
     if (resolvedSurface === "history") this.renderHistory();
     else if (resolvedSurface === "bookmarks") this.renderBookmarks();
     else this.renderHome();
-    this.currentTitle = resolvedSurface === "history" ? "History" : resolvedSurface === "bookmarks" ? "Bookmarks" : "Home";
+    this.currentTitle = t(resolvedSurface === "history" ? "History" : resolvedSurface === "bookmarks" ? "Bookmarks" : "Home");
     this.plugin.core.history.touchLeaf(this.leafId(), {
       lastUrl: this.currentUrlValue,
       lastTitle: this.currentTitle,
@@ -1132,14 +1176,15 @@ export class BrowserView extends ItemView {
 
   bookmarkCurrentPage(): void {
     if (!this.currentUrlValue || this.currentUrlValue.startsWith("browser://")) return;
-    const result = this.plugin.core.bookmarks.toggleBookmark({
+    this.bookmarkPopoverClose?.();
+    const bookmark = this.plugin.core.bookmarks.addBookmark({
       title: this.currentTitle || this.currentUrlValue,
       url: this.currentUrlValue,
       faviconUrl: this.faviconSourceUrl ?? fallbackFaviconUrl(this.currentUrlValue),
     });
     this.plugin.core.scheduleSave();
     this.refreshBookmarks();
-    new Notice(result.bookmarked ? "Bookmarked." : "Bookmark removed.");
+    this.bookmarkPopoverClose = showBookmarkPopover(this.plugin, bookmark, this.bookmarkButtonEl, this.browserContentEl);
   }
 
   favoriteCurrentPage(): void {
@@ -1153,7 +1198,7 @@ export class BrowserView extends ItemView {
     this.plugin.core.bookmarks.setFavorite(bookmark.id, true);
     this.plugin.core.scheduleSave();
     this.refreshBookmarks();
-    new Notice("Added to favorites.");
+    new Notice(t("Added to favorites."));
   }
 
   private updateBookmarkButton(): void {
@@ -1161,8 +1206,8 @@ export class BrowserView extends ItemView {
     const bookmark = !this.currentUrlValue.startsWith("browser://")
       ? this.plugin.core.bookmarks.findByUrl(this.currentUrlValue)
       : undefined;
-    setIcon(this.bookmarkButtonEl, bookmark ? "bookmark-check" : "bookmark");
-    const label = bookmark ? "Remove bookmark" : "Bookmark page";
+    setIcon(this.bookmarkButtonEl, "star");
+    const label = bookmark ? t("Edit bookmark") : t("Bookmark page");
     this.bookmarkButtonEl.setAttribute("aria-label", label);
     this.bookmarkButtonEl.title = label;
     this.bookmarkButtonEl.toggleClass("is-active", Boolean(bookmark));
@@ -1528,7 +1573,7 @@ export class BrowserView extends ItemView {
       if (this.formRecoveryWatchEnabled) {
         await this.restoreFormValues({ silent: true, watchNextSteps: true });
       } else {
-        new Notice("Saved form values are available for this page.");
+        new Notice(t("Saved form values are available for this page."));
       }
     }
 
@@ -1608,8 +1653,8 @@ export class BrowserView extends ItemView {
     const actions = this.recoveryBannerEl.createDiv({ cls: "ubc-recovery-actions" });
 
     if (tone === "warning") {
-      actions.createEl("button", { text: "Retry restore" }).addEventListener("click", () => void this.retryRichRestore());
-      actions.createEl("button", { text: "Reload normally" }).addEventListener("click", () => {
+      actions.createEl("button", { text: t("Retry restore") }).addEventListener("click", () => void this.retryRichRestore());
+      actions.createEl("button", { text: t("Reload normally") }).addEventListener("click", () => {
         this.hideRecoveryBanner();
         const webview = this.webview;
         if (!webview) return;
@@ -1617,12 +1662,12 @@ export class BrowserView extends ItemView {
         else webview.src = this.currentUrlValue;
       });
       if (this.hasRecoverableFormValues()) {
-        actions.createEl("button", { text: "Restore form values" }).addEventListener("click", () => void this.restoreFormValues());
+        actions.createEl("button", { text: t("Restore form values") }).addEventListener("click", () => void this.restoreFormValues());
       }
     }
-    actions.createEl("button", { text: "Recovery details" }).addEventListener("click", () => this.openRecoveryDetails());
+    actions.createEl("button", { text: t("Recovery details") }).addEventListener("click", () => this.openRecoveryDetails());
     const retention = actions.createEl("button", {
-      text: this.manualRetention === "preserve" ? "Use normal recovery retention" : "Keep recovery data",
+      text: this.manualRetention === "preserve" ? t("Use normal recovery retention") : t("Keep recovery data"),
     });
     retention.addEventListener("click", () => {
       this.manualRetention = this.manualRetention === "preserve" ? "default" : "preserve";
@@ -1630,14 +1675,14 @@ export class BrowserView extends ItemView {
       this.plugin.core.scheduleSave();
       this.plugin.scheduleSessionCheckpoint();
       const preserving = this.manualRetention === "preserve";
-      retention.setText(preserving ? "Use normal recovery retention" : "Keep recovery data");
+      retention.setText(preserving ? t("Use normal recovery retention") : t("Keep recovery data"));
       new Notice(
         preserving
-          ? "Detailed recovery data for this tab will be kept until you remove it."
-          : "Detailed recovery data for this tab will use normal retention again.",
+          ? t("Detailed recovery data for this tab will be kept until you remove it.")
+          : t("Detailed recovery data for this tab will use normal retention again."),
       );
     });
-    actions.createEl("button", { text: "Dismiss", attr: { "aria-label": "Dismiss recovery message" } }).addEventListener("click", () => this.hideRecoveryBanner());
+    actions.createEl("button", { text: t("Dismiss"), attr: { "aria-label": t("Dismiss recovery message") } }).addEventListener("click", () => this.hideRecoveryBanner());
   }
 
   private hideRecoveryBanner(): void {
@@ -1649,7 +1694,7 @@ export class BrowserView extends ItemView {
     if (!webview || !this.restoredFromLeafId) return;
     const capsule = this.plugin.core.restore.get(this.restoredFromLeafId);
     if (!capsule || !(await this.navigationHistoryAdapter.restore(webview, capsule))) {
-      new Notice("Detailed tab recovery is not currently available; the page can still be reopened normally.");
+      new Notice(t("Detailed tab recovery is not currently available; the page can still be reopened normally."));
       return;
     }
     this.setNavigationStatus("restored", "Restored tab state");
@@ -1869,6 +1914,7 @@ export class BrowserView extends ItemView {
   }
 
   private destroyWebview(): void {
+    this.bookmarkPopoverClose?.();
     if (this.checkpointTimer !== undefined) {
       window.clearInterval(this.checkpointTimer);
       this.checkpointTimer = undefined;
@@ -1890,6 +1936,13 @@ export class BrowserView extends ItemView {
     // guest page is visible, covering it would flash the theme background.
     if (this.webviewDomReady) return;
     this.loadingShieldEl?.removeClass("is-hidden");
+  }
+
+  refreshLanguage(): void {
+    this.backButtonEl.title = t("Back"); this.backButtonEl.setAttribute("aria-label", t("Back"));
+    this.forwardButtonEl.title = t("Forward"); this.forwardButtonEl.setAttribute("aria-label", t("Forward"));
+    this.renderFavoritesBar(); this.refreshNavigationButtons();
+    if (this.internalSurface) this.showInternal(this.internalSurface, false);
   }
 
   private hideLoadingShield(): void {
@@ -1916,37 +1969,37 @@ export class BrowserView extends ItemView {
       if (target instanceof HTMLElement && target.closest("button, input, a")) return;
       event.preventDefault();
       const menu = new Menu();
-      menu.addItem((item) => item.setTitle("New browser tab").setIcon("plus").onClick(() => void this.plugin.openBrowser()));
+      menu.addItem((item) => item.setTitle(t("New browser tab")).setIcon("plus").onClick(() => void this.plugin.openBrowser()));
       for (const container of this.plugin.core.containers.list()) {
         menu.addItem((item) => item.setTitle("New tab in " + container.name).setIcon("box").onClick(() => void this.plugin.openBrowser({ url: "browser://home", containerId: container.id })));
       }
       const closed = this.plugin.core.history.recentlyClosed(1)[0];
-      menu.addItem((item) => item.setTitle("Reopen closed tab").setIcon("rotate-ccw").setDisabled(!closed).onClick(() => {
+      menu.addItem((item) => item.setTitle(t("Reopen closed tab")).setIcon("rotate-ccw").setDisabled(!closed).onClick(() => {
         if (closed) void this.plugin.restoreLeaf(closed.id);
       }));
       menu.addItem((item) =>
-        item.setTitle("Search browser tabs").setIcon("search").onClick(() => this.plugin.openBrowserTabSearch()),
+        item.setTitle(t("Search browser tabs")).setIcon("search").onClick(() => this.plugin.openBrowserTabSearch()),
       );
       menu.addItem((item) =>
-        item.setTitle("Open Quick Switcher").setIcon("file-search-2").onClick(() => this.plugin.openQuickSwitcher()),
+        item.setTitle(t("Open Quick Switcher")).setIcon("file-search-2").onClick(() => this.plugin.openQuickSwitcher()),
       );
       menu.addSeparator();
-      menu.addItem((item) => item.setTitle("Show history").setIcon("history").onClick(() => this.showInternal("history")));
-      menu.addItem((item) => item.setTitle("Show bookmarks").setIcon("book-open").onClick(() => this.showInternal("bookmarks")));
+      menu.addItem((item) => item.setTitle(t("Show history")).setIcon("history").onClick(() => this.showInternal("history")));
+      menu.addItem((item) => item.setTitle(t("Show bookmarks")).setIcon("book-open").onClick(() => this.showInternal("bookmarks")));
       menu.showAtMouseEvent(event);
     });
-    page.createEl("h1", { text: "Home" });
+    page.createEl("h1", { text: t("Home") });
     page.createEl("p", {
       cls: "ubc-surface-description",
-      text: "Search your vault, browse the web, or continue where you left off.",
+      text: t("Search your vault, browse the web, or continue where you left off."),
     });
     const searchMode = { value: this.plugin.core.settings().homeSearchMode };
-    const modePicker = page.createDiv({ cls: "ubc-home-search-modes", attr: { role: "group", "aria-label": "Home search mode" } });
-    const vaultMode = modePicker.createEl("button", { text: "Vault", attr: { type: "button" } });
-    const webMode = modePicker.createEl("button", { text: "Web", attr: { type: "button" } });
+    const modePicker = page.createDiv({ cls: "ubc-home-search-modes", attr: { role: "group", "aria-label": t("Home search mode") } });
+    const vaultMode = modePicker.createEl("button", { text: t("Vault"), attr: { type: "button" } });
+    const webMode = modePicker.createEl("button", { text: t("Web"), attr: { type: "button" } });
     const search = page.createEl("input", {
       cls: "ubc-home-search",
-      attr: { "aria-label": "Home search" },
+      attr: { "aria-label": t("Home search") },
     });
     const searchResults = page.createDiv({ cls: "ubc-home-search-results" });
     const homeSections = page.createDiv({ cls: "ubc-home-sections" });
@@ -1966,10 +2019,10 @@ export class BrowserView extends ItemView {
       heading.createEl("strong", {
         text: currentVaultResults.length
           ? String(currentVaultResults.length) + " vault result" + (currentVaultResults.length === 1 ? "" : "s")
-          : "No vault files found",
+          : t("No vault files found"),
       });
       if (!currentVaultResults.length) {
-        heading.createSpan({ text: "Try another name or switch to Web.", cls: "ubc-card-subtitle" });
+        heading.createSpan({ text: t("Try another name or switch to Web."), cls: "ubc-card-subtitle" });
         return;
       }
       this.renderVaultFileCards(searchResults, currentVaultResults);
@@ -2009,7 +2062,7 @@ export class BrowserView extends ItemView {
     if (this.plugin.core.settings().showVaultBookmarksOnHome) {
       const bookmarked = this.plugin.homeAdapter.bookmarkedFiles(8);
       if (bookmarked.length) {
-        homeSections.createEl("h2", { text: "Bookmarked files" });
+        homeSections.createEl("h2", { text: t("Bookmarked files") });
         this.renderVaultFileCards(homeSections, bookmarked);
       }
     }
@@ -2017,14 +2070,14 @@ export class BrowserView extends ItemView {
     if (this.plugin.core.settings().showRecentVaultFilesOnHome) {
       const files = this.plugin.homeAdapter.recentFiles(8);
       if (files.length) {
-        homeSections.createEl("h2", { text: "Recent files" });
+        homeSections.createEl("h2", { text: t("Recent files") });
         this.renderVaultFileCards(homeSections, files);
       }
     }
 
     const webBookmarks = this.plugin.core.bookmarks.allBookmarks().slice(0, 8);
     if (webBookmarks.length) {
-      homeSections.createEl("h2", { text: "Web bookmarks" });
+      homeSections.createEl("h2", { text: t("Web bookmarks") });
       const list = homeSections.createDiv({ cls: "ubc-card-list" });
       for (const bookmark of webBookmarks) {
         const button = list.createEl("button", { cls: "ubc-card", text: bookmark.title || bookmark.url });
@@ -2044,7 +2097,7 @@ export class BrowserView extends ItemView {
 
     const recent = this.plugin.core.history.recentlyClosed(6);
     if (recent.length) {
-      homeSections.createEl("h2", { text: "Recently closed browser tabs" });
+      homeSections.createEl("h2", { text: t("Recently closed browser tabs") });
       const list = homeSections.createDiv({ cls: "ubc-card-list" });
       for (const leaf of recent) {
         const internalLabel = internalSurfaceLabel(leaf.lastUrl);
@@ -2064,7 +2117,7 @@ export class BrowserView extends ItemView {
         button.addEventListener("contextmenu", (event) => {
           event.preventDefault();
           const menu = new Menu();
-          menu.addItem((item) => item.setTitle("Restore").setIcon("rotate-ccw").onClick(() => this.plugin.restoreLeaf(leaf.id)));
+          menu.addItem((item) => item.setTitle(t("Restore")).setIcon("rotate-ccw").onClick(() => this.plugin.restoreLeaf(leaf.id)));
           for (const container of this.plugin.core.containers.list()) {
             menu.addItem((item) =>
               item
@@ -2074,16 +2127,16 @@ export class BrowserView extends ItemView {
             );
           }
           if (leaf.lastUrl && !leaf.lastUrl.startsWith("browser://")) {
-            menu.addItem((item) => item.setTitle("Open history").setIcon("history").onClick(() => this.showHistoryQuery(leaf.lastUrl || "")));
+            menu.addItem((item) => item.setTitle(t("Open history")).setIcon("history").onClick(() => this.showHistoryQuery(leaf.lastUrl || "")));
           }
           menu.addSeparator();
-          menu.addItem((item) => item.setTitle("Remove from history").setIcon("trash").onClick(() => {
+          menu.addItem((item) => item.setTitle(t("Remove from history")).setIcon("trash").onClick(() => {
             void (async () => {
               const confirmed = await confirmAction(
                 this.plugin.app,
-                "Remove closed tab from history",
-                "Remove this closed tab's browsing history and detailed recovery data?",
-                "Remove",
+                t("Remove closed tab from history"),
+                t("Remove this closed tab's browsing history and detailed recovery data?"),
+                t("Remove"),
               );
               if (!confirmed) return;
               this.plugin.core.redactLeafHistory(leaf.id);
@@ -2117,13 +2170,13 @@ export class BrowserView extends ItemView {
         event.preventDefault();
         const menu = new Menu();
         menu.addItem((item) =>
-          item.setTitle("Open").setIcon("file").onClick(() => void this.openVaultHomeFile(file.path)),
+          item.setTitle(t("Open")).setIcon("file").onClick(() => void this.openVaultHomeFile(file.path)),
         );
         menu.addItem((item) =>
-          item.setTitle("Open in new tab").setIcon("plus").onClick(() => void this.openVaultHomeFile(file.path, true)),
+          item.setTitle(t("Open in new tab")).setIcon("plus").onClick(() => void this.openVaultHomeFile(file.path, true)),
         );
         menu.addItem((item) =>
-          item.setTitle("Copy file path").setIcon("copy").onClick(() => void navigator.clipboard.writeText(file.path)),
+          item.setTitle(t("Copy file path")).setIcon("copy").onClick(() => void navigator.clipboard.writeText(file.path)),
         );
         menu.showAtMouseEvent(event);
       });
@@ -2136,122 +2189,131 @@ export class BrowserView extends ItemView {
       const opened = await this.plugin.homeAdapter.openFile(this.leaf, path, newTab);
       if (!opened) {
         if (!newTab) this.closeReasonOverride = undefined;
-        new Notice("That file is no longer available.");
+        new Notice(t("That file is no longer available."));
       }
     } catch (error) {
       if (!newTab) this.closeReasonOverride = undefined;
       console.error("Unified Browser Core: failed to open Home file", error);
-      new Notice("Could not open that file.");
+      new Notice(t("Could not open that file."));
     }
   }
 
   private renderBookmarks(): void {
     const page = this.internalLayerEl.createDiv({ cls: "ubc-surface ubc-bookmarks" });
-    const heading = page.createDiv({ cls: "ubc-surface-heading" });
-    heading.createEl("h1", { text: "Bookmarks" });
-    const actions = heading.createDiv({ cls: "ubc-surface-actions" });
-    const addBookmark = actions.createEl("button", { text: "New bookmark" });
-    addBookmark.addEventListener("click", () => {
-      void (async () => {
-        const draft = await editBookmark(this.plugin.app, "", "", "New bookmark");
-        if (!draft) return;
-        this.plugin.core.bookmarks.addBookmark(draft);
-        this.plugin.core.scheduleSave();
-        this.showInternal("bookmarks", false);
-      })();
+    const hero = page.createDiv({ cls: "ubc-bookmark-hero" });
+    setIcon(hero.createDiv({ cls: "ubc-bookmark-hero-icon" }), "library-big");
+    const heading = hero.createDiv();
+    heading.createEl("h1", { text: t("Bookmarks") });
+    heading.createEl("p", { text: t("Save freely. Find what you need by type or folder.") });
+    const actions = page.createDiv({ cls: "ubc-surface-actions" });
+    const add = actions.createEl("button", { text: t("New bookmark"), cls: "mod-cta" });
+    add.addEventListener("click", async () => {
+      const draft = await editBookmark(this.plugin.app, "", "", t("New bookmark"), { store: this.plugin.core.bookmarks });
+      if (!draft) return;
+      this.plugin.core.bookmarks.addBookmark(draft);
+      this.plugin.core.scheduleSave(); this.refreshBookmarks();
     });
-    const addFolder = actions.createEl("button", { text: "New folder" });
-    addFolder.addEventListener("click", () => {
-      void (async () => {
-        const title = await promptText(this.plugin.app, "New bookmark folder", "", "Folder name");
-        if (title === undefined) return;
-        this.plugin.core.bookmarks.addFolder(title);
-        this.plugin.core.scheduleSave();
-        this.showInternal("bookmarks", false);
-      })();
+    actions.createEl("button", { text: t("New folder") }).addEventListener("click", async () => {
+      const title = await promptText(this.plugin.app, t("New bookmark folder"), "", t("Folder name"));
+      if (!title?.trim()) return;
+      this.plugin.core.bookmarks.addFolder(title); this.plugin.core.scheduleSave(); this.refreshBookmarks();
     });
-    const importObsidian = actions.createEl("button", { text: "Import Obsidian Bookmarks" });
-    importObsidian.addEventListener("click", () => {
-      void (async () => {
-        await this.plugin.importObsidianBookmarks();
-        this.showInternal("bookmarks", false);
-      })();
+    const imports = actions.createEl("button", { text: t("Import") });
+    imports.addEventListener("click", () => {
+      const menu = new Menu();
+      menu.addItem((item) => item.setTitle(t("Import Obsidian Bookmarks")).setIcon("book-open").onClick(async () => { await this.plugin.importObsidianBookmarks(); this.refreshBookmarks(); }));
+      menu.addItem((item) => item.setTitle(t("Import Web viewer Bookmarks")).setIcon("bookmark-plus").onClick(async () => { await this.plugin.importWebViewerBookmarks(); this.refreshBookmarks(); }));
+      const rect = imports.getBoundingClientRect(); menu.showAtPosition({ x: rect.left, y: rect.bottom });
     });
-    const importWebViewer = actions.createEl("button", { text: "Import Web viewer Bookmarks" });
-    importWebViewer.addEventListener("click", () => {
-      void (async () => {
-        await this.plugin.importWebViewerBookmarks();
-        this.showInternal("bookmarks", false);
-      })();
-    });
-    page.createEl("p", {
-      cls: "ubc-surface-description",
-      text: "Organize saved pages into folders, or search by title, URL, and folder.",
-    });
+    const stats = page.createDiv({ cls: "ubc-bookmark-stats" });
+    stats.createSpan({ text: t("{count} bookmarks", { count: this.plugin.core.bookmarks.allBookmarks().length }) });
+    stats.createSpan({ text: t("{count} selected", { count: this.plugin.core.bookmarks.favorites().length }) });
+    stats.createSpan({ text: t("{count} folders", { count: this.plugin.core.bookmarks.folders().length }) });
     const controls = page.createDiv({ cls: "ubc-bookmark-controls" });
-    const search = controls.createEl("input", {
-      cls: "ubc-bookmark-search",
-      attr: {
-        type: "search",
-        placeholder: "Search bookmarks",
-        "aria-label": "Search bookmarks",
-      },
-    });
+    const search = controls.createEl("input", { cls: "ubc-bookmark-search", attr: { type: "search", placeholder: t("Name, URL, folder or tag"), "aria-label": t("Search bookmarks") } });
     search.value = this.bookmarkSearchQuery;
+    const modes = controls.createDiv({ cls: "ubc-bookmark-segments", attr: { role: "group", "aria-label": t("Organize by") } });
+    const choices = [["type", "By type", "shapes"], ["folder", "By folder", "folder"], ["selected", "Selected members", "star"]] as const;
+    for (const [mode, label, icon] of choices) {
+      const button = modes.createEl("button", { attr: { "aria-pressed": String(this.bookmarkLayout === mode) } });
+      setIcon(button.createSpan(), icon); button.createSpan({ text: t(label) });
+      button.toggleClass("is-active", this.bookmarkLayout === mode);
+      button.addEventListener("click", () => { this.bookmarkLayout = mode; this.showInternal("bookmarks", false); });
+    }
     const summary = page.createDiv({ cls: "ubc-bookmark-summary", attr: { "aria-live": "polite" } });
     const list = page.createDiv({ cls: "ubc-bookmark-manager" });
-
     const render = () => {
       list.empty();
       const needle = this.bookmarkSearchQuery.toLowerCase().trim();
-      const allBookmarks = this.plugin.core.bookmarks.allBookmarks();
-      const favoriteCount = this.plugin.core.bookmarks.favorites().length;
-      const folderCount = this.plugin.core.bookmarks.folders().length;
-      if (needle) {
-        const matches = allBookmarks.filter((bookmark) => {
-          const path = bookmark.parentId ? this.plugin.core.bookmarks.folderPath(bookmark.parentId) : "";
-          return [bookmark.title, bookmark.url, path, bookmark.description ?? "", ...(bookmark.tags ?? [])]
-            .some((value) => value.toLowerCase().includes(needle));
-        });
-        summary.setText(
-          matches.length
-            ? `${matches.length} matching bookmark${matches.length === 1 ? "" : "s"}`
-            : "No bookmarks match this search.",
-        );
-        if (!matches.length) {
-          const empty = list.createDiv({ cls: "ubc-empty-state" });
-          empty.createEl("strong", { text: "No matching bookmarks" });
-          empty.createEl("p", { text: "Try another title, URL, or folder name." });
-          return;
-        }
-        for (const bookmark of matches) this.renderBookmarkSearchResult(list, bookmark);
+      const all = this.plugin.core.bookmarks.allBookmarks();
+      const matches = all.filter((bookmark) => [bookmark.title, bookmark.url, bookmark.description ?? "", ...(bookmark.tags ?? []), bookmark.parentId ? this.plugin.core.bookmarks.folderPath(bookmark.parentId) : ""]
+        .some((value) => value.toLowerCase().includes(needle)));
+      summary.setText(needle ? t("{count} results", { count: matches.length }) : this.bookmarkLayout === "selected" ? t("Pick the pages you use every day from your bookmarks.") : "");
+      if (!matches.length && (needle || !this.plugin.core.bookmarks.folders().length || this.bookmarkLayout !== "folder")) {
+        const empty = list.createDiv({ cls: "ubc-empty-state ubc-bookmark-empty" });
+        setIcon(empty.createDiv({ cls: "ubc-bookmark-empty-icon" }), needle ? "search" : "bookmark-plus");
+        empty.createEl("h2", { text: t(needle ? "No matching bookmarks" : "No bookmarks yet") });
+        empty.createEl("p", { text: t(needle ? "Try another title, URL, or folder name." : "Save a page with the star in the toolbar, or add your first bookmark here.") });
+        if (!needle) empty.createEl("button", { text: t("New bookmark"), cls: "mod-cta" }).addEventListener("click", () => add.click());
         return;
       }
-
-      summary.setText(
-        allBookmarks.length || folderCount
-          ? `${allBookmarks.length} bookmark${allBookmarks.length === 1 ? "" : "s"} · ${favoriteCount} favorite${favoriteCount === 1 ? "" : "s"} · ${folderCount} folder${folderCount === 1 ? "" : "s"}`
-          : "No bookmarks yet.",
-      );
-      if (!this.plugin.core.bookmarks.children(null).length) {
-        const empty = list.createDiv({ cls: "ubc-empty-state" });
-        empty.createEl("strong", { text: "No bookmarks yet" });
-        empty.createEl("p", { text: "Save a page or create a folder to start building your bookmark library." });
-        const emptyActions = empty.createDiv({ cls: "ubc-empty-actions" });
-        const firstBookmark = emptyActions.createEl("button", { text: "New bookmark" });
-        firstBookmark.addEventListener("click", () => addBookmark.click());
-        const firstFolder = emptyActions.createEl("button", { text: "New folder" });
-        firstFolder.addEventListener("click", () => addFolder.click());
+      if (this.bookmarkLayout === "folder" && !needle) { this.renderBookmarkFolder(list, null, 0, render); return; }
+      if (this.bookmarkLayout === "selected" || needle) {
+        const grid = list.createDiv({ cls: "ubc-bookmark-grid" });
+        const sorted = this.bookmarkLayout === "selected" ? [...matches].sort((a, b) => Number(b.favorite) - Number(a.favorite) || (a.favoriteOrder ?? a.order) - (b.favoriteOrder ?? b.order)) : matches;
+        for (const bookmark of sorted) this.renderBookmarkCard(grid, bookmark);
         return;
       }
-      this.renderBookmarkFolder(list, null, 0, render);
+      const categories = list.createDiv({ cls: "ubc-bookmark-category-index" });
+      for (const media of BOOKMARK_MEDIA) {
+        const members = matches.filter((bookmark) => classifyBookmark(bookmark) === media.type);
+        if (!members.length) continue;
+        const section = list.createEl("section", { cls: "ubc-bookmark-category" });
+        const groupHeading = section.createDiv({ cls: "ubc-bookmark-category-heading" });
+        setIcon(groupHeading.createSpan(), media.icon);
+        groupHeading.createEl("h2", { text: t(media.label) });
+        groupHeading.createSpan({ cls: "ubc-bookmark-count", text: String(members.length) });
+        const shortcut = categories.createEl("button", { cls: "ubc-bookmark-category-chip" });
+        setIcon(shortcut.createSpan(), media.icon); shortcut.createSpan({ text: t(media.label) + " · " + members.length });
+        shortcut.addEventListener("click", () => section.scrollIntoView({ block: "start", behavior: this.plugin.core.settings().reducedMotion ? "auto" : "smooth" }));
+        const grid = section.createDiv({ cls: "ubc-bookmark-grid" });
+        for (const bookmark of members) this.renderBookmarkCard(grid, bookmark);
+      }
     };
-
-    search.addEventListener("input", () => {
-      this.bookmarkSearchQuery = search.value;
-      render();
-    });
+    search.addEventListener("input", () => { this.bookmarkSearchQuery = search.value; render(); });
     render();
+  }
+
+  private renderBookmarkCard(parent: HTMLElement, bookmark: BookmarkEntry): void {
+    const card = parent.createEl("article", { cls: "ubc-bookmark-card" });
+    card.toggleClass("is-selected", bookmark.favorite);
+    const top = card.createDiv({ cls: "ubc-bookmark-card-top" });
+    renderBookmarkVisual(top, bookmark, "ubc-bookmark-card-visual", this.plugin.app);
+    this.renderBookmarkFavoriteToggle(top, bookmark);
+    const open = card.createEl("button", { cls: "ubc-bookmark-card-title", text: bookmark.title || bookmark.url });
+    open.title = bookmark.url;
+    open.addEventListener("click", (event) => this.openWebTargetFromPointer(bookmark.url, event));
+    open.addEventListener("auxclick", (event) => { if (event.button === 1) { event.preventDefault(); this.openWebTargetFromPointer(bookmark.url, event); } });
+    let host = bookmark.url;
+    try { host = new URL(bookmark.url).hostname || bookmark.url; } catch { /* retain raw URL */ }
+    card.createDiv({ cls: "ubc-bookmark-meta", text: host });
+    if (bookmark.description) card.createEl("p", { cls: "ubc-bookmark-card-description", text: bookmark.description });
+    const footer = card.createDiv({ cls: "ubc-bookmark-card-footer" });
+    const media = BOOKMARK_MEDIA.find((entry) => entry.type === classifyBookmark(bookmark))!;
+    const badge = footer.createSpan({ cls: "ubc-bookmark-type-badge" });
+    setIcon(badge.createSpan(), media.icon); badge.createSpan({ text: t(media.label) });
+    const edit = footer.createEl("button", { cls: "clickable-icon", attr: { title: t("Edit bookmark"), "aria-label": t("Edit bookmark") } });
+    setIcon(edit, "pencil");
+    edit.addEventListener("click", () => { this.bookmarkPopoverClose?.(); this.bookmarkPopoverClose = showBookmarkPopover(this.plugin, bookmark, edit, this.browserContentEl, () => this.refreshBookmarks()); });
+    const move = footer.createEl("button", { cls: "clickable-icon", attr: { title: t("Move to folder"), "aria-label": t("Move to folder") } });
+    setIcon(move, "folder-input");
+    move.addEventListener("click", async () => {
+      const parentId = await pickBookmarkFolder(this.plugin.app, this.plugin.core.bookmarks);
+      if (parentId === undefined || !this.plugin.core.bookmarks.moveBookmark(bookmark.id, parentId)) return;
+      this.plugin.core.scheduleSave(); this.refreshBookmarks();
+    });
+    if (bookmark.parentId) card.createDiv({ cls: "ubc-bookmark-card-path", text: this.plugin.core.bookmarks.folderPath(bookmark.parentId) });
+    card.addEventListener("contextmenu", (event) => { event.preventDefault(); showBookmarkMenu(this.plugin, this, bookmark, event); });
   }
 
   private renderBookmarkSearchResult(parent: HTMLElement, bookmark: BookmarkEntry): void {
@@ -2309,7 +2371,7 @@ export class BrowserView extends ItemView {
         row.createSpan({
           cls: "ubc-bookmark-count",
           text: String(count),
-          attr: { "aria-label": `${count} bookmark${count === 1 ? "" : "s"} in ${item.title}` },
+          attr: { "aria-label": t("{v0} bookmark{v1} in {v2}", { v0: count, v1: count === 1 ? "" : "s", v2: item.title }) },
         });
         const toggleFolder = () => {
           if (collapsed) this.collapsedBookmarkFolders.delete(item.id);
@@ -2349,12 +2411,13 @@ export class BrowserView extends ItemView {
       cls: "ubc-bookmark-favorite-toggle clickable-icon",
       attr: {
         type: "button",
-        "aria-label": bookmark.favorite ? "Remove from favorites" : "Add to favorites",
-        title: bookmark.favorite ? "Remove from favorites" : "Add to favorites",
+        "aria-label": bookmark.favorite ? t("Remove from favorites") : t("Add to favorites"),
+        title: bookmark.favorite ? t("Remove from favorites") : t("Add to favorites"),
       },
     });
     setIcon(button, "star");
     button.toggleClass("is-active", bookmark.favorite);
+    button.setAttribute("aria-pressed", String(bookmark.favorite));
     button.addEventListener("click", () => {
       this.plugin.core.bookmarks.setFavorite(bookmark.id, !bookmark.favorite);
       this.plugin.core.scheduleSave();
@@ -2365,30 +2428,30 @@ export class BrowserView extends ItemView {
   private renderHistory(): void {
     const page = this.internalLayerEl.createDiv({ cls: "ubc-surface ubc-history" });
     const heading = page.createDiv({ cls: "ubc-surface-heading" });
-    heading.createEl("h1", { text: "History" });
+    heading.createEl("h1", { text: t("History") });
     page.createEl("p", {
       cls: "ubc-surface-description",
-      text: "Browse visits by day, tab, and alternate path. Filtering only changes what is shown.",
+      text: t("Browse visits by day, tab, and alternate path. Filtering only changes what is shown."),
     });
     const filters = page.createDiv({ cls: "ubc-history-filters" });
     const search = filters.createEl("input", {
       attr: {
-        placeholder: "Search title, URL, domain, or tab",
-        "aria-label": "Search history",
+        placeholder: t("Search title, URL, domain, or tab"),
+        "aria-label": t("Search history"),
       },
     });
     this.historySearchEl = search;
     const dayFilter = filters.createEl("input", {
-      attr: { type: "date", "aria-label": "Filter history by day" },
+      attr: { type: "date", "aria-label": t("Filter history by day") },
     });
     const containerFilter = filters.createEl("select", {
-      attr: { "aria-label": "Filter history by container" },
+      attr: { "aria-label": t("Filter history by container") },
     });
-    containerFilter.createEl("option", { text: "All containers", value: "" });
+    containerFilter.createEl("option", { text: t("All containers"), value: "" });
     for (const container of this.plugin.core.containers.list()) {
       containerFilter.createEl("option", { text: container.name, value: container.id });
     }
-    const clearFilters = filters.createEl("button", { text: "Clear filters" });
+    const clearFilters = filters.createEl("button", { text: t("Clear filters") });
     const summary = page.createDiv({ cls: "ubc-history-summary", attr: { "aria-live": "polite" } });
     const timeline = page.createDiv({ cls: "ubc-history-timeline" });
     const render = () => {
@@ -2433,21 +2496,21 @@ export class BrowserView extends ItemView {
       const filtersActive = Boolean(needle || selectedDay || selectedContainer);
       summary.setText(
         navigationCount
-          ? `${navigationCount} visit${navigationCount === 1 ? "" : "s"} across ${days.length} day${days.length === 1 ? "" : "s"}${tombstoneCount ? ` · ${tombstoneCount} deleted entr${tombstoneCount === 1 ? "y" : "ies"} retained` : ""}${filtersActive ? " · filtered" : ""}`
+          ? t("{v0} visit{v1} across {v2} day{v3}{v4}{v5}", { v0: navigationCount, v1: navigationCount === 1 ? "" : "s", v2: days.length, v3: days.length === 1 ? "" : "s", v4: tombstoneCount ? ` · ${tombstoneCount} deleted entr${tombstoneCount === 1 ? "y" : "ies"} retained` : "", v5: filtersActive ? " · filtered" : "" })
           : tombstoneCount
-            ? `${tombstoneCount} deleted histor${tombstoneCount === 1 ? "y entry" : "y entries"} retained to preserve navigation paths${filtersActive ? " · filtered" : ""}`
+            ? t("{v0} deleted histor{v1} retained to preserve navigation paths{v2}", { v0: tombstoneCount, v1: tombstoneCount === 1 ? "y entry" : "y entries", v2: filtersActive ? " · filtered" : "" })
           : filtersActive
-            ? "No history matches these filters."
-            : "No browser history yet.",
+            ? t("No history matches these filters.")
+            : t("No browser history yet."),
       );
       clearFilters.toggleClass("is-hidden", !filtersActive);
       if (!days.length) {
         const empty = timeline.createDiv({ cls: "ubc-history-empty" });
-        empty.createEl("strong", { text: filtersActive ? "No matching visits" : "No history yet" });
+        empty.createEl("strong", { text: filtersActive ? t("No matching visits") : t("No history yet") });
         empty.createEl("p", {
           text: filtersActive
-            ? "Try clearing one or more filters."
-            : "Visited web pages will appear here without creating artificial gaps for idle time.",
+            ? t("Try clearing one or more filters.")
+            : t("Visited web pages will appear here without creating artificial gaps for idle time."),
         });
         return;
       }
@@ -2496,7 +2559,7 @@ export class BrowserView extends ItemView {
               this.showHistoryLeafMenu(leafId, leafNodes, event, render);
             });
             if (leafRecord?.closedAt && leafRecord.lastUrl) {
-              const restore = leafHeader.createEl("button", { text: "Restore" });
+              const restore = leafHeader.createEl("button", { text: t("Restore") });
               restore.addEventListener("click", () => this.plugin.restoreLeaf(leafId));
             }
             this.renderHistoryLeafNodes(
@@ -2577,15 +2640,15 @@ export class BrowserView extends ItemView {
     const menu = new Menu();
     const navigationNodes = dayNodes.filter((node): node is NavigationNode => node.kind === "navigation");
     const branchIds = [...new Set(navigationNodes.map((node) => node.branchId))];
-    menu.addItem((item) => item.setTitle("Expand all alternate paths").onClick(() => {
+    menu.addItem((item) => item.setTitle(t("Expand all alternate paths")).onClick(() => {
       for (const branchId of branchIds) this.expandedHistoryBranches.add(branchId);
       refresh();
     }));
-    menu.addItem((item) => item.setTitle("Collapse all alternate paths").onClick(() => {
+    menu.addItem((item) => item.setTitle(t("Collapse all alternate paths")).onClick(() => {
       for (const branchId of branchIds) this.expandedHistoryBranches.delete(branchId);
       refresh();
     }));
-    menu.addItem((item) => item.setTitle("Open all tabs from this day").setIcon("copy-plus").onClick(() => {
+    menu.addItem((item) => item.setTitle(t("Open all tabs from this day")).setIcon("copy-plus").onClick(() => {
       const latestByLeaf = new Map<string, NavigationNode>();
       for (const node of navigationNodes) {
         const current = latestByLeaf.get(node.leafId);
@@ -2593,11 +2656,11 @@ export class BrowserView extends ItemView {
       }
       for (const node of latestByLeaf.values()) void this.plugin.openBrowser({ url: node.url, containerId: node.containerId });
     }));
-    menu.addItem((item) => item.setTitle("Search within this day").setIcon("search").onClick(filterDay));
+    menu.addItem((item) => item.setTitle(t("Search within this day")).setIcon("search").onClick(filterDay));
     menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Delete this day's history").setIcon("trash").onClick(() => {
+    menu.addItem((item) => item.setTitle(t("Delete this day's history")).setIcon("trash").onClick(() => {
       void (async () => {
-        if (!(await confirmAction(this.plugin.app, "Delete history day", `Delete web history recorded in ${day}?`, "Delete history"))) return;
+        if (!(await confirmAction(this.plugin.app, t("Delete history day"), t("Delete web history recorded in {v0}?", { v0: day }), t("Delete history")))) return;
         this.plugin.core.redactHistoryNodes(navigationNodes.map((node) => node.id));
         refresh();
       })();
@@ -2612,11 +2675,11 @@ export class BrowserView extends ItemView {
     const mainNodes = mainBranch ? this.plugin.core.history.navigationNodesForBranch(mainBranch) : navigationNodes;
     const menu = new Menu();
     if (record?.lastUrl) {
-      menu.addItem((item) => item.setTitle("Restore tab").setIcon("rotate-ccw").onClick(() => void this.plugin.restoreLeaf(leafId)));
+      menu.addItem((item) => item.setTitle(t("Restore tab")).setIcon("rotate-ccw").onClick(() => void this.plugin.restoreLeaf(leafId)));
       const originalContainerExists = Boolean(this.plugin.core.containers.find(record.containerId));
       menu.addItem((item) =>
         item
-          .setTitle(originalContainerExists ? "Restore in original container" : "Original container deleted")
+          .setTitle(originalContainerExists ? t("Restore in original container") : t("Original container deleted"))
           .setIcon("box")
           .setDisabled(!originalContainerExists)
           .onClick(() => void this.plugin.restoreLeaf(leafId, { containerId: record.containerId })),
@@ -2625,27 +2688,27 @@ export class BrowserView extends ItemView {
         if (container.id === record.containerId) continue;
         menu.addItem((item) => item.setTitle("Restore in " + container.name).setIcon("box").onClick(() => void this.plugin.restoreLeaf(leafId, { containerId: container.id })));
       }
-      menu.addItem((item) => item.setTitle("Pin restored tab").setIcon("pin").onClick(() => void this.plugin.restoreLeaf(leafId, { pinned: true })));
+      menu.addItem((item) => item.setTitle(t("Pin restored tab")).setIcon("pin").onClick(() => void this.plugin.restoreLeaf(leafId, { pinned: true })));
     }
-    menu.addItem((item) => item.setTitle("Open current path in new tabs").setDisabled(mainNodes.length === 0).onClick(() => {
+    menu.addItem((item) => item.setTitle(t("Open current path in new tabs")).setDisabled(mainNodes.length === 0).onClick(() => {
       for (const node of mainNodes) void this.plugin.openBrowser({ url: node.url, containerId: node.containerId });
     }));
-    menu.addItem((item) => item.setTitle(record?.manualRetention === "preserve" ? "Use normal recovery retention" : "Keep recovery data").onClick(() => {
+    menu.addItem((item) => item.setTitle(record?.manualRetention === "preserve" ? t("Use normal recovery retention") : t("Keep recovery data")).onClick(() => {
       if (!record) return;
       record.manualRetention = record.manualRetention === "preserve" ? "default" : "preserve";
       this.plugin.core.scheduleSave();
       refresh();
     }));
-    menu.addItem((item) => item.setTitle("Copy tab history").setIcon("copy").onClick(() => {
+    menu.addItem((item) => item.setTitle(t("Copy tab history")).setIcon("copy").onClick(() => {
       const text = navigationNodes
         .map((node) => `${new Date(node.timestamp).toLocaleString()}\t${node.title}\t${node.url}`)
         .join("\n");
       void navigator.clipboard.writeText(text);
     }));
     menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Delete tab history").setIcon("trash").onClick(() => {
+    menu.addItem((item) => item.setTitle(t("Delete tab history")).setIcon("trash").onClick(() => {
       void (async () => {
-        if (!(await confirmAction(this.plugin.app, "Delete tab history", "Delete this tab's browsing history and detailed recovery data?", "Delete history"))) return;
+        if (!(await confirmAction(this.plugin.app, t("Delete tab history"), t("Delete this tab's browsing history and detailed recovery data?"), t("Delete history")))) return;
         this.plugin.core.redactLeafHistory(leafId);
         refresh();
       })();
@@ -2670,14 +2733,14 @@ export class BrowserView extends ItemView {
       if (node.kind === "tombstone") {
         row.addClass("is-tombstone");
         row.createEl("time", { text: new Date(node.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) });
-        row.createSpan({ text: "Deleted history entry" });
+        row.createSpan({ text: t("Deleted history entry") });
         row.addEventListener("contextmenu", (event) => {
           event.preventDefault();
           const check = this.plugin.core.history.canRemoveTombstone(node.id);
           const menu = new Menu();
           menu.addItem((item) =>
             item
-              .setTitle("Remove deleted entry marker")
+              .setTitle(t("Remove deleted entry marker"))
               .setIcon("trash")
               .setDisabled(!check.ok)
               .onClick(() => {
@@ -2707,7 +2770,7 @@ export class BrowserView extends ItemView {
         const count = branches.get(node.branchId)?.length ?? 1;
         const expand = summary.createEl("button", {
           cls: "ubc-history-link",
-          text: `Alternate path · ${count} visit${count === 1 ? "" : "s"}`,
+          text: t("Alternate path · {v0} visit{v1}", { v0: count, v1: count === 1 ? "" : "s" }),
         });
         expand.addEventListener("click", () => {
           this.expandedHistoryBranches.add(node.branchId);
@@ -2718,24 +2781,24 @@ export class BrowserView extends ItemView {
           const branchNodes = this.plugin.core.history.navigationNodesForBranch(node.branchId);
           const latest = branchNodes.at(-1);
           const menu = new Menu();
-          menu.addItem((item) => item.setTitle("Show alternate path").onClick(() => {
+          menu.addItem((item) => item.setTitle(t("Show alternate path")).onClick(() => {
             this.expandedHistoryBranches.add(node.branchId);
             this.showInternal("history");
           }));
           menu.addItem((item) =>
             item
-              .setTitle("Restore latest page from this path")
+              .setTitle(t("Restore latest page from this path"))
               .setIcon("rotate-ccw")
               .setDisabled(!latest)
               .onClick(() => { if (latest) void this.plugin.restoreHistoryNode(latest); }),
           );
-          menu.addItem((item) => item.setTitle("Open this path in new tabs").setDisabled(branchNodes.length === 0).onClick(() => {
+          menu.addItem((item) => item.setTitle(t("Open this path in new tabs")).setDisabled(branchNodes.length === 0).onClick(() => {
             for (const branchNode of branchNodes) void this.plugin.openBrowser({ url: branchNode.url, containerId: branchNode.containerId });
           }));
           menu.addSeparator();
-          menu.addItem((item) => item.setTitle("Delete alternate path").setIcon("trash").onClick(() => {
+          menu.addItem((item) => item.setTitle(t("Delete alternate path")).setIcon("trash").onClick(() => {
             void (async () => {
-              if (!(await confirmAction(this.plugin.app, "Delete alternate history path", `Delete ${branchNodes.length} visit(s) from this path?`, "Delete path"))) return;
+              if (!(await confirmAction(this.plugin.app, t("Delete alternate history path"), t("Delete {v0} visit(s) from this path?", { v0: branchNodes.length }), t("Delete path")))) return;
               this.plugin.core.redactHistoryBranch(node.branchId);
               this.expandedHistoryBranches.delete(node.branchId);
               this.showInternal("history");
@@ -2753,8 +2816,8 @@ export class BrowserView extends ItemView {
       if (filtered) {
         const reveal = row.createEl("button", {
           cls: "ubc-history-reveal",
-          text: "Reveal",
-          attr: { "aria-label": "Reveal this visit in its alternate path" },
+          text: t("Reveal"),
+          attr: { "aria-label": t("Reveal this visit in its alternate path") },
         });
         reveal.addEventListener("click", () => this.revealHistoryNode(node));
       }
@@ -2764,7 +2827,7 @@ export class BrowserView extends ItemView {
           cls: "ubc-residual-badge",
           text: `+${residuals.length}`,
           attr: {
-            "aria-label": `Show ${residuals.length} reload, redirect, or navigation event${residuals.length === 1 ? "" : "s"}`,
+            "aria-label": t("Show {v0} reload, redirect, or navigation event{v1}", { v0: residuals.length, v1: residuals.length === 1 ? "" : "s" }),
           },
         });
         badge.title = "Show reloads, redirects, and other navigation events";
@@ -2777,8 +2840,8 @@ export class BrowserView extends ItemView {
       row.addEventListener("contextmenu", (event) => {
         event.preventDefault();
         const menu = new Menu();
-        menu.addItem((item) => item.setTitle("Open").onClick(() => this.navigate(node.url)));
-        menu.addItem((item) => item.setTitle("Open in new tab").onClick(() => this.plugin.openBrowser({ url: node.url, containerId: node.containerId })));
+        menu.addItem((item) => item.setTitle(t("Open")).onClick(() => this.navigate(node.url)));
+        menu.addItem((item) => item.setTitle(t("Open in new tab")).onClick(() => this.plugin.openBrowser({ url: node.url, containerId: node.containerId })));
         for (const container of this.plugin.core.containers.list()) {
           menu.addItem((item) =>
             item
@@ -2788,35 +2851,35 @@ export class BrowserView extends ItemView {
           );
         }
         menu.addItem((item) =>
-          item.setTitle("Restore from here").onClick(() => this.plugin.restoreHistoryNode(node)),
+          item.setTitle(t("Restore from here")).onClick(() => this.plugin.restoreHistoryNode(node)),
         );
         menu.addItem((item) =>
           item
-            .setTitle("Show in full history")
+            .setTitle(t("Show in full history"))
             .setIcon("locate")
             .onClick(() => this.revealHistoryNode(node)),
         );
-        menu.addItem((item) => item.setTitle("Bookmark").onClick(() => {
+        menu.addItem((item) => item.setTitle(t("Bookmark")).onClick(() => {
           this.plugin.core.bookmarks.addBookmark({ title: node.title, url: node.url });
           this.plugin.core.scheduleSave();
           this.renderFavoritesBar();
         }));
         menu.addItem((item) =>
           item
-            .setTitle("Copy URL")
+            .setTitle(t("Copy URL"))
             .setIcon("copy")
             .onClick(() => void navigator.clipboard.writeText(node.url)),
         );
         menu.addItem((item) =>
           item
-            .setTitle("Copy title")
+            .setTitle(t("Copy title"))
             .setIcon("copy")
             .onClick(() => void navigator.clipboard.writeText(node.title || node.url)),
         );
         if (residuals.length) {
           menu.addItem((item) =>
             item
-              .setTitle(this.expandedResidualParents.has(node.id) ? "Hide redirects and reloads" : "Show redirects and reloads")
+              .setTitle(this.expandedResidualParents.has(node.id) ? t("Hide redirects and reloads") : t("Show redirects and reloads"))
               .onClick(() => {
                 if (this.expandedResidualParents.has(node.id)) this.expandedResidualParents.delete(node.id);
                 else this.expandedResidualParents.add(node.id);
@@ -2825,23 +2888,23 @@ export class BrowserView extends ItemView {
           );
         }
         if (node.branchId !== lastBranch) {
-          menu.addItem((item) => item.setTitle("Collapse alternate path").onClick(() => {
+          menu.addItem((item) => item.setTitle(t("Collapse alternate path")).onClick(() => {
             this.expandedHistoryBranches.delete(node.branchId);
             this.showInternal("history");
           }));
         }
         menu.addSeparator();
-        menu.addItem((item) => item.setTitle(node.manualRetention === "preserve" ? "Use normal recovery retention" : "Keep recovery data").onClick(() => {
+        menu.addItem((item) => item.setTitle(node.manualRetention === "preserve" ? t("Use normal recovery retention") : t("Keep recovery data")).onClick(() => {
           node.manualRetention = node.manualRetention === "preserve" ? "default" : "preserve";
           this.plugin.core.scheduleSave();
         }));
-        menu.addItem((item) => item.setTitle("Delete history entry").setIcon("trash").onClick(() => {
+        menu.addItem((item) => item.setTitle(t("Delete history entry")).setIcon("trash").onClick(() => {
           void (async () => {
             const confirmed = await confirmAction(
               this.plugin.app,
-              "Delete history entry",
-              `Delete “${node.title || node.url}” from browser history?`,
-              "Delete history",
+              t("Delete history entry"),
+              t("Delete “{v0}” from browser history?", { v0: node.title || node.url }),
+              t("Delete history"),
             );
             if (!confirmed) return;
             this.plugin.core.redactHistoryNode(node.id);
@@ -2862,16 +2925,16 @@ export class BrowserView extends ItemView {
           detail.addEventListener("contextmenu", (event) => {
             event.preventDefault();
             const menu = new Menu();
-            menu.addItem((item) => item.setTitle("Copy event details").setIcon("copy").onClick(() => {
+            menu.addItem((item) => item.setTitle(t("Copy event details")).setIcon("copy").onClick(() => {
               void navigator.clipboard.writeText(JSON.stringify(residual, null, 2));
             }));
             if (residual.residualKind === "redirect" && residual.fromUrl) {
-              menu.addItem((item) => item.setTitle("Open redirect source").onClick(() => this.navigate(residual.fromUrl!)));
+              menu.addItem((item) => item.setTitle(t("Open redirect source")).onClick(() => this.navigate(residual.fromUrl!)));
             }
             if (residual.residualKind === "redirect" && residual.toUrl) {
-              menu.addItem((item) => item.setTitle("Open redirect destination").onClick(() => this.navigate(residual.toUrl!)));
+              menu.addItem((item) => item.setTitle(t("Open redirect destination")).onClick(() => this.navigate(residual.toUrl!)));
             }
-            menu.addItem((item) => item.setTitle("Hide redirects and reloads").onClick(() => {
+            menu.addItem((item) => item.setTitle(t("Hide redirects and reloads")).onClick(() => {
               this.expandedResidualParents.delete(node.id);
               this.showInternal("history");
             }));
@@ -2898,12 +2961,12 @@ export class BrowserView extends ItemView {
     const menu = new Menu();
     menu.addItem((item) =>
       item
-        .setTitle("Open new tab in this container")
+        .setTitle(t("Open new tab in this container"))
         .setIcon("plus")
         .onClick(() => void this.plugin.openBrowser({ url: "browser://home", containerId: this.containerId })),
     );
     menu.addSeparator();
-    menu.addItem((item) => item.setTitle("Reopen current page in").setIcon("repeat-2").setDisabled(true));
+    menu.addItem((item) => item.setTitle(t("Reopen current page in")).setIcon("repeat-2").setDisabled(true));
     for (const container of this.plugin.core.containers.list()) {
       menu.addItem((item) => {
         item.setTitle(container.name).setIcon(container.icon || "box");
@@ -2917,11 +2980,11 @@ export class BrowserView extends ItemView {
     if (mode !== "automatic") {
       menu.addItem((item) =>
         item
-          .setTitle("Automatic site defaults are off")
+          .setTitle(t("Automatic site defaults are off"))
           .setIcon("route-off")
           .setDisabled(true),
       );
-      menu.addItem((item) => item.setTitle("Manage containers").setIcon("settings").onClick(() => this.plugin.openSettings()));
+      menu.addItem((item) => item.setTitle(t("Manage containers")).setIcon("settings").onClick(() => this.plugin.openSettings()));
       this.openContainerMenu(menu, position);
       return;
     }
@@ -2942,9 +3005,9 @@ export class BrowserView extends ItemView {
             .setTitle(
               routing.bypassingAssignment
                 ? routing.bypassReason === "opener"
-                  ? `Sign-in flow stays in this container · site default is ${assignedName}`
-                  : `Opened here explicitly · site default is ${assignedName}`
-                : `Site default · ${assignedName}`,
+                  ? t("Sign-in flow stays in this container · site default is {v0}", { v0: assignedName })
+                  : t("Opened here explicitly · site default is {v0}", { v0: assignedName })
+                : t("Site default · {v0}", { v0: assignedName }),
             )
             .setIcon(routing.bypassingAssignment ? "shuffle" : "route")
             .setDisabled(true),
@@ -2952,29 +3015,29 @@ export class BrowserView extends ItemView {
         if (routing.bypassingAssignment) {
           menu.addItem((item) =>
             item
-              .setTitle(`Return to site default · ${assignedName}`)
+              .setTitle(t("Return to site default · {v0}", { v0: assignedName }))
               .setIcon("undo-2")
               .onClick(() => this.reopenInContainer(assignment.containerId)),
           );
         }
       } else {
         menu.addItem((item) =>
-          item.setTitle("No default container for this site").setIcon("route-off").setDisabled(true),
+          item.setTitle(t("No default container for this site")).setIcon("route-off").setDisabled(true),
         );
       }
       menu.addSeparator();
-      menu.addItem((item) => item.setTitle("Site default container").setIcon("route").setDisabled(true));
+      menu.addItem((item) => item.setTitle(t("Site default container")).setIcon("route").setDisabled(true));
       for (const container of this.plugin.core.containers.list()) {
         menu.addItem((item) =>
           item
-            .setTitle(`Always open ${routing.hostname} in ${container.name}`)
+            .setTitle(t("Always open {v0} in {v1}", { v0: routing.hostname, v1: container.name }))
             .setIcon(container.icon || "box")
             .setChecked(routing.assignedContainerId === container.id)
             .onClick(() => this.assignCurrentSiteToContainer(routing.hostname, container.id)),
         );
       }
       if (assignment) {
-        menu.addItem((item) => item.setTitle("Forget site default container").onClick(() => {
+        menu.addItem((item) => item.setTitle(t("Forget site default container")).onClick(() => {
           this.plugin.core.containers.unassignOrigin(assignment.originPattern);
           this.siteAssignmentBypassOrigin = undefined;
           this.siteAssignmentBypassReason = undefined;
@@ -2985,9 +3048,9 @@ export class BrowserView extends ItemView {
         }));
       }
     } else {
-      menu.addItem((item) => item.setTitle("Site defaults are only available for web pages").setDisabled(true));
+      menu.addItem((item) => item.setTitle(t("Site defaults are only available for web pages")).setDisabled(true));
     }
-    menu.addItem((item) => item.setTitle("Manage containers").setIcon("settings").onClick(() => this.plugin.openSettings()));
+    menu.addItem((item) => item.setTitle(t("Manage containers")).setIcon("settings").onClick(() => this.plugin.openSettings()));
     this.openContainerMenu(menu, position);
   }
 
@@ -3014,7 +3077,7 @@ export class BrowserView extends ItemView {
     this.plugin.core.scheduleSave();
     this.plugin.scheduleSessionCheckpoint();
     this.updateContainerIndicator();
-    new Notice(`Always open ${hostname} in ${this.plugin.core.containers.nameFor(containerId)}.`);
+    new Notice(t("Always open {v0} in {v1}.", { v0: hostname, v1: this.plugin.core.containers.nameFor(containerId) }));
   }
 
   private updateContainerIndicator(): void {
@@ -3054,14 +3117,14 @@ export class BrowserView extends ItemView {
     const menu = new Menu();
     const origin = this.currentOrigin();
     if (!origin) {
-      menu.addItem((item) => item.setTitle("Site permissions are only available for web pages").setDisabled(true));
-      menu.addItem((item) => item.setTitle("Open Browser Core settings").onClick(() => this.plugin.openSettings()));
+      menu.addItem((item) => item.setTitle(t("Site permissions are only available for web pages")).setDisabled(true));
+      menu.addItem((item) => item.setTitle(t("Open Browser Core settings")).onClick(() => this.plugin.openSettings()));
       this.showMenuForEvent(menu, event);
       return;
     }
     const records = this.plugin.core.permissions.listForOrigin(this.containerId, origin);
     if (!records.length) {
-      menu.addItem((item) => item.setTitle("No saved permissions for this site").setDisabled(true));
+      menu.addItem((item) => item.setTitle(t("No saved permissions for this site")).setDisabled(true));
     } else {
       for (const record of records) {
         menu.addItem((item) =>
@@ -3086,7 +3149,7 @@ export class BrowserView extends ItemView {
     }
     menu.addItem((item) =>
       item
-        .setTitle("Reset site permissions")
+        .setTitle(t("Reset site permissions"))
         .setIcon("rotate-ccw")
         .setDisabled(records.length === 0)
         .onClick(() => {
@@ -3094,7 +3157,7 @@ export class BrowserView extends ItemView {
           this.plugin.core.scheduleSave();
         }),
     );
-    menu.addItem((item) => item.setTitle("Open Browser Core settings").setIcon("settings").onClick(() => this.plugin.openSettings()));
+    menu.addItem((item) => item.setTitle(t("Open Browser Core settings")).setIcon("settings").onClick(() => this.plugin.openSettings()));
     this.showMenuForEvent(menu, event);
   }
 
@@ -3161,13 +3224,13 @@ export class BrowserView extends ItemView {
     menu.addSeparator();
     menu.addItem((item) =>
       item
-        .setTitle("Show full tab history")
+        .setTitle(t("Show full tab history"))
         .setIcon("history")
         .onClick(() => this.showInternal("history")),
     );
     menu.addItem((item) =>
       item
-        .setTitle("Show alternate paths")
+        .setTitle(t("Show alternate paths"))
         .setIcon("git-branch")
         .onClick(() => {
           for (const node of this.plugin.core.history.nodesForLeaf(this.leafId())) {
@@ -3183,7 +3246,7 @@ export class BrowserView extends ItemView {
     const webview = this.readyWebview();
     if (!webview) {
       menu.addItem((item) =>
-        item.setTitle(direction < 0 ? "No back history" : "No forward history").setDisabled(true),
+        item.setTitle(direction < 0 ? t("No back history") : t("No forward history")).setDisabled(true),
       );
       return;
     }
@@ -3197,7 +3260,7 @@ export class BrowserView extends ItemView {
     }
     if (!indices.length) {
       menu.addItem((item) =>
-        item.setTitle(direction < 0 ? "No back history" : "No forward history").setDisabled(true),
+        item.setTitle(direction < 0 ? t("No back history") : t("No forward history")).setDisabled(true),
       );
       return;
     }
@@ -3229,7 +3292,7 @@ export class BrowserView extends ItemView {
 
     menu.addItem((item) =>
       item
-        .setTitle("Cut")
+        .setTitle(t("Cut"))
         .setDisabled(!hasSelection)
         .onClick(async () => {
           if (!hasSelection) return;
@@ -3239,7 +3302,7 @@ export class BrowserView extends ItemView {
     );
     menu.addItem((item) =>
       item
-        .setTitle("Copy")
+        .setTitle(t("Copy"))
         .setDisabled(!hasSelection)
         .onClick(() => {
           if (!hasSelection) return;
@@ -3248,27 +3311,27 @@ export class BrowserView extends ItemView {
     );
     menu.addItem((item) =>
       item
-        .setTitle("Paste")
+        .setTitle(t("Paste"))
         .onClick(async () => {
           const value = await navigator.clipboard.readText();
           this.replaceAddressSelection(value);
         }),
     );
     menu.addItem((item) =>
-      item.setTitle("Paste and go").onClick(async () => {
+      item.setTitle(t("Paste and go")).onClick(async () => {
         const value = await navigator.clipboard.readText();
         if (value) this.navigate(this.normalizeAddress(value));
       }),
     );
     menu.addItem((item) =>
       item
-        .setTitle("Delete")
+        .setTitle(t("Delete"))
         .setDisabled(!hasSelection)
         .onClick(() => this.replaceAddressSelection("")),
     );
     menu.addItem((item) =>
       item
-        .setTitle("Select all")
+        .setTitle(t("Select all"))
         .onClick(() => {
           this.addressEl.focus();
           this.addressEl.select();
@@ -3285,13 +3348,13 @@ export class BrowserView extends ItemView {
     }
     menu.addItem((item) =>
       item
-        .setTitle("Copy URL")
+        .setTitle(t("Copy URL"))
         .setIcon("copy")
         .onClick(() => void navigator.clipboard.writeText(this.currentUrlValue)),
     );
     menu.addItem((item) =>
       item
-        .setTitle("Copy page title and URL")
+        .setTitle(t("Copy page title and URL"))
         .onClick(() =>
           void navigator.clipboard.writeText(this.currentTitle + "\n" + this.currentUrlValue),
         ),
@@ -3299,7 +3362,7 @@ export class BrowserView extends ItemView {
     if (!this.currentUrlValue.startsWith("browser://")) {
       menu.addItem((item) =>
         item
-          .setTitle("Bookmark page")
+          .setTitle(t("Bookmark page"))
           .setIcon("bookmark")
           .onClick(() => this.bookmarkCurrentPage()),
       );
@@ -3315,7 +3378,7 @@ export class BrowserView extends ItemView {
       }
       menu.addItem((item) =>
         item
-          .setTitle("History for this site")
+          .setTitle(t("History for this site"))
           .setIcon("history")
           .onClick(() => {
             let origin = "";
@@ -3337,7 +3400,7 @@ export class BrowserView extends ItemView {
     menu.addSeparator();
     menu.addItem((item) =>
       item
-        .setTitle("Clear")
+        .setTitle(t("Clear"))
         .setIcon("x")
         .onClick(() => {
           this.addressEl.value = "";

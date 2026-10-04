@@ -3,6 +3,7 @@ import type UnifiedBrowserCorePlugin from "../main";
 import type { TabStyle } from "../core/model";
 import { confirmAction } from "../ui/confirm-modal";
 import { permissionDecisionLabel, permissionLabel } from "../ui/permission-label";
+import { t, setLanguage } from "../i18n";
 
 export class BrowserSettingTab extends PluginSettingTab {
   constructor(app: App, private readonly plugin: UnifiedBrowserCorePlugin) {
@@ -12,15 +13,28 @@ export class BrowserSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    new Setting(containerEl).setName("Unified Browser Core").setHeading();
+    new Setting(containerEl).setName(t("Unified Browser Core")).setHeading();
+    new Setting(containerEl)
+      .setName(t("Language"))
+      .setDesc(t("Choose the language used by Browser Core."))
+      .addDropdown((dropdown) => dropdown
+        .addOption("auto", t("Follow Obsidian"))
+        .addOption("en", t("English"))
+        .addOption("ja", "日本語")
+        .setValue(this.plugin.core.settings().language)
+        .onChange((value) => {
+          const language = value as "auto" | "en" | "ja";
+          this.plugin.core.updateSettings({ language }); setLanguage(language);
+          this.plugin.refreshLanguage(); this.display();
+        }));
 
     new Setting(containerEl)
-      .setName("Tab style")
-      .setDesc("Firefox keeps a readable minimum tab width and overflows horizontally. Chrome compresses tabs more aggressively.")
+      .setName(t("Tab style"))
+      .setDesc(t("Firefox keeps a readable minimum tab width and overflows horizontally. Chrome compresses tabs more aggressively."))
       .addDropdown((dropdown) =>
         dropdown
-          .addOption("firefox", "Firefox")
-          .addOption("chrome", "Chrome")
+          .addOption("firefox", t("Firefox"))
+          .addOption("chrome", t("Chrome"))
           .setValue(this.plugin.core.settings().tabStyle)
           .onChange((value) => {
             this.plugin.core.updateSettings({ tabStyle: value as TabStyle });
@@ -29,8 +43,8 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Use Browser Core tab layout")
-      .setDesc("Apply the selected browser tab style only to panes that contain Browser Core tabs.")
+      .setName(t("Use Browser Core tab layout"))
+      .setDesc(t("Apply the selected browser tab style only to panes that contain Browser Core tabs."))
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.core.settings().tabStripIntegrationEnabled)
@@ -44,11 +58,11 @@ export class BrowserSettingTab extends PluginSettingTab {
     const currentSearchPreset = searchPresetForTemplate(currentSearchTemplate);
     let customSearchSetting: Setting | undefined;
     const searchEngineSetting = new Setting(containerEl)
-      .setName("Web search engine")
-      .setDesc("Used when Browser Core treats text as a web search rather than an address.");
+      .setName(t("Web search engine"))
+      .setDesc(t("Used when Browser Core treats text as a web search rather than an address."));
     searchEngineSetting.addDropdown((dropdown) => {
       for (const preset of SEARCH_PRESETS) dropdown.addOption(preset.id, preset.name);
-      dropdown.addOption("custom", "Custom");
+      dropdown.addOption("custom", t("Custom"));
       dropdown
         .setValue(currentSearchPreset?.id ?? "custom")
         .onChange((value) => {
@@ -61,8 +75,8 @@ export class BrowserSettingTab extends PluginSettingTab {
     });
 
     customSearchSetting = new Setting(containerEl)
-      .setName("Custom search URL")
-      .setDesc("Use {query} where the encoded search text should be inserted.")
+      .setName(t("Custom search URL"))
+      .setDesc(t("Use {query} where the encoded search text should be inserted."))
       .addText((text) =>
         text
           .setPlaceholder("https://search.example/?q={query}")
@@ -74,26 +88,26 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
     customSearchSetting.settingEl.style.display = currentSearchPreset ? "none" : "";
 
-    new Setting(containerEl).setName("Migration").setHeading();
+    new Setting(containerEl).setName(t("Migration")).setHeading();
     const surfingMigration = this.plugin.core.state.surfingMigration;
     new Setting(containerEl)
-      .setName("Migrate from Surfing")
+      .setName(t("Migrate from Surfing"))
       .setDesc(surfingMigration?.completedAt
-        ? `Completed. Original Surfing data was kept. Backup: ${surfingMigration.backupPath}`
-        : "Adopt Surfing's persistent login session, import bookmarks and compatible settings, and copy open tabs. Existing Browser Core data and Surfing source files are kept.")
+        ? t("Completed. Original Surfing data was kept. Backup: {v0}", { v0: surfingMigration.backupPath })
+        : t("Adopt Surfing's persistent login session, import bookmarks and compatible settings, and copy open tabs. Existing Browser Core data and Surfing source files are kept."))
       .addButton((button) => button
-        .setButtonText(surfingMigration?.completedAt ? "Migrated" : surfingMigration ? "Resume migration" : "Preview and migrate")
+        .setButtonText(t(surfingMigration?.completedAt ? "Migrated" : surfingMigration ? "Resume migration" : "Preview and migrate"))
         .setDisabled(Boolean(surfingMigration?.completedAt))
         .onClick(async () => {
           await this.plugin.migrateFromSurfing();
           this.display();
         }));
 
-    new Setting(containerEl).setName("Home").setHeading();
+    new Setting(containerEl).setName(t("Home")).setHeading();
 
     new Setting(containerEl)
-      .setName("Replace new empty tabs with Home")
-      .setDesc("A newly created empty Obsidian tab becomes the Browser Core Home surface.")
+      .setName(t("Replace new empty tabs with Home"))
+      .setDesc(t("A newly created empty Obsidian tab becomes the Browser Core Home surface."))
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.core.settings().replaceEmptyTabsWithHome)
@@ -104,12 +118,12 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Default Home search")
-      .setDesc("Vault searches files in this vault. Web searches the web or opens an address.")
+      .setName(t("Default Home search"))
+      .setDesc(t("Vault searches files in this vault. Web searches the web or opens an address."))
       .addDropdown((dropdown) =>
         dropdown
-          .addOption("vault", "Vault files")
-          .addOption("web", "Web")
+          .addOption("vault", t("Vault files"))
+          .addOption("web", t("Web"))
           .setValue(this.plugin.core.settings().homeSearchMode)
           .onChange((value) => {
             if (value === "vault" || value === "web") {
@@ -120,8 +134,8 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Show bookmarked Vault files on Home")
-      .setDesc("Reads file bookmarks from Obsidian's built-in Bookmarks plugin without mixing them with web bookmarks.")
+      .setName(t("Show bookmarked Vault files on Home"))
+      .setDesc(t("Reads file bookmarks from Obsidian's built-in Bookmarks plugin without mixing them with web bookmarks."))
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.core.settings().showVaultBookmarksOnHome)
@@ -132,8 +146,8 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Show recent Vault files on Home")
-      .setDesc("Uses Obsidian's recent-file list; Browser Core does not maintain a duplicate recent-file database.")
+      .setName(t("Show recent Vault files on Home"))
+      .setDesc(t("Uses Obsidian's recent-file list; Browser Core does not maintain a duplicate recent-file database."))
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.core.settings().showRecentVaultFilesOnHome)
@@ -144,13 +158,13 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Browser startup")
-      .setDesc("Choose what happens when Obsidian starts and no browser tabs are already open.")
+      .setName(t("Browser startup"))
+      .setDesc(t("Choose what happens when Obsidian starts and no browser tabs are already open."))
       .addDropdown((dropdown) =>
         dropdown
-          .addOption("restore", "Restore previous browser session")
-          .addOption("home", "Open Home")
-          .addOption("none", "Do nothing")
+          .addOption("restore", t("Restore previous browser session"))
+          .addOption("home", t("Open Home"))
+          .addOption("none", t("Do nothing"))
           .setValue(this.plugin.core.settings().startupBehavior)
           .onChange((value) => {
             if (value === "restore" || value === "home" || value === "none") {
@@ -159,11 +173,11 @@ export class BrowserSettingTab extends PluginSettingTab {
           }),
       );
 
-    new Setting(containerEl).setName("History & recovery").setHeading();
+    new Setting(containerEl).setName(t("History & recovery")).setHeading();
 
     new Setting(containerEl)
-      .setName("History day starts at")
-      .setDesc("History day boundaries default to 04:00 so late-night work stays together.")
+      .setName(t("History day starts at"))
+      .setDesc(t("History day boundaries default to 04:00 so late-night work stays together."))
       .addText((text) => {
         text.inputEl.type = "time";
         text.setValue(formatDayStart(this.plugin.core.settings().historyDayStartMinutes));
@@ -174,8 +188,8 @@ export class BrowserSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("History retention (days)")
-      .setDesc("0 keeps browsing history until you delete it. Protected tab histories are not removed automatically.")
+      .setName(t("History retention (days)"))
+      .setDesc(t("0 keeps browsing history until you delete it. Protected tab histories are not removed automatically."))
       .addText((text) =>
         text
           .setValue(String(this.plugin.core.settings().historyRetentionDays))
@@ -186,12 +200,12 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
 
     const advancedStorage = containerEl.createEl("details", { cls: "ubc-settings-advanced" });
-    advancedStorage.createEl("summary", { text: "Advanced history and recovery storage" });
+    advancedStorage.createEl("summary", { text: t("Advanced history and recovery storage") });
     const advancedStorageEl = advancedStorage.createDiv({ cls: "ubc-settings-advanced-content" });
 
     new Setting(advancedStorageEl)
-      .setName("Automatic history size limit")
-      .setDesc("0 disables size-based cleanup. A positive value allows the oldest closed, unprotected tab histories to be removed when stored history grows past this limit.")
+      .setName(t("Automatic history size limit"))
+      .setDesc(t("0 disables size-based cleanup. A positive value allows the oldest closed, unprotected tab histories to be removed when stored history grows past this limit."))
       .addText((text) =>
         text
           .setValue(String(this.plugin.core.settings().historyMaxNodes))
@@ -204,8 +218,8 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Detailed tab recovery retention (days)")
-      .setDesc("How long Browser Core should keep extra state that can restore recently closed tabs more accurately.")
+      .setName(t("Detailed tab recovery retention (days)"))
+      .setDesc(t("How long Browser Core should keep extra state that can restore recently closed tabs more accurately."))
       .addText((text) =>
         text
           .setValue(String(this.plugin.core.settings().restoreRetentionDays))
@@ -216,8 +230,8 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
 
     new Setting(advancedStorageEl)
-      .setName("Detailed recovery storage limit (MB)")
-      .setDesc("When this budget is exceeded, older unprotected recovery data may fall back to URL-only reopening.")
+      .setName(t("Detailed recovery storage limit (MB)"))
+      .setDesc(t("When this budget is exceeded, older unprotected recovery data may fall back to URL-only reopening."))
       .addText((text) =>
         text
           .setValue(String(this.plugin.core.settings().restoreStorageLimitMb))
@@ -228,8 +242,8 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Form recovery")
-      .setDesc("Allow form recovery as a feature. Capture remains opt-in per site, and password/payment credentials are excluded.")
+      .setName(t("Form recovery"))
+      .setDesc(t("Allow form recovery as a feature. Capture remains opt-in per site, and password/payment credentials are excluded."))
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.core.settings().formRecoveryEnabled)
@@ -240,8 +254,8 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Form recovery retention (days)")
-      .setDesc("How long saved non-credential form values are retained.")
+      .setName(t("Form recovery retention (days)"))
+      .setDesc(t("How long saved non-credential form values are retained."))
       .addText((text) =>
         text
           .setValue(String(this.plugin.core.settings().formRecoveryRetentionDays))
@@ -252,8 +266,8 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
 
     new Setting(advancedStorageEl)
-      .setName("Saved form versions per page")
-      .setDesc("How many recent recovery versions to keep for one page. Multi-step forms can use values from several versions.")
+      .setName(t("Saved form versions per page"))
+      .setDesc(t("How many recent recovery versions to keep for one page. Multi-step forms can use values from several versions."))
       .addText((text) =>
         text
           .setValue(String(this.plugin.core.settings().formRecoveryMaxSnapshotsPerUrl))
@@ -264,8 +278,8 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
 
     new Setting(advancedStorageEl)
-      .setName("Pages with saved form recovery")
-      .setDesc("Maximum number of distinct pages that may keep form recovery data.")
+      .setName(t("Pages with saved form recovery"))
+      .setDesc(t("Maximum number of distinct pages that may keep form recovery data."))
       .addText((text) =>
         text
           .setValue(String(this.plugin.core.settings().formRecoveryMaxUrls))
@@ -277,13 +291,13 @@ export class BrowserSettingTab extends PluginSettingTab {
       .addExtraButton((button) =>
         button
           .setIcon("trash")
-          .setTooltip("Clear all saved form recovery data")
+          .setTooltip(t("Clear all saved form recovery data"))
           .onClick(async () => {
             const confirmed = await confirmAction(
               this.app,
-              "Clear form recovery data",
-              "Delete all saved Browser Core form recovery data? Sites that opted in will stay enabled.",
-              "Clear form data",
+              t("Clear form recovery data"),
+              t("Delete all saved Browser Core form recovery data? Sites that opted in will stay enabled."),
+              t("Clear form data"),
             );
             if (!confirmed) return;
             this.plugin.clearFormRecoveryData();
@@ -292,25 +306,25 @@ export class BrowserSettingTab extends PluginSettingTab {
 
     const recoveryPolicies = this.plugin.core.formRecovery.policies();
     if (recoveryPolicies.length) {
-      new Setting(containerEl).setName("Form recovery by site").setHeading();
+      new Setting(containerEl).setName(t("Form recovery by site")).setHeading();
       for (const policy of recoveryPolicies) {
         new Setting(containerEl)
           .setName(`${this.plugin.core.containers.nameFor(policy.containerId)} · ${policy.origin}`)
           .setDesc(
             policy.disabled
-              ? "Disabled for this site"
-              : `${policy.excludedFieldKeys.length} excluded field(s)`,
+              ? t("Disabled for this site")
+              : t("{v0} excluded field(s)", { v0: policy.excludedFieldKeys.length }),
           )
           .addExtraButton((button) =>
             button
               .setIcon("rotate-ccw")
-              .setTooltip("Reset form recovery for this site")
+              .setTooltip(t("Reset form recovery for this site"))
               .onClick(async () => {
                 const confirmed = await confirmAction(
                   this.app,
-                  "Reset form recovery for site",
-                  `Reset form recovery for ${policy.origin}? This also deletes saved form recovery data for this site.`,
-                  "Reset site",
+                  t("Reset form recovery for site"),
+                  t("Reset form recovery for {v0}? This also deletes saved form recovery data for this site.", { v0: policy.origin }),
+                  t("Reset site"),
                 );
                 if (!confirmed) return;
                 this.plugin.core.formRecovery.resetPolicy(policy.containerId, policy.origin);
@@ -321,21 +335,21 @@ export class BrowserSettingTab extends PluginSettingTab {
       }
     }
 
-    new Setting(containerEl).setName("Browsing data").setHeading();
+    new Setting(containerEl).setName(t("Browsing data")).setHeading();
 
     new Setting(containerEl)
-      .setName("Clear browsing history")
-      .setDesc("Deletes browsing history and detailed recovery data for closed tabs. Open tabs stay open.")
+      .setName(t("Clear browsing history"))
+      .setDesc(t("Deletes browsing history and detailed recovery data for closed tabs. Open tabs stay open."))
       .addButton((button) =>
         button
-          .setButtonText("Clear history")
+          .setButtonText(t("Clear history"))
           .setWarning()
           .onClick(async () => {
             const confirmed = await confirmAction(
               this.app,
-              "Clear browser history",
-              "Delete browsing history and detailed closed-tab recovery data? Open tabs, bookmarks, containers, cookies and form recovery remain.",
-              "Clear history",
+              t("Clear browser history"),
+              t("Delete browsing history and detailed closed-tab recovery data? Open tabs, bookmarks, containers, cookies and form recovery remain."),
+              t("Clear history"),
             );
             if (!confirmed) return;
             this.plugin.clearBrowserHistory();
@@ -344,18 +358,18 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Clear detailed tab recovery")
-      .setDesc("Keeps browsing history, but removes extra state used to restore recently closed tabs more accurately. Open tabs start collecting detailed recovery again after they are reopened.")
+      .setName(t("Clear detailed tab recovery"))
+      .setDesc(t("Keeps browsing history, but removes extra state used to restore recently closed tabs more accurately. Open tabs start collecting detailed recovery again after they are reopened."))
       .addButton((button) =>
         button
-          .setButtonText("Clear recovery data")
+          .setButtonText(t("Clear recovery data"))
           .setWarning()
           .onClick(async () => {
             const confirmed = await confirmAction(
               this.app,
-              "Clear detailed tab recovery",
-              "Old tabs will still reopen from durable URLs, but high-fidelity closed-tab restoration will be lost.",
-              "Clear recovery data",
+              t("Clear detailed tab recovery"),
+              t("Old tabs will still reopen from durable URLs, but high-fidelity closed-tab restoration will be lost."),
+              t("Clear recovery data"),
             );
             if (!confirmed) return;
             this.plugin.clearRichRestoreData();
@@ -363,18 +377,18 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Clear form recovery data")
-      .setDesc("Deletes all saved non-credential form values without changing which sites have form recovery enabled.")
+      .setName(t("Clear form recovery data"))
+      .setDesc(t("Deletes all saved non-credential form values without changing which sites have form recovery enabled."))
       .addButton((button) =>
         button
-          .setButtonText("Clear form data")
+          .setButtonText(t("Clear form data"))
           .setWarning()
           .onClick(async () => {
             const confirmed = await confirmAction(
               this.app,
-              "Clear form recovery data",
-              "Delete all saved Browser Core form recovery data?",
-              "Clear form data",
+              t("Clear form recovery data"),
+              t("Delete all saved Browser Core form recovery data?"),
+              t("Clear form data"),
             );
             if (!confirmed) return;
             this.plugin.clearFormRecoveryData();
@@ -382,18 +396,18 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Reset site permissions")
-      .setDesc("Returns saved site permissions to Ask next time. Container cookies and site storage are not changed.")
+      .setName(t("Reset site permissions"))
+      .setDesc(t("Returns saved site permissions to Ask next time. Container cookies and site storage are not changed."))
       .addButton((button) =>
         button
-          .setButtonText("Reset permissions")
+          .setButtonText(t("Reset permissions"))
           .setWarning()
           .onClick(async () => {
             const confirmed = await confirmAction(
               this.app,
-              "Reset site permissions",
-              "Reset all saved site permissions to Ask next time?",
-              "Reset permissions",
+              t("Reset site permissions"),
+              t("Reset all saved site permissions to Ask next time?"),
+              t("Reset permissions"),
             );
             if (!confirmed) return;
             this.plugin.clearPermissionDecisions();
@@ -401,11 +415,17 @@ export class BrowserSettingTab extends PluginSettingTab {
           }),
       );
 
-    new Setting(containerEl).setName("Appearance").setHeading();
+    new Setting(containerEl).setName(t("Appearance")).setHeading();
 
     new Setting(containerEl)
-      .setName("Full-page loading shield")
-      .setDesc("Cover the web page while a new page starts loading. Off by default to avoid a full-page flash.")
+      .setName(t("Initial background color override"))
+      .setDesc(t("Use the Obsidian theme background before a page is painted. Turn off to use the browser's own background."))
+      .addToggle((toggle) => toggle.setValue(this.plugin.core.settings().initialBackgroundOverride)
+        .onChange((value) => { this.plugin.core.updateSettings({ initialBackgroundOverride: value }); this.plugin.refreshBrowserViews(); }));
+
+    new Setting(containerEl)
+      .setName(t("Full-page loading shield"))
+      .setDesc(t("Cover the web page while a new page starts loading. Off by default to avoid a full-page flash."))
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.core.settings().fullPageLoadingShield)
@@ -416,8 +436,8 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Reduced motion")
-      .setDesc("Avoid large transitions, slides and parallax in Browser Core UI.")
+      .setName(t("Reduced motion"))
+      .setDesc(t("Avoid large transitions, slides and parallax in Browser Core UI."))
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.core.settings().reducedMotion)
@@ -428,8 +448,8 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Default web content zoom")
-      .setDesc("Used by sites without a site-specific zoom override.")
+      .setName(t("Default web content zoom"))
+      .setDesc(t("Used by sites without a site-specific zoom override."))
       .addSlider((slider) =>
         slider
           .setLimits(50, 200, 10)
@@ -442,8 +462,8 @@ export class BrowserSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Favorites bar")
-      .setDesc("Show only bookmarks marked as favorites beneath the browser toolbar.")
+      .setName(t("Show bookmark bar"))
+      .setDesc(t("Your everyday pages, one click away."))
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.core.settings().showFavoritesBar)
@@ -453,15 +473,25 @@ export class BrowserSettingTab extends PluginSettingTab {
           }),
       );
 
-    new Setting(containerEl).setName("Containers").setHeading();
     new Setting(containerEl)
-      .setName("Container use")
-      .setDesc("Off uses only the selected default container. Manual keeps other containers available without automatic site routing. Automatic also applies site default rules.")
+      .setName(t("Bookmark bar display"))
+      .setDesc(t("Choose every bookmark and folder, or just the members you select."))
+      .addDropdown((dropdown) => dropdown
+        .addOption("all", t("Bookmark bar"))
+        .addOption("selected", t("Selected members"))
+        .setValue(this.plugin.core.settings().bookmarkBarMode)
+        .onChange((value) => { this.plugin.core.updateSettings({ bookmarkBarMode: value as "all" | "selected" }); this.plugin.refreshBrowserViews(); }))
+      .addButton((button) => button.setButtonText(t("Choose members")).onClick(() => void this.plugin.openBrowser({ url: "browser://bookmarks", state: { bookmarkLayout: "selected" } })));
+
+    new Setting(containerEl).setName(t("Containers")).setHeading();
+    new Setting(containerEl)
+      .setName(t("Container use"))
+      .setDesc(t("Off uses only the selected default container. Manual keeps other containers available without automatic site routing. Automatic also applies site default rules."))
       .addDropdown((dropdown) =>
         dropdown
-          .addOption("off", "Off")
-          .addOption("manual", "Manual")
-          .addOption("automatic", "Automatic")
+          .addOption("off", t("Off"))
+          .addOption("manual", t("Manual"))
+          .addOption("automatic", t("Automatic"))
           .setValue(this.plugin.core.settings().containerMode)
           .onChange((value) => {
             this.plugin.core.updateSettings({ containerMode: value as "off" | "manual" | "automatic" });
@@ -470,8 +500,8 @@ export class BrowserSettingTab extends PluginSettingTab {
           }),
       );
     new Setting(containerEl)
-      .setName("Default container")
-      .setDesc("Used for new browser tabs, including when container controls are off. Automatic mode may replace it with a site's default container.")
+      .setName(t("Default container"))
+      .setDesc(t("Used for new browser tabs, including when container controls are off. Automatic mode may replace it with a site's default container."))
       .addDropdown((dropdown) => {
         for (const container of this.plugin.core.containers.list()) {
           dropdown.addOption(container.id, container.name);
@@ -483,10 +513,10 @@ export class BrowserSettingTab extends PluginSettingTab {
     for (const container of this.plugin.core.containers.list()) {
       const row = new Setting(containerEl)
         .setName(container.name)
-        .setDesc("Separate persistent login and site data")
+        .setDesc(t("Separate persistent login and site data"))
         .addText((text) =>
           text
-            .setPlaceholder("Container name")
+            .setPlaceholder(t("Container name"))
             .setValue(container.name)
             .onChange((value) => {
               const next = value.trim();
@@ -498,14 +528,14 @@ export class BrowserSettingTab extends PluginSettingTab {
         )
         .addDropdown((dropdown) =>
           dropdown
-            .addOption("box", "Box")
-            .addOption("user-round", "Personal")
-            .addOption("briefcase", "Work")
-            .addOption("search", "Search")
-            .addOption("graduation-cap", "Study")
-            .addOption("building-2", "Organization")
-            .addOption("shield", "Protected")
-            .addOption("heart", "Favorite")
+            .addOption("box", t("Box"))
+            .addOption("user-round", t("Personal"))
+            .addOption("briefcase", t("Work"))
+            .addOption("search", t("Search"))
+            .addOption("graduation-cap", t("Study"))
+            .addOption("building-2", t("Organization"))
+            .addOption("shield", t("Protected"))
+            .addOption("heart", t("Favorite"))
             .setValue(container.icon || "box")
             .onChange((value) => {
               container.icon = value;
@@ -523,13 +553,13 @@ export class BrowserSettingTab extends PluginSettingTab {
             }),
         )
         .addExtraButton((button) => {
-          button.setIcon("eraser").setTooltip("Clear browsing data and saved permissions");
+          button.setIcon("eraser").setTooltip(t("Clear browsing data and saved permissions"));
           button.onClick(async () => {
             const confirmed = await confirmAction(
               this.app,
               "Clear " + container.name + " browsing data",
-              "Clear this container's cookies, site storage, cache, sign-in cache, and saved site permissions? Open pages may need to be reloaded.",
-              "Clear browsing data",
+              t("Clear this container's cookies, site storage, cache, sign-in cache, and saved site permissions? Open pages may need to be reloaded."),
+              t("Clear browsing data"),
             );
             if (!confirmed) return;
             const cleared = await this.plugin.clearContainerSession(container.id);
@@ -538,14 +568,14 @@ export class BrowserSettingTab extends PluginSettingTab {
           });
         })
         .addExtraButton((button) => {
-          button.setIcon("trash").setTooltip("Delete container");
+          button.setIcon("trash").setTooltip(t("Delete container"));
           button.setDisabled(container.id === "default");
           button.onClick(async () => {
             const confirmed = await confirmAction(
               this.app,
-              "Delete container",
-              `Delete “${container.name}”? Its cookies, site storage, cache, saved permissions, form recovery data, and site default rules will be cleared. Browsing history will remain.`,
-              "Delete container",
+              t("Delete container"),
+              t("Delete “{v0}”? Its cookies, site storage, cache, saved permissions, form recovery data, and site default rules will be cleared. Browsing history will remain.", { v0: container.name }),
+              t("Delete container"),
             );
             if (!confirmed) return;
             if (await this.plugin.deleteContainer(container.id)) this.display();
@@ -554,10 +584,10 @@ export class BrowserSettingTab extends PluginSettingTab {
       row.settingEl.dataset.containerId = container.id;
     }
     new Setting(containerEl)
-      .setName("Add container")
-      .setDesc("Creates a separate persistent login and site data.")
+      .setName(t("Add container"))
+      .setDesc(t("Creates a separate persistent login and site data."))
       .addButton((button) =>
-        button.setButtonText("Add").onClick(() => {
+        button.setButtonText(t("Add")).onClick(() => {
           this.plugin.core.containers.create("Container");
           this.plugin.core.scheduleSave();
           this.display();
@@ -567,10 +597,10 @@ export class BrowserSettingTab extends PluginSettingTab {
     const assignments = this.plugin.core.containers.assignments();
     if (assignments.length) {
       new Setting(containerEl)
-        .setName("Site default containers")
+        .setName(t("Site default containers"))
         .setDesc(this.plugin.core.settings().containerMode === "automatic"
-          ? "Applied automatically when an independent navigation opens a matching site."
-          : "Saved for later, but currently paused because automatic container routing is off.")
+          ? t("Applied automatically when an independent navigation opens a matching site.")
+          : t("Saved for later, but currently paused because automatic container routing is off."))
         .setHeading();
       for (const rule of assignments) {
         new Setting(containerEl)
@@ -579,7 +609,7 @@ export class BrowserSettingTab extends PluginSettingTab {
           .addExtraButton((button) =>
             button
               .setIcon("x")
-              .setTooltip("Forget site default container")
+              .setTooltip(t("Forget site default container"))
               .onClick(() => {
                 this.plugin.core.containers.unassignOrigin(rule.originPattern);
                 this.plugin.core.scheduleSave();
@@ -591,16 +621,16 @@ export class BrowserSettingTab extends PluginSettingTab {
 
     const permissions = this.plugin.core.permissions.list();
     if (permissions.length) {
-      new Setting(containerEl).setName("Site permissions").setHeading();
+      new Setting(containerEl).setName(t("Site permissions")).setHeading();
       for (const record of permissions) {
         new Setting(containerEl)
           .setName(permissionLabel(record.permission))
           .setDesc(`${record.origin} · ${this.plugin.core.containers.nameFor(record.containerId)} · ${permissionDecisionLabel(record.decision)}`)
           .addDropdown((dropdown) =>
             dropdown
-              .addOption("ask", "Ask next time")
-              .addOption("allow", "Allow")
-              .addOption("block", "Block")
+              .addOption("ask", t("Ask next time"))
+              .addOption("allow", t("Allow"))
+              .addOption("block", t("Block"))
               .setValue(record.decision)
               .onChange((value) => {
                 if (value === "ask") {

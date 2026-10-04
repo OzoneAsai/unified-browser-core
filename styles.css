@@ -441,6 +441,86 @@
   visibility: hidden;
 }
 
+.ubc-native-background .ubc-content,
+.ubc-native-background .ubc-web-layer,
+.ubc-native-background .ubc-webview {
+  background: transparent;
+}
+
+.ubc-bookmarks { max-width: 1200px; margin: 0 auto; }
+.ubc-bookmark-hero { display: flex; align-items: center; gap: 20px; margin-bottom: 18px; }
+.ubc-bookmark-hero h1 { margin: 0 0 6px; }
+.ubc-bookmark-hero p { margin: 0; color: var(--text-muted); line-height: 1.6; }
+.ubc-bookmark-hero-icon, .ubc-bookmark-empty-icon {
+  display: grid; place-items: center; flex-shrink: 0; width: 72px; height: 72px;
+  color: var(--interactive-accent); background: color-mix(in srgb, var(--interactive-accent) 12%, transparent); border-radius: 22px;
+}
+.ubc-bookmark-hero-icon svg, .ubc-bookmark-empty-icon svg { width: 34px; height: 34px; }
+.ubc-bookmark-stats { display: flex; gap: 10px; flex-wrap: wrap; margin: 20px 0; color: var(--text-muted); font-size: var(--font-ui-small); }
+.ubc-bookmark-stats span { padding: 5px 12px; border-radius: 20px; background: var(--background-secondary); }
+.ubc-bookmark-controls { flex-wrap: wrap; gap: 12px; }
+.ubc-bookmark-search { min-width: min(100%, 220px); min-height: 38px; }
+.ubc-bookmark-segments { display: flex; padding: 4px; gap: 3px; background: var(--background-secondary); border-radius: 12px; flex-wrap: wrap; }
+.ubc-bookmark-segments button, .ubc-bookmark-category-chip {
+  display: inline-flex; align-items: center; gap: 7px; box-shadow: none; border: 0; background: transparent; padding: 8px 12px; border-radius: 8px;
+}
+.ubc-bookmark-segments button.is-active { background: var(--background-primary); color: var(--interactive-accent); box-shadow: 0 1px 4px #0002; }
+.ubc-bookmark-segments svg, .ubc-bookmark-category-chip svg, .ubc-bookmark-type-badge svg { width: 15px; height: 15px; }
+.ubc-bookmark-category-index { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0 24px; }
+.ubc-bookmark-category-chip { background: var(--background-secondary); }
+.ubc-bookmark-category { margin: 26px 0; scroll-margin-top: 24px; }
+.ubc-bookmark-category-heading { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.ubc-bookmark-category-heading h2 { margin: 0; font-size: 1.1em; }
+.ubc-bookmark-category-heading > span:first-child { color: var(--interactive-accent); display: inline-flex; }
+.ubc-bookmark-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr)); gap: 14px; }
+.ubc-bookmark-card {
+  display: flex; flex-direction: column; min-width: 0; padding: 18px; border-radius: 16px;
+  border: 1px solid var(--background-modifier-border); background: var(--background-primary);
+  transition: border-color 120ms, box-shadow 120ms; overflow: hidden;
+}
+.ubc-bookmark-card:hover { border-color: var(--interactive-accent); box-shadow: 0 4px 18px #0001; }
+.ubc-bookmark-card.is-selected { border-color: color-mix(in srgb, var(--interactive-accent) 48%, var(--background-modifier-border)); }
+.ubc-bookmark-card-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.ubc-bookmark-card-visual { width: 42px; height: 42px; border-radius: 12px; display: grid; place-items: center; background: var(--background-secondary); overflow: hidden; }
+.ubc-bookmark-card-visual svg { width: 24px; height: 24px; }
+.ubc-bookmark-card-visual img { max-width: 28px; max-height: 28px; object-fit: contain; }
+.ubc-browser-view button.ubc-bookmark-card-title {
+  display: block; text-align: left; font-weight: 600; font-size: 1em; line-height: 1.5; white-space: normal;
+  height: auto; padding: 0; background: transparent; box-shadow: none; border: 0; margin-bottom: 5px;
+  overflow-wrap: anywhere; color: var(--text-normal);
+}
+.ubc-bookmark-card-title:hover { color: var(--interactive-accent) !important; }
+.ubc-bookmark-card-description { color: var(--text-muted); font-size: var(--font-ui-small); line-height: 1.6; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.ubc-bookmark-card-footer { display: flex; align-items: center; gap: 6px; padding-top: 16px; margin-top: auto; }
+.ubc-bookmark-type-badge { display: inline-flex; align-items: center; gap: 6px; font-size: var(--font-ui-smaller); color: var(--text-muted); margin-right: auto; }
+.ubc-bookmark-card-path { padding-top: 10px; font-size: var(--font-ui-smaller); color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ubc-bookmark-empty { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 48px 24px; }
+.ubc-bookmark-empty p { max-width: 420px; line-height: 1.7; }
+.ubc-bookmark-favorite-toggle.is-active svg, .ubc-toolbar-button.is-active svg { fill: color-mix(in srgb, currentColor 20%, transparent); }
+.ubc-bookmark-popover {
+  position: fixed; z-index: var(--layer-popover, 100); width: min(380px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow-y: auto;
+  padding: 22px; border: 1px solid var(--background-modifier-border); border-radius: 18px;
+  background: var(--background-primary); color: var(--text-normal); box-shadow: 0 12px 48px #0003;
+}
+.ubc-bookmark-popover-heading { display: flex; gap: 12px; align-items: center; margin-bottom: 20px; }
+.ubc-bookmark-popover-heading > div:last-child { min-width: 0; flex: 1; }
+.ubc-bookmark-popover-heading .ubc-bookmark-meta { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; margin-top: 4px; }
+.ubc-bookmark-popover .ubc-prompt-field { margin: 12px 0; }
+.ubc-bookmark-popover input:not([type=checkbox]), .ubc-bookmark-popover select,
+.ubc-bookmark-editor-modal select { width: 100%; min-height: 38px; border-radius: 9px; }
+.ubc-bookmark-folder-select { display: flex; gap: 8px; }
+.ubc-bookmark-folder-select select { min-width: 0; flex: 1; }
+.ubc-selected-check { display: flex; align-items: center; gap: 12px; background: var(--background-secondary); padding: 14px; border-radius: 12px; margin: 18px 0; cursor: pointer; }
+.ubc-selected-check input { flex-shrink: 0; }
+.ubc-selected-check .ubc-bookmark-meta { margin-top: 5px; }
+.ubc-bookmark-details summary { color: var(--text-muted); cursor: pointer; padding: 6px 0; }
+.ubc-bookmark-details input { margin-top: 10px; }
+.ubc-bookmark-popover .ubc-modal-actions { margin-top: 20px; justify-content: space-between; }
+.ubc-bookmark-remove { color: var(--text-error); }
+.ubc-bookmark-editor-modal { border-radius: 18px; }
+.ubc-bar-library { border-right: 1px solid var(--background-modifier-border); border-radius: 0; padding-right: 12px; }
+.ubc-reduced-motion .ubc-bookmark-card { transition: none; }
+
 .ubc-browser-view.is-loading .ubc-content::before {
   content: "";
   position: absolute;

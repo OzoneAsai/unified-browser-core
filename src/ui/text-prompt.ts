@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { Modal, type App } from "obsidian";
 
 export function promptText(
@@ -38,8 +39,8 @@ class TextPromptModal extends Modal {
     input.value = this.initialValue;
     input.addClass("ubc-prompt-input");
     const actions = this.contentEl.createDiv({ cls: "ubc-modal-actions" });
-    actions.createEl("button", { text: "Cancel" }).addEventListener("click", () => this.finish(undefined));
-    const save = actions.createEl("button", { text: "Save" });
+    actions.createEl("button", { text: t("Cancel") }).addEventListener("click", () => this.finish(undefined));
+    const save = actions.createEl("button", { text: t("Save") });
     const submit = () => {
       const value = input.value.trim();
       if (!value) return;

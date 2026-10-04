@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { Modal, type App } from "obsidian";
 
 export function confirmAction(app: App, title: string, message: string, confirmLabel = "Delete"): Promise<boolean> {
@@ -21,7 +22,7 @@ class ConfirmActionModal extends Modal {
     this.contentEl.createEl("h2", { text: this.titleText });
     this.contentEl.createEl("p", { text: this.message });
     const actions = this.contentEl.createDiv({ cls: "ubc-confirm-actions" });
-    const cancel = actions.createEl("button", { text: "Cancel" });
+    const cancel = actions.createEl("button", { text: t("Cancel") });
     cancel.addEventListener("click", () => this.finish(false));
     const confirm = actions.createEl("button", { cls: "mod-warning", text: this.confirmLabel });
     confirm.addEventListener("click", () => this.finish(true));

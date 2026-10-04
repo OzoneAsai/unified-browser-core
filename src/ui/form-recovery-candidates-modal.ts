@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { Modal, type App } from "obsidian";
 import type { FormRecoveryField } from "../core/model";
 
@@ -19,9 +20,9 @@ class FormRecoveryCandidatesModal extends Modal {
   }
 
   onOpen(): void {
-    this.contentEl.createEl("h2", { text: "Saved form values" });
+    this.contentEl.createEl("h2", { text: t("Saved form values") });
     this.contentEl.createEl("p", {
-      text: "These values were saved for this page. Browser Core restores only fields it can match confidently; ambiguous fields remain unchanged.",
+      text: t("These values were saved for this page. Browser Core restores only fields it can match confidently; ambiguous fields remain unchanged."),
     });
 
     const list = this.contentEl.createDiv({ cls: "ubc-recovery-candidate-list" });
@@ -36,9 +37,9 @@ class FormRecoveryCandidatesModal extends Modal {
     }
 
     const actions = this.contentEl.createDiv({ cls: "ubc-recovery-candidate-actions" });
-    const close = actions.createEl("button", { text: "Close" });
+    const close = actions.createEl("button", { text: t("Close") });
     close.addEventListener("click", () => this.close());
-    const restore = actions.createEl("button", { text: "Restore matching fields", cls: "mod-cta" });
+    const restore = actions.createEl("button", { text: t("Restore matching fields"), cls: "mod-cta" });
     restore.addEventListener("click", () => {
       this.close();
       this.restoreSafeMatches();
@@ -56,7 +57,7 @@ function fieldLabel(field: FormRecoveryField): string {
 
 function fieldTypeLabel(type: string): string {
   const labels: Record<string, string> = {
-    text: "Text field",
+    text: t("Text field"),
     textarea: "Text area",
     email: "Email",
     tel: "Phone",
