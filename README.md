@@ -145,6 +145,11 @@ Obsidian receives the original tab drag start and owns pane movement and split p
 Only UBC tab headers receive Firefox-style sizing and strip classes. If a tab group mixes UBC and ordinary Obsidian views, UBC keeps its own browser-tab decoration while the shared strip geometry and native tabs remain untouched. This also clears stale UBC layout classes from native tabs on refresh.
 
 
+### 0.2.6 popup dismissal
+
+- Browser menus, including the three-dot menu and container menu, close when the user interacts with the page or another part of the Obsidian UI.
+- Guest input observers are attached after the WebView guest becomes available, so page interactions reach the popup dismissal handler.
+
 ### 0.2.5 explicit navigation during restore
 
 Typing or choosing a URL while a saved tab is still bootstrapping cancels its pending recovery attempt and hides any stale recovery notice. A restore already awaiting Electron navigation history checks a generation token and reapplies the user's requested URL when it finishes.

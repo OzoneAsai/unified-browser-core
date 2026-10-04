@@ -48,6 +48,7 @@ import { promptText } from "./text-prompt";
 import { permissionDecisionLabel, permissionLabel } from "./permission-label";
 import { fallbackFaviconUrl, renderBookmarkVisual } from "./bookmark-visual";
 import { resolveBookmarkUrl } from "../bookmarks/bookmark-url";
+import { dismissOpenMenus, showDismissibleMenu } from "./popup-dismissal";
 
 export const BROWSER_VIEW_TYPE = "unified-browser-core-view";
 
@@ -116,6 +117,7 @@ export class BrowserView extends ItemView {
   private bookmarkLayout: "type" | "folder" | "selected" = "type";
   private bookmarkPopoverClose?: () => void;
   private recoveryInteractionDisposer?: () => void;
+  private popupInteractionDisposer?: () => void;
   private readonly navigationHistoryAdapter = new ElectronNavigationHistoryAdapter();
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: UnifiedBrowserCorePlugin) {
@@ -153,6 +155,11 @@ export class BrowserView extends ItemView {
     this.rootEl.empty();
     this.rootEl.addClass("ubc-browser-view");
     this.applyAccessibility();
+    this.registerDomEvent(this.rootEl.ownerDocument, "pointerdown", (event) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest(".menu")) return;
+      this.dismissTransientPopups();
+    }, true);
 
     this.registerEvent(this.leaf.on("pinned-change", (pinned) => {
       this.pinned = pinned;
@@ -902,7 +909,7 @@ export class BrowserView extends ItemView {
       menu.addItem((item) => item.setTitle(t("Reload")).setIcon("rotate-cw").onClick(() => this.reload()));
       menu.addItem((item) => item.setTitle(t("Hard reload")).onClick(() => this.hardReload()));
       menu.addItem((item) => item.setTitle(t("Stop loading")).onClick(() => this.stopLoading()));
-      menu.showAtMouseEvent(event);
+      showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
     });
 
     this.addressEl = this.toolbarEl.createEl("input", {
@@ -1538,6 +1545,12 @@ export class BrowserView extends ItemView {
   }
 
   private bindGuestRuntime(webview: WebviewElement, finalAttempt: boolean): void {
+    // Guest WebContents is not addressable when the <webview> element is first
+    // created. Install input observers alongside the other guest-bound
+    // adapters, after did-attach/dom-ready exposes the guest contents.
+    if (!this.popupInteractionDisposer) {
+      this.popupInteractionDisposer = observeGuestInteraction(webview, () => this.dismissTransientPopups());
+    }
     if (!this.popupDisposer) {
       this.popupDisposer = this.plugin.windowOpenAdapter.bind(webview, (url, disposition) => {
         void this.plugin.openFromOpener(url, this.containerId, disposition);
@@ -2001,6 +2014,8 @@ export class BrowserView extends ItemView {
     }
     if (!this.webview) return;
     this.webviewDomReady = false;
+    this.popupInteractionDisposer?.();
+    this.popupInteractionDisposer = undefined;
     this.popupDisposer?.();
     this.popupDisposer = undefined;
     this.contextMenuDisposer?.();
@@ -2008,6 +2023,13 @@ export class BrowserView extends ItemView {
     this.plugin.managedWebviewBackend.destroy(this.webview);
     this.webview = null;
     this.hideLoadingShield();
+  }
+
+  private dismissTransientPopups(): void {
+    const doc = this.containerEl.ownerDocument;
+    dismissOpenMenus(doc);
+    this.activeContainerMenu?.hide();
+    this.bookmarkPopoverClose?.();
   }
 
   private showLoadingShield(): void {
@@ -2066,7 +2088,7 @@ export class BrowserView extends ItemView {
       menu.addSeparator();
       menu.addItem((item) => item.setTitle(t("Show history")).setIcon("history").onClick(() => this.showInternal("history")));
       menu.addItem((item) => item.setTitle(t("Show bookmarks")).setIcon("book-open").onClick(() => this.showInternal("bookmarks")));
-      menu.showAtMouseEvent(event);
+      showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
     });
     page.createEl("h1", { text: t("Home") });
     page.createEl("p", {
@@ -2225,7 +2247,7 @@ export class BrowserView extends ItemView {
               this.showInternal("home", false);
             })();
           }));
-          menu.showAtMouseEvent(event);
+          showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
         });
       }
     }
@@ -2258,7 +2280,7 @@ export class BrowserView extends ItemView {
         menu.addItem((item) =>
           item.setTitle(t("Copy file path")).setIcon("copy").onClick(() => void navigator.clipboard.writeText(file.path)),
         );
-        menu.showAtMouseEvent(event);
+        showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
       });
     }
   }
@@ -2303,7 +2325,7 @@ export class BrowserView extends ItemView {
       const menu = new Menu();
       menu.addItem((item) => item.setTitle(t("Import Obsidian Bookmarks")).setIcon("book-open").onClick(async () => { await this.plugin.importObsidianBookmarks(); this.refreshBookmarks(); }));
       menu.addItem((item) => item.setTitle(t("Import Web viewer Bookmarks")).setIcon("bookmark-plus").onClick(async () => { await this.plugin.importWebViewerBookmarks(); this.refreshBookmarks(); }));
-      const rect = imports.getBoundingClientRect(); menu.showAtPosition({ x: rect.left, y: rect.bottom });
+      const rect = imports.getBoundingClientRect(); showDismissibleMenu(menu, () => menu.showAtPosition({ x: rect.left, y: rect.bottom }), this.containerEl.ownerDocument);
     });
     const stats = page.createDiv({ cls: "ubc-bookmark-stats" });
     stats.createSpan({ text: t("{count} bookmarks", { count: this.plugin.core.bookmarks.allBookmarks().length }) });
@@ -2745,7 +2767,7 @@ export class BrowserView extends ItemView {
         refresh();
       })();
     }));
-    menu.showAtMouseEvent(event);
+    showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
   }
 
   private showHistoryLeafMenu(leafId: string, leafNodes: HistoryNode[], event: MouseEvent, refresh: () => void): void {
@@ -2793,7 +2815,7 @@ export class BrowserView extends ItemView {
         refresh();
       })();
     }));
-    menu.showAtMouseEvent(event);
+    showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
   }
 
   private renderHistoryLeafNodes(parent: HTMLElement, nodes: HistoryNode[], filtered = false): void {
@@ -2836,7 +2858,7 @@ export class BrowserView extends ItemView {
           if (!check.ok && check.reason) {
             menu.addItem((item) => item.setTitle(check.reason || "").setDisabled(true));
           }
-          menu.showAtMouseEvent(event);
+          showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
         });
         continue;
       }
@@ -2884,7 +2906,7 @@ export class BrowserView extends ItemView {
               this.showInternal("history");
             })();
           }));
-          menu.showAtMouseEvent(event);
+          showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
         });
         continue;
       }
@@ -2991,7 +3013,7 @@ export class BrowserView extends ItemView {
             this.showInternal("history");
           })();
         }));
-        menu.showAtMouseEvent(event);
+        showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
       });
       if (this.expandedResidualParents.has(node.id)) {
         for (const residual of residuals) {
@@ -3018,7 +3040,7 @@ export class BrowserView extends ItemView {
               this.expandedResidualParents.delete(node.id);
               this.showInternal("history");
             }));
-            menu.showAtMouseEvent(event);
+            showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
           });
         }
       }
@@ -3145,7 +3167,7 @@ export class BrowserView extends ItemView {
         this.activeContainerMenu = null;
       }
     });
-    menu.showAtPosition(position);
+    showDismissibleMenu(menu, () => menu.showAtPosition(position), this.containerEl.ownerDocument);
   }
 
   private assignCurrentSiteToContainer(hostname: string, containerId: ContainerId): void {
@@ -3242,10 +3264,10 @@ export class BrowserView extends ItemView {
   }
 
   private showMenuForEvent(menu: Menu, event: MouseEvent | KeyboardEvent): void {
-    if (event instanceof MouseEvent) menu.showAtMouseEvent(event);
+    if (event instanceof MouseEvent) showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
     else {
       const rect = (this.browserHeaderEl ?? this.toolbarEl).getBoundingClientRect();
-      menu.showAtPosition({ x: rect.right, y: rect.bottom });
+      showDismissibleMenu(menu, () => menu.showAtPosition({ x: rect.right, y: rect.bottom }), this.containerEl.ownerDocument);
     }
   }
 
@@ -3319,7 +3341,7 @@ export class BrowserView extends ItemView {
           this.showInternal("history");
         }),
     );
-    menu.showAtMouseEvent(event);
+    showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
   }
 
   private addFallbackWebNavigationItems(menu: Menu, direction: -1 | 1): void {
@@ -3487,7 +3509,7 @@ export class BrowserView extends ItemView {
           this.addressEl.focus();
         }),
     );
-    menu.showAtMouseEvent(event);
+    showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
   }
 
   private replaceAddressSelection(value: string): void {

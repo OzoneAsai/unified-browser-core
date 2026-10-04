@@ -4850,6 +4850,35 @@ function buildWebContentMenuEntries(plugin, view, params) {
   return entries;
 }
 
+// src/ui/popup-dismissal.ts
+var openMenus = /* @__PURE__ */ new Map();
+var installedDocuments = /* @__PURE__ */ new WeakSet();
+function showDismissibleMenu(menu, show, doc = document) {
+  dismissOpenMenus(doc);
+  let menus = openMenus.get(doc);
+  if (!menus) {
+    menus = /* @__PURE__ */ new Set();
+    openMenus.set(doc, menus);
+  }
+  menus.add(menu);
+  menu.onHide(() => {
+    menus?.delete(menu);
+    if (menus?.size === 0) openMenus.delete(doc);
+  });
+  if (!installedDocuments.has(doc)) {
+    installedDocuments.add(doc);
+    doc.addEventListener("pointerdown", (event) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest(".menu")) return;
+      dismissOpenMenus(doc);
+    }, true);
+  }
+  show();
+}
+function dismissOpenMenus(doc = document) {
+  for (const menu of [...openMenus.get(doc) ?? []]) menu.hide();
+}
+
 // src/ui/context-menus.ts
 function showPageMenu(plugin, view, event) {
   const menu = new import_obsidian9.Menu();
@@ -4891,7 +4920,7 @@ function showPageMenu(plugin, view, event) {
       (item) => item.setTitle(t("Container\u2026")).setIcon("boxes").onClick(() => view.openContainerPicker())
     );
   }
-  menu.showAtMouseEvent(event);
+  showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), event.currentTarget instanceof HTMLElement ? event.currentTarget.ownerDocument : document);
 }
 function showWebContentMenu(plugin, view, params, position) {
   const menu = new import_obsidian9.Menu();
@@ -4907,7 +4936,7 @@ function showWebContentMenu(plugin, view, params, position) {
       item.onClick(entry.action);
     });
   }
-  menu.showAtPosition(position);
+  showDismissibleMenu(menu, () => menu.showAtPosition(position));
 }
 function showBookmarkMenu(plugin, view, bookmark, event) {
   const menu = new import_obsidian9.Menu();
@@ -4970,7 +4999,7 @@ function showBookmarkMenu(plugin, view, bookmark, event) {
       if (view.currentInternalSurface() === "bookmarks") view.showInternal("bookmarks");
     })();
   }));
-  menu.showAtMouseEvent(event);
+  showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), event.currentTarget instanceof HTMLElement ? event.currentTarget.ownerDocument : document);
 }
 function showBookmarkFolderMenu(plugin, view, folder, event) {
   const menu = new import_obsidian9.Menu();
@@ -5041,7 +5070,7 @@ function showBookmarkFolderMenu(plugin, view, folder, event) {
       view.refreshBookmarks();
     })();
   }));
-  menu.showAtMouseEvent(event);
+  showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), event.currentTarget instanceof HTMLElement ? event.currentTarget.ownerDocument : document);
 }
 function showFavoritesBarMenu(plugin, view, event) {
   const menu = new import_obsidian9.Menu();
@@ -5054,7 +5083,7 @@ function showFavoritesBarMenu(plugin, view, event) {
     plugin.core.updateSettings({ showFavoritesBar: false });
     plugin.refreshBrowserViews();
   }));
-  menu.showAtMouseEvent(event);
+  showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), event.currentTarget instanceof HTMLElement ? event.currentTarget.ownerDocument : document);
 }
 
 // src/ui/recovery-details-modal.ts
@@ -5438,6 +5467,7 @@ var BrowserView = class _BrowserView extends import_obsidian13.ItemView {
   bookmarkLayout = "type";
   bookmarkPopoverClose;
   recoveryInteractionDisposer;
+  popupInteractionDisposer;
   navigationHistoryAdapter = new ElectronNavigationHistoryAdapter();
   leafId() {
     return this.lifecycleId;
@@ -5464,6 +5494,11 @@ var BrowserView = class _BrowserView extends import_obsidian13.ItemView {
     this.rootEl.empty();
     this.rootEl.addClass("ubc-browser-view");
     this.applyAccessibility();
+    this.registerDomEvent(this.rootEl.ownerDocument, "pointerdown", (event) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest(".menu")) return;
+      this.dismissTransientPopups();
+    }, true);
     this.registerEvent(this.leaf.on("pinned-change", (pinned) => {
       this.pinned = pinned;
       this.plugin.core.history.touchLeaf(this.leafId(), { pinned });
@@ -6086,7 +6121,7 @@ var BrowserView = class _BrowserView extends import_obsidian13.ItemView {
       menu.addItem((item) => item.setTitle(t("Reload")).setIcon("rotate-cw").onClick(() => this.reload()));
       menu.addItem((item) => item.setTitle(t("Hard reload")).onClick(() => this.hardReload()));
       menu.addItem((item) => item.setTitle(t("Stop loading")).onClick(() => this.stopLoading()));
-      menu.showAtMouseEvent(event);
+      showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
     });
     this.addressEl = this.toolbarEl.createEl("input", {
       cls: "ubc-address",
@@ -6652,6 +6687,9 @@ ${item.url}` }
     else webview.src = fallbackUrl;
   }
   bindGuestRuntime(webview, finalAttempt) {
+    if (!this.popupInteractionDisposer) {
+      this.popupInteractionDisposer = observeGuestInteraction(webview, () => this.dismissTransientPopups());
+    }
     if (!this.popupDisposer) {
       this.popupDisposer = this.plugin.windowOpenAdapter.bind(webview, (url, disposition) => {
         void this.plugin.openFromOpener(url, this.containerId, disposition);
@@ -7086,6 +7124,8 @@ ${item.url}` }
     }
     if (!this.webview) return;
     this.webviewDomReady = false;
+    this.popupInteractionDisposer?.();
+    this.popupInteractionDisposer = void 0;
     this.popupDisposer?.();
     this.popupDisposer = void 0;
     this.contextMenuDisposer?.();
@@ -7093,6 +7133,12 @@ ${item.url}` }
     this.plugin.managedWebviewBackend.destroy(this.webview);
     this.webview = null;
     this.hideLoadingShield();
+  }
+  dismissTransientPopups() {
+    const doc = this.containerEl.ownerDocument;
+    dismissOpenMenus(doc);
+    this.activeContainerMenu?.hide();
+    this.bookmarkPopoverClose?.();
   }
   showLoadingShield() {
     if (!this.plugin.core.settings().fullPageLoadingShield) return;
@@ -7145,7 +7191,7 @@ ${item.url}` }
       menu.addSeparator();
       menu.addItem((item) => item.setTitle(t("Show history")).setIcon("history").onClick(() => this.showInternal("history")));
       menu.addItem((item) => item.setTitle(t("Show bookmarks")).setIcon("book-open").onClick(() => this.showInternal("bookmarks")));
-      menu.showAtMouseEvent(event);
+      showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
     });
     page.createEl("h1", { text: t("Home") });
     page.createEl("p", {
@@ -7290,7 +7336,7 @@ ${item.url}` }
               this.showInternal("home", false);
             })();
           }));
-          menu.showAtMouseEvent(event);
+          showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
         });
       }
     }
@@ -7321,7 +7367,7 @@ ${item.url}` }
         menu.addItem(
           (item) => item.setTitle(t("Copy file path")).setIcon("copy").onClick(() => void navigator.clipboard.writeText(file.path))
         );
-        menu.showAtMouseEvent(event);
+        showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
       });
     }
   }
@@ -7374,7 +7420,7 @@ ${item.url}` }
         this.refreshBookmarks();
       }));
       const rect = imports.getBoundingClientRect();
-      menu.showAtPosition({ x: rect.left, y: rect.bottom });
+      showDismissibleMenu(menu, () => menu.showAtPosition({ x: rect.left, y: rect.bottom }), this.containerEl.ownerDocument);
     });
     const stats = page.createDiv({ cls: "ubc-bookmark-stats" });
     stats.createSpan({ text: t("{count} bookmarks", { count: this.plugin.core.bookmarks.allBookmarks().length }) });
@@ -7806,7 +7852,7 @@ ${item.url}` }
         refresh();
       })();
     }));
-    menu.showAtMouseEvent(event);
+    showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
   }
   showHistoryLeafMenu(leafId, leafNodes, event, refresh) {
     const record = this.plugin.core.state.history.leaves[leafId];
@@ -7847,7 +7893,7 @@ ${item.url}` }
         refresh();
       })();
     }));
-    menu.showAtMouseEvent(event);
+    showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
   }
   renderHistoryLeafNodes(parent, nodes, filtered = false) {
     const navigationNodes = nodes.filter((node) => node.kind === "navigation");
@@ -7885,7 +7931,7 @@ ${item.url}` }
           if (!check.ok && check.reason) {
             menu.addItem((item) => item.setTitle(check.reason || "").setDisabled(true));
           }
-          menu.showAtMouseEvent(event);
+          showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
         });
         continue;
       }
@@ -7931,7 +7977,7 @@ ${item.url}` }
               this.showInternal("history");
             })();
           }));
-          menu.showAtMouseEvent(event);
+          showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
         });
         continue;
       }
@@ -8024,7 +8070,7 @@ ${item.url}` }
             this.showInternal("history");
           })();
         }));
-        menu.showAtMouseEvent(event);
+        showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
       });
       if (this.expandedResidualParents.has(node.id)) {
         for (const residual of residuals) {
@@ -8048,7 +8094,7 @@ ${item.url}` }
               this.expandedResidualParents.delete(node.id);
               this.showInternal("history");
             }));
-            menu.showAtMouseEvent(event);
+            showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
           });
         }
       }
@@ -8149,7 +8195,7 @@ ${item.url}` }
         this.activeContainerMenu = null;
       }
     });
-    menu.showAtPosition(position);
+    showDismissibleMenu(menu, () => menu.showAtPosition(position), this.containerEl.ownerDocument);
   }
   assignCurrentSiteToContainer(hostname, containerId) {
     this.plugin.core.containers.assignOrigin(hostname, containerId);
@@ -8223,10 +8269,10 @@ ${item.url}` }
     this.showMenuForEvent(menu, event);
   }
   showMenuForEvent(menu, event) {
-    if (event instanceof MouseEvent) menu.showAtMouseEvent(event);
+    if (event instanceof MouseEvent) showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
     else {
       const rect = (this.browserHeaderEl ?? this.toolbarEl).getBoundingClientRect();
-      menu.showAtPosition({ x: rect.right, y: rect.bottom });
+      showDismissibleMenu(menu, () => menu.showAtPosition({ x: rect.right, y: rect.bottom }), this.containerEl.ownerDocument);
     }
   }
   currentOrigin() {
@@ -8280,7 +8326,7 @@ ${item.url}` }
         this.showInternal("history");
       })
     );
-    menu.showAtMouseEvent(event);
+    showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
   }
   addFallbackWebNavigationItems(menu, direction) {
     const webview = this.readyWebview();
@@ -8409,7 +8455,7 @@ ${item.url}` }
         this.addressEl.focus();
       })
     );
-    menu.showAtMouseEvent(event);
+    showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
   }
   replaceAddressSelection(value) {
     const start = this.addressEl.selectionStart ?? this.addressEl.value.length;

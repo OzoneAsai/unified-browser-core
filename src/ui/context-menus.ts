@@ -9,6 +9,7 @@ import { resolveBookmarkUrl } from "../bookmarks/bookmark-url";
 import { pickBookmarkFolder } from "./folder-picker-modal";
 import { promptText } from "./text-prompt";
 import { buildWebContentMenuEntries } from "./web-content-menu-model";
+import { showDismissibleMenu } from "./popup-dismissal";
 import { confirmAction } from "./confirm-modal";
 
 export function showPageMenu(plugin: UnifiedBrowserCorePlugin, view: BrowserView, event: MouseEvent): void {
@@ -63,7 +64,7 @@ export function showPageMenu(plugin: UnifiedBrowserCorePlugin, view: BrowserView
         .onClick(() => view.openContainerPicker()),
     );
   }
-  menu.showAtMouseEvent(event);
+  showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), event.currentTarget instanceof HTMLElement ? event.currentTarget.ownerDocument : document);
 }
 
 export function showWebContentMenu(
@@ -85,7 +86,7 @@ export function showWebContentMenu(
       item.onClick(entry.action);
     });
   }
-  menu.showAtPosition(position);
+  showDismissibleMenu(menu, () => menu.showAtPosition(position));
 }
 
 export function showBookmarkMenu(
@@ -160,7 +161,7 @@ export function showBookmarkMenu(
       if (view.currentInternalSurface() === "bookmarks") view.showInternal("bookmarks");
     })();
   }));
-  menu.showAtMouseEvent(event);
+  showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), event.currentTarget instanceof HTMLElement ? event.currentTarget.ownerDocument : document);
 }
 
 export function showBookmarkFolderMenu(
@@ -249,7 +250,7 @@ export function showBookmarkFolderMenu(
       view.refreshBookmarks();
     })();
   }));
-  menu.showAtMouseEvent(event);
+  showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), event.currentTarget instanceof HTMLElement ? event.currentTarget.ownerDocument : document);
 }
 
 export function showFavoritesBarMenu(
@@ -267,5 +268,5 @@ export function showFavoritesBarMenu(
     plugin.core.updateSettings({ showFavoritesBar: false });
     plugin.refreshBrowserViews();
   }));
-  menu.showAtMouseEvent(event);
+  showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), event.currentTarget instanceof HTMLElement ? event.currentTarget.ownerDocument : document);
 }
