@@ -30,6 +30,7 @@ import type {
   BrowserSessionCheckpoint,
   ContainerId,
   NavigationNode,
+  HistoryGraphState,
   PermissionDecision,
 } from "./core/model";
 import { cloneSessionCheckpoint, pendingSessionLeaves } from "./core/session-restore";
@@ -39,7 +40,7 @@ import { BROWSER_VIEW_TYPE, BrowserView } from "./ui/browser-view";
 import { promptPermission } from "./ui/permission-prompt";
 import { confirmAction } from "./ui/confirm-modal";
 import { TabSearchModal } from "./ui/tab-search-modal";
-import { HybridBrowserPersistence } from "./persistence/hybrid-persistence";
+import { HybridBrowserPersistence, type HistoryVersionSummary } from "./persistence/hybrid-persistence";
 import type { WebviewElement } from "./ui/webview-types";
 
 export interface BrowserOpenRequest {
@@ -127,6 +128,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     );
     const raw = await this.persistence.load();
     const state = BrowserCore.normalize(raw);
+    await this.persistence.captureHistoryVersion(state.history);
     setLocaleResolver(getLanguage);
     setLanguage(state.settings.language);
     this.core = new BrowserCore(
@@ -501,6 +503,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
 
   async onunload(): Promise<void> {
     this.prepareForShutdown();
+    await this.persistence.captureHistoryVersion(this.core.state.history);
     const liveBrowserLeaves = this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE);
     for (const leaf of liveBrowserLeaves) {
       if (!(leaf.view instanceof BrowserView)) continue;
@@ -615,6 +618,56 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       },
     });
     leaf.setPinned(pinned);
+  }
+
+  listSavedHistoryVersions(): Promise<HistoryVersionSummary[]> {
+    return this.persistence.listHistoryVersions();
+  }
+
+  loadSavedHistoryVersion(id: string): Promise<HistoryGraphState | null> {
+    return this.persistence.loadHistoryVersion(id);
+  }
+
+  async restoreSavedHistoryNode(
+    versionId: string,
+    nodeId: string,
+    options: { containerId?: ContainerId; pinned?: boolean } = {},
+  ): Promise<boolean> {
+    const history = await this.persistence.loadHistoryVersion(versionId);
+    const node = history?.nodes[nodeId];
+    if (!node || node.kind !== "navigation") return false;
+    await this.restoreHistoryNode(node, options);
+    return true;
+  }
+
+  async restoreSavedHistoryLeaf(
+    versionId: string,
+    leafId: string,
+    options: { containerId?: ContainerId; pinned?: boolean } = {},
+  ): Promise<boolean> {
+    const history = await this.persistence.loadHistoryVersion(versionId);
+    if (!history) return false;
+    const record = history.leaves[leafId];
+    const currentId = history.currentByLeaf[leafId];
+    const current = currentId ? history.nodes[currentId] : undefined;
+    const latest = Object.values(history.nodes)
+      .filter((node): node is NavigationNode => node.kind === "navigation" && node.leafId === leafId)
+      .sort((a, b) => b.timestamp - a.timestamp)[0];
+    const node = current?.kind === "navigation" ? current : latest;
+    const url = node?.url ?? record?.lastUrl;
+    if (!url) return false;
+    const pinned = options.pinned ?? record?.pinned ?? false;
+    const leaf = await this.openBrowser({
+      url,
+      containerId: options.containerId ?? node?.containerId ?? record?.containerId,
+      state: {
+        pinned,
+        restoreTargetUrl: node?.url,
+        restoreTargetIndex: node?.sessionEntryIndex,
+      },
+    });
+    leaf.setPinned(pinned);
+    return true;
   }
 
   async requestPermission(origin: string, permission: string): Promise<PermissionDecision> {
