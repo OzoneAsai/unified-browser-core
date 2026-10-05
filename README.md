@@ -145,6 +145,12 @@ Obsidian receives the original tab drag start and owns pane movement and split p
 Only UBC tab headers receive Firefox-style sizing and strip classes. If a tab group mixes UBC and ordinary Obsidian views, UBC keeps its own browser-tab decoration while the shared strip geometry and native tabs remain untouched. This also clears stale UBC layout classes from native tabs on refresh.
 
 
+### 0.2.10 shutdown history safety
+
+- Disabling or unloading the plugin no longer makes the live browsing session eligible for history retention deletion.
+- Hybrid persistence writes are serialized so an older save cannot overwrite the lightweight revision and prune a newer IndexedDB history generation.
+- If an older build already left the lightweight revision out of sync with IndexedDB, UBC now recovers the newest surviving heavy-state generation instead of silently normalizing history to empty.
+
 ### 0.2.9 browser ownership
 
 - Ordinary new-window requests remain under Browser Core ownership even when sites attach non-presentation window features such as `external`.

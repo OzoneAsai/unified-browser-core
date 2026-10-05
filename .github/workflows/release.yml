@@ -65,6 +65,14 @@ jobs:
           }
           NODE
 
+      - name: Typecheck plugin
+        if: steps.release.outputs.should_release == 'true'
+        run: npm run typecheck
+
+      - name: Run smoke tests
+        if: steps.release.outputs.should_release == 'true'
+        run: npm test
+
       - name: Build plugin
         if: steps.release.outputs.should_release == 'true'
         run: npm run build
