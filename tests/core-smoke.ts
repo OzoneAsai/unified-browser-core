@@ -543,6 +543,31 @@ assert.equal(
   "auxiliary",
   "named/sized popup flows must preserve window.opener semantics",
 );
+assert.equal(
+  classifyWindowOpen({ disposition: "foreground-tab", frameName: "_blank", features: "external" }),
+  "core-tab",
+  "non-presentation window features must stay under Browser Core ownership",
+);
+assert.equal(
+  classifyWindowOpen({ disposition: "foreground-tab", frameName: "_blank", features: "noopener" }),
+  "core-tab",
+  "noopener requests do not require native opener semantics",
+);
+assert.equal(
+  classifyWindowOpen({ disposition: "foreground-tab", frameName: "oauth", features: "noopener,width=480,height=640" }),
+  "core-tab",
+  "noopener must override named/sized auxiliary classification",
+);
+assert.equal(
+  classifyWindowOpen({ disposition: "foreground-tab", frameName: "_blank", features: "popup=yes" }),
+  "auxiliary",
+  "explicit popup presentation should retain auxiliary-window semantics",
+);
+assert.equal(
+  classifyWindowOpen({ disposition: "foreground-tab", frameName: "_blank", features: "popup=no" }),
+  "core-tab",
+  "disabled popup presentation must not escape Browser Core ownership",
+);
 assert.equal(classifyInPageNavigation(3, 3, "in-page"), "residual");
 assert.equal(classifyInPageNavigation(3, 4, "in-page"), "navigation");
 assert.equal(classifyInPageNavigation(3, 2, "back"), "navigation");
