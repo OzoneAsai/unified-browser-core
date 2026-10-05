@@ -1294,6 +1294,27 @@ await hybrid.save(persistenceState);
 const reloadedFallback = await hybrid.load();
 assert.ok(reloadedFallback?.history?.leaves.persisted, "hybrid persistence fallback must preserve heavy state when IndexedDB is unavailable");
 
+assert.deepEqual(
+  await hybrid.listHistoryVersions(),
+  [],
+  "history version discovery should degrade to an empty list when IndexedDB is unavailable",
+);
+assert.equal(
+  await hybrid.loadHistoryVersion("generation:1"),
+  null,
+  "loading a saved history version should degrade safely when IndexedDB is unavailable",
+);
+assert.equal(
+  await hybrid.captureHistoryVersion(persistenceState.history),
+  false,
+  "history snapshot capture should report unavailable storage without mutating state",
+);
+assert.equal(
+  await hybrid.archiveExistingHistoryVersions(),
+  0,
+  "legacy generation archival should be a no-op when IndexedDB is unavailable",
+);
+
 let releaseFirstSave!: () => void;
 let signalFirstSaveStarted!: () => void;
 const firstSaveStarted = new Promise<void>((resolve) => { signalFirstSaveStarted = resolve; });
