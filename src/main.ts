@@ -128,6 +128,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     );
     const raw = await this.persistence.load();
     const state = BrowserCore.normalize(raw);
+    await this.persistence.archiveExistingHistoryVersions();
     await this.persistence.captureHistoryVersion(state.history);
     setLocaleResolver(getLanguage);
     setLanguage(state.settings.language);

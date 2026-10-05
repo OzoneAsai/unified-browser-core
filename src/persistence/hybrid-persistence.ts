@@ -69,6 +69,63 @@ export class HybridBrowserPersistence {
     return next;
   }
 
+  async archiveExistingHistoryVersions(): Promise<number> {
+    if (typeof indexedDB === "undefined") return 0;
+    let db: IDBDatabase | undefined;
+    try {
+      const database = await openDb();
+      db = database;
+      const generations = await new Promise<HeavyEnvelope[]>((resolve, reject) => {
+        const tx = database.transaction(STORE, "readonly");
+        const request = tx.objectStore(STORE).openCursor();
+        const found: HeavyEnvelope[] = [];
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) {
+            resolve(found);
+            return;
+          }
+          const key = String(cursor.key);
+          if (key === this.scope || this.isGenerationKey(key)) {
+            const heavy = normalizeHeavyEnvelope(cursor.value as unknown);
+            if (heavy && Object.values(heavy.state.history.nodes).some((node) => node.kind === "navigation")) {
+              found.push(heavy);
+            }
+          }
+          cursor.continue();
+        };
+        request.onerror = () => reject(request.error);
+      });
+      if (!generations.length) return 0;
+
+      let syntheticCapturedAt = Math.max(Date.now(), this.lastHistorySnapshotAt + 1);
+      await new Promise<void>((resolve, reject) => {
+        const tx = database.transaction(STORE, "readwrite");
+        const store = tx.objectStore(STORE);
+        for (const generation of generations) {
+          const timestamp = revisionTimestamp(generation.revision);
+          const capturedAt = timestamp || syntheticCapturedAt++;
+          const envelope: HistorySnapshotEnvelope = {
+            capturedAt,
+            sourceRevision: generation.revision,
+            history: generation.state.history,
+          };
+          store.put(envelope, this.historySnapshotKey(capturedAt));
+          this.lastHistorySnapshotAt = Math.max(this.lastHistorySnapshotAt, capturedAt);
+        }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      });
+      await this.pruneHistorySnapshots();
+      return generations.length;
+    } catch {
+      return 0;
+    } finally {
+      db?.close();
+    }
+  }
+
   async captureHistoryVersion(history: HistoryGraphState): Promise<boolean> {
     if (typeof indexedDB === "undefined" || Object.keys(history.nodes).length === 0) return false;
 
