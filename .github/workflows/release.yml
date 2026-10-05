@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - "*"
+    branches:
+      - main
+    paths:
+      - "package.json"
+      - "manifest.json"
 
 permissions:
   contents: write
@@ -24,9 +29,29 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Verify release version
+      - name: Resolve release tag
+        id: release
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+            should_release=true
+          else
+            tag="$(node -p "require('./package.json').version")"
+            if gh release view "$tag" >/dev/null 2>&1; then
+              should_release=false
+            else
+              should_release=true
+            fi
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "should_release=$should_release" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release version
+        if: steps.release.outputs.should_release == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           node --input-type=module <<'NODE'
           import { readFileSync } from 'node:fs';
@@ -41,14 +66,16 @@ jobs:
           NODE
 
       - name: Build plugin
+        if: steps.release.outputs.should_release == 'true'
         run: npm run build
 
       - name: Publish GitHub release
+        if: steps.release.outputs.should_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
-          args=(--title "$RELEASE_TAG" --generate-notes)
+          args=(--title "$RELEASE_TAG" --generate-notes --target "$GITHUB_SHA")
           if [[ "$RELEASE_TAG" == *-* ]]; then args+=(--prerelease); fi
           gh release create "$RELEASE_TAG" \
             "${args[@]}" \

@@ -145,6 +145,12 @@ Obsidian receives the original tab drag start and owns pane movement and split p
 Only UBC tab headers receive Firefox-style sizing and strip classes. If a tab group mixes UBC and ordinary Obsidian views, UBC keeps its own browser-tab decoration while the shared strip geometry and native tabs remain untouched. This also clears stale UBC layout classes from native tabs on refresh.
 
 
+### 0.2.9 browser ownership
+
+- Ordinary new-window requests remain under Browser Core ownership even when sites attach non-presentation window features such as `external`.
+- `noopener` and `noreferrer` requests stay in Browser Core tabs because they do not require native opener semantics.
+- Native auxiliary windows are reserved for opener-dependent named contexts or explicit popup/window geometry, preventing browser-renderable resources such as PDFs from being delegated to the host or operating-system browser.
+
 ### 0.2.8 bookmark deletion
 
 - Clicking Delete bookmark inside the editor no longer gets intercepted by outside-popup dismissal.
