@@ -10,6 +10,7 @@ import type {
   BrowserLeafViewState,
   ContainerId,
   FormRecoveryField,
+  HistoryGraphState,
   HistoryNode,
   NavigationNode,
 } from "../core/model";
@@ -49,6 +50,7 @@ import { permissionDecisionLabel, permissionLabel } from "./permission-label";
 import { fallbackFaviconUrl, renderBookmarkVisual } from "./bookmark-visual";
 import { resolveBookmarkUrl } from "../bookmarks/bookmark-url";
 import { dismissOpenMenus, showDismissibleMenu, trackDismissibleMenu } from "./popup-dismissal";
+import type { HistoryVersionSummary } from "../persistence/hybrid-persistence";
 
 export const BROWSER_VIEW_TYPE = "unified-browser-core-view";
 
@@ -109,6 +111,10 @@ export class BrowserView extends ItemView {
   private pendingTransientTraversalIndex: number | null = null;
   private historyObserver: IntersectionObserver | null = null;
   private historyRevealNodeId: string | undefined;
+  private historyVersionId: string | undefined;
+  private historyVersionState: HistoryGraphState | null = null;
+  private historyVersionMeta: HistoryVersionSummary | null = null;
+  private historyVersionLoadToken = 0;
   private closeReasonOverride: BrowserLeafRecord["closeReason"] | undefined;
   private readonly expandedHistoryBranches = new Set<string>();
   private readonly expandedResidualParents = new Set<string>();
@@ -2546,6 +2552,10 @@ export class BrowserView extends ItemView {
       },
     });
     this.historySearchEl = search;
+    const versionFilter = filters.createEl("select", {
+      attr: { "aria-label": t("Saved history version") },
+    });
+    versionFilter.createEl("option", { text: t("Current history"), value: "" });
     const dayFilter = filters.createEl("input", {
       attr: { type: "date", "aria-label": t("Filter history by day") },
     });
@@ -2559,14 +2569,20 @@ export class BrowserView extends ItemView {
     const clearFilters = filters.createEl("button", { text: t("Clear filters") });
     const summary = page.createDiv({ cls: "ubc-history-summary", attr: { "aria-live": "polite" } });
     const timeline = page.createDiv({ cls: "ubc-history-timeline" });
+
+    let versions: HistoryVersionSummary[] = [];
     const render = () => {
       this.disconnectHistoryObserver();
       timeline.empty();
+      const historyState = this.historyVersionState ?? this.plugin.core.state.history;
+      const savedVersionId = this.historyVersionState && this.historyVersionId
+        ? this.historyVersionId
+        : undefined;
       const needle = search.value.toLowerCase().trim();
       const selectedDay = dayFilter.value;
       const selectedContainer = containerFilter.value;
-      const nodes = this.plugin.core.history
-        .allNodes()
+      const nodes = Object.values(historyState.nodes)
+        .sort((a, b) => b.timestamp - a.timestamp)
         .filter((node) => node.kind !== "residual")
         .filter((node) => {
           const day = historyDayKey(node.timestamp, this.plugin.core.settings().historyDayStartMinutes);
@@ -2574,12 +2590,12 @@ export class BrowserView extends ItemView {
           if (selectedContainer) {
             const nodeContainerId = node.kind === "navigation"
               ? node.containerId
-              : this.plugin.core.state.history.leaves[node.leafId]?.containerId;
+              : historyState.leaves[node.leafId]?.containerId;
             if (nodeContainerId !== selectedContainer) return false;
           }
           if (!needle) return true;
           if (node.kind !== "navigation") return false;
-          const leafTitle = this.plugin.core.state.history.leaves[node.leafId]?.lastTitle || "";
+          const leafTitle = historyState.leaves[node.leafId]?.lastTitle || "";
           let domain = "";
           try {
             domain = new URL(node.url).hostname;
@@ -2599,15 +2615,26 @@ export class BrowserView extends ItemView {
       const navigationCount = nodes.filter((node) => node.kind === "navigation").length;
       const tombstoneCount = nodes.filter((node) => node.kind === "tombstone").length;
       const filtersActive = Boolean(needle || selectedDay || selectedContainer);
-      summary.setText(
+      const countSummary =
         navigationCount
           ? t("{v0} visit{v1} across {v2} day{v3}{v4}{v5}", { v0: navigationCount, v1: navigationCount === 1 ? "" : "s", v2: days.length, v3: days.length === 1 ? "" : "s", v4: tombstoneCount ? ` · ${tombstoneCount} deleted entr${tombstoneCount === 1 ? "y" : "ies"} retained` : "", v5: filtersActive ? " · filtered" : "" })
           : tombstoneCount
             ? t("{v0} deleted histor{v1} retained to preserve navigation paths{v2}", { v0: tombstoneCount, v1: tombstoneCount === 1 ? "y entry" : "y entries", v2: filtersActive ? " · filtered" : "" })
           : filtersActive
             ? t("No history matches these filters.")
-            : t("No browser history yet."),
-      );
+            : t("No browser history yet.");
+      if (savedVersionId) {
+        const capturedAt = this.historyVersionMeta?.capturedAt;
+        const capturedLabel = capturedAt
+          ? new Date(capturedAt).toLocaleString()
+          : t("Unknown saved time");
+        summary.setText(t("Viewing saved history from {v0}. Read-only · {v1}", {
+          v0: capturedLabel,
+          v1: countSummary,
+        }));
+      } else {
+        summary.setText(countSummary);
+      }
       clearFilters.toggleClass("is-hidden", !filtersActive);
       if (!days.length) {
         const empty = timeline.createDiv({ cls: "ubc-history-empty" });
@@ -2619,8 +2646,8 @@ export class BrowserView extends ItemView {
         });
         return;
       }
-      const revealNode = this.historyRevealNodeId
-        ? this.plugin.core.state.history.nodes[this.historyRevealNodeId]
+      const revealNode = !savedVersionId && this.historyRevealNodeId
+        ? historyState.nodes[this.historyRevealNodeId]
         : undefined;
       const revealDay = revealNode
         ? historyDayKey(revealNode.timestamp, this.plugin.core.settings().historyDayStartMinutes)
@@ -2630,7 +2657,7 @@ export class BrowserView extends ItemView {
       const batchSize = 14;
       const sentinel = document.createElement("button");
       sentinel.className = "ubc-history-load-more";
-      sentinel.textContent = "Load older history";
+      sentinel.textContent = t("Load older history");
       const appendBatch = () => {
         sentinel.remove();
         const batch = days.slice(renderedDays, renderedDays + batchSize);
@@ -2638,13 +2665,15 @@ export class BrowserView extends ItemView {
         for (const [day, dayNodes] of batch) {
           const section = timeline.createEl("section", { cls: "ubc-history-day" });
           const dayHeading = section.createEl("h2", { text: day });
-          dayHeading.addEventListener("contextmenu", (event) => {
-            event.preventDefault();
-            this.showHistoryDayMenu(day, dayNodes, event, () => {
-              dayFilter.value = day;
-              render();
-            }, render);
-          });
+          if (!savedVersionId) {
+            dayHeading.addEventListener("contextmenu", (event) => {
+              event.preventDefault();
+              this.showHistoryDayMenu(day, dayNodes, event, () => {
+                dayFilter.value = day;
+                render();
+              }, render);
+            });
+          }
           const byLeaf = new Map<string, HistoryNode[]>();
           for (const node of dayNodes.sort((a, b) => a.timestamp - b.timestamp)) {
             const bucket = byLeaf.get(node.leafId) ?? [];
@@ -2652,26 +2681,43 @@ export class BrowserView extends ItemView {
             byLeaf.set(node.leafId, bucket);
           }
           for (const [leafId, leafNodes] of byLeaf) {
-            const leafRecord = this.plugin.core.state.history.leaves[leafId];
+            const leafRecord = historyState.leaves[leafId];
             const group = section.createDiv({ cls: "ubc-history-leaf" });
             const leafHeader = group.createDiv({ cls: "ubc-history-leaf-header" });
             leafHeader.createSpan({
               text: leafRecord?.lastTitle || "Tab",
               attr: { title: this.plugin.core.containers.nameFor(leafRecord?.containerId) },
             });
-            leafHeader.addEventListener("contextmenu", (event) => {
-              event.preventDefault();
-              this.showHistoryLeafMenu(leafId, leafNodes, event, render);
-            });
-            if (leafRecord?.closedAt && leafRecord.lastUrl) {
-              const restore = leafHeader.createEl("button", { text: t("Restore") });
-              restore.addEventListener("click", () => this.plugin.restoreLeaf(leafId));
+            if (savedVersionId) {
+              const canRestore = Boolean(
+                leafRecord?.lastUrl ||
+                leafNodes.some((node) => node.kind === "navigation"),
+              );
+              if (canRestore) {
+                const restore = leafHeader.createEl("button", { text: t("Restore") });
+                restore.addEventListener("click", () => {
+                  void (async () => {
+                    const restored = await this.plugin.restoreSavedHistoryLeaf(savedVersionId, leafId);
+                    if (!restored) new Notice(t("This saved tab no longer has a restorable URL."));
+                  })();
+                });
+              }
+              this.renderSavedHistoryLeafNodes(group, leafNodes, savedVersionId);
+            } else {
+              leafHeader.addEventListener("contextmenu", (event) => {
+                event.preventDefault();
+                this.showHistoryLeafMenu(leafId, leafNodes, event, render);
+              });
+              if (leafRecord?.closedAt && leafRecord.lastUrl) {
+                const restore = leafHeader.createEl("button", { text: t("Restore") });
+                restore.addEventListener("click", () => this.plugin.restoreLeaf(leafId));
+              }
+              this.renderHistoryLeafNodes(
+                group,
+                leafNodes,
+                Boolean(needle || selectedDay || selectedContainer),
+              );
             }
-            this.renderHistoryLeafNodes(
-              group,
-              leafNodes,
-              Boolean(needle || selectedDay || selectedContainer),
-            );
           }
         }
         if (renderedDays < days.length) timeline.appendChild(sentinel);
@@ -2679,7 +2725,7 @@ export class BrowserView extends ItemView {
       sentinel.addEventListener("click", appendBatch);
       const initialBatches = revealDayIndex >= 0 ? Math.floor(revealDayIndex / batchSize) + 1 : 1;
       for (let batch = 0; batch < initialBatches; batch++) appendBatch();
-      if (this.historyRevealNodeId) {
+      if (!savedVersionId && this.historyRevealNodeId) {
         const revealId = this.historyRevealNodeId;
         window.requestAnimationFrame(() => {
           const row = [...timeline.querySelectorAll<HTMLElement>("[data-history-node-id]")]
@@ -2705,6 +2751,33 @@ export class BrowserView extends ItemView {
         this.historyObserver.observe(sentinel);
       }
     };
+
+    const loadVersion = async (id: string): Promise<void> => {
+      const token = ++this.historyVersionLoadToken;
+      this.historyVersionId = id || undefined;
+      this.historyVersionState = null;
+      this.historyVersionMeta = null;
+      if (!id) {
+        render();
+        return;
+      }
+      timeline.empty();
+      summary.setText(t("Loading saved history…"));
+      const state = await this.plugin.loadSavedHistoryVersion(id);
+      if (token !== this.historyVersionLoadToken || !page.isConnected) return;
+      if (!state) {
+        this.historyVersionId = undefined;
+        versionFilter.value = "";
+        new Notice(t("This saved history version is no longer available."));
+        render();
+        return;
+      }
+      this.historyVersionState = state;
+      this.historyVersionMeta = versions.find((version) => version.id === id) ?? null;
+      render();
+    };
+
+    versionFilter.addEventListener("change", () => void loadVersion(versionFilter.value));
     search.addEventListener("input", render);
     dayFilter.addEventListener("change", render);
     containerFilter.addEventListener("change", render);
@@ -2715,7 +2788,67 @@ export class BrowserView extends ItemView {
       render();
       search.focus();
     });
+
+    void (async () => {
+      versions = await this.plugin.listSavedHistoryVersions();
+      if (!page.isConnected) return;
+      const available = new Set<string>();
+      for (const version of versions) {
+        if (version.current && version.source === "generation") continue;
+        available.add(version.id);
+        const when = version.capturedAt
+          ? new Date(version.capturedAt).toLocaleString()
+          : t("Legacy saved history");
+        versionFilter.createEl("option", {
+          value: version.id,
+          text: t("{v0} · {v1} visit{v2}", {
+            v0: when,
+            v1: version.navigationCount,
+            v2: version.navigationCount === 1 ? "" : "s",
+          }),
+        });
+      }
+      if (this.historyVersionId && available.has(this.historyVersionId)) {
+        versionFilter.value = this.historyVersionId;
+        if (!this.historyVersionState) await loadVersion(this.historyVersionId);
+      } else if (this.historyVersionId) {
+        this.historyVersionId = undefined;
+        this.historyVersionState = null;
+        this.historyVersionMeta = null;
+        versionFilter.value = "";
+        render();
+      }
+    })();
+
     render();
+  }
+
+  private renderSavedHistoryLeafNodes(parent: HTMLElement, nodes: HistoryNode[], versionId: string): void {
+    for (const node of nodes) {
+      if (node.kind === "residual") continue;
+      const row = parent.createDiv({ cls: "ubc-history-node" });
+      if (node.kind === "tombstone") {
+        row.addClass("is-tombstone");
+        row.createEl("time", { text: new Date(node.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) });
+        row.createSpan({ text: t("Deleted history entry") });
+        continue;
+      }
+      row.createEl("time", { text: new Date(node.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) });
+      const button = row.createEl("button", {
+        cls: "ubc-history-link",
+        text: node.title || node.url,
+        attr: {
+          title: node.url,
+          "aria-label": t("Restore saved visit"),
+        },
+      });
+      button.addEventListener("click", () => {
+        void (async () => {
+          const restored = await this.plugin.restoreSavedHistoryNode(versionId, node.id);
+          if (!restored) new Notice(t("This saved visit is no longer available."));
+        })();
+      });
+    }
   }
 
   private openWebTargetFromPointer(url: string, event: MouseEvent): void {
