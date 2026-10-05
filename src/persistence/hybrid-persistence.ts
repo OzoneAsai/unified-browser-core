@@ -14,6 +14,7 @@ type DataPort = {
 
 export class HybridBrowserPersistence {
   private revision = 0;
+  private saveQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly scope: string,
@@ -28,11 +29,17 @@ export class HybridBrowserPersistence {
       : await this.loadHeavy(lightRevision);
     if (!lightweight && !heavy) return null;
     if (typeof lightRevision === "number") this.revision = Math.max(this.revision, lightRevision);
+    if (heavy) this.revision = Math.max(this.revision, heavy.revision);
     const cleanLightweight = stripHybridMetadata(lightweight);
     if (lightweight?.__hybridHeavyFallback) return cleanLightweight;
     if (!heavy) return cleanLightweight;
     if (typeof lightRevision === "number" && heavy.revision !== lightRevision) {
-      return cleanLightweight;
+      console.warn(
+        "Unified Browser Core: recovering heavy browser state from revision",
+        heavy.revision,
+        "instead of missing revision",
+        lightRevision,
+      );
     }
     return {
       ...(cleanLightweight ?? {}),
@@ -40,7 +47,13 @@ export class HybridBrowserPersistence {
     };
   }
 
-  async save(state: BrowserCoreState): Promise<void> {
+  save(state: BrowserCoreState): Promise<void> {
+    const next = this.saveQueue.then(() => this.saveNow(state));
+    this.saveQueue = next.catch(() => undefined);
+    return next;
+  }
+
+  private async saveNow(state: BrowserCoreState): Promise<void> {
     const previousRevision = this.revision;
     const revision = Math.max(Date.now(), this.revision + 1);
     const heavy: HeavyState = {
@@ -98,19 +111,45 @@ export class HybridBrowserPersistence {
         request.onsuccess = () => resolve((request.result as HeavyEnvelope | HeavyState | undefined) ?? null);
         request.onerror = () => reject(request.error);
       });
-      const raw = typeof revision === "number"
-        ? await read(this.generationKey(revision))
-        : await read(this.scope);
-      if (!raw && typeof revision === "number") {
-        const legacy = await read(this.scope);
-        if (legacy && "revision" in legacy && legacy.revision === revision) {
-          return legacy as HeavyEnvelope;
-        }
-        return null;
+      const normalize = (raw: HeavyEnvelope | HeavyState | null): HeavyEnvelope | null => {
+        if (!raw) return null;
+        if ("revision" in raw && "state" in raw) return raw as HeavyEnvelope;
+        return { revision: 0, state: raw as HeavyState };
+      };
+      const readLatestGeneration = (): Promise<HeavyEnvelope | null> => new Promise((resolve, reject) => {
+        const tx = database.transaction(STORE, "readonly");
+        const request = tx.objectStore(STORE).openCursor();
+        let latest: HeavyEnvelope | null = null;
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) {
+            resolve(latest);
+            return;
+          }
+          const key = String(cursor.key);
+          const value = cursor.value as HeavyEnvelope | HeavyState | undefined;
+          if (key.startsWith(this.scope + ":") && value && "revision" in value && "state" in value) {
+            const candidate = value as HeavyEnvelope;
+            if (!latest || candidate.revision > latest.revision) latest = candidate;
+          }
+          cursor.continue();
+        };
+        request.onerror = () => reject(request.error);
+      });
+
+      if (typeof revision === "number") {
+        const exact = normalize(await read(this.generationKey(revision)));
+        if (exact) return exact;
       }
-      if (!raw) return null;
-      if ("revision" in raw && "state" in raw) return raw as HeavyEnvelope;
-      return { revision: 0, state: raw as HeavyState };
+
+      const legacy = normalize(await read(this.scope));
+      if (legacy && (typeof revision !== "number" || legacy.revision === revision)) return legacy;
+
+      // The lightweight commit and IndexedDB generation can diverge if an
+      // older build was interrupted or overlapping saves completed out of
+      // order. Heavy browser data is independently valid, so recover the
+      // newest surviving generation instead of normalizing history to empty.
+      return await readLatestGeneration() ?? legacy;
     } catch {
       return null;
     } finally {

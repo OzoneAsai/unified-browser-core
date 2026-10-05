@@ -2225,7 +2225,7 @@ var HistoryGraph = class {
     return { nodes, leaves };
   }
   sweep(settings, now = Date.now()) {
-    const candidates = Object.values(this.state.leaves).filter((leaf) => typeof leaf.closedAt === "number").filter((leaf) => !this.isProtectedLeaf(leaf.id)).sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0));
+    const candidates = Object.values(this.state.leaves).filter((leaf) => typeof leaf.closedAt === "number").filter((leaf) => leaf.closeReason !== "shutdown").filter((leaf) => !this.isProtectedLeaf(leaf.id)).sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0));
     let removed = 0;
     if (settings.historyRetentionDays > 0) {
       const cutoff = now - settings.historyRetentionDays * 24 * 60 * 60 * 1e3;
@@ -8875,24 +8875,36 @@ var HybridBrowserPersistence = class {
     this.dataPort = dataPort;
   }
   revision = 0;
+  saveQueue = Promise.resolve();
   async load() {
     const lightweight = await this.dataPort.load();
     const lightRevision = lightweight?.__hybridRevision;
     const heavy = lightweight?.__hybridHeavyFallback ? null : await this.loadHeavy(lightRevision);
     if (!lightweight && !heavy) return null;
     if (typeof lightRevision === "number") this.revision = Math.max(this.revision, lightRevision);
+    if (heavy) this.revision = Math.max(this.revision, heavy.revision);
     const cleanLightweight = stripHybridMetadata(lightweight);
     if (lightweight?.__hybridHeavyFallback) return cleanLightweight;
     if (!heavy) return cleanLightweight;
     if (typeof lightRevision === "number" && heavy.revision !== lightRevision) {
-      return cleanLightweight;
+      console.warn(
+        "Unified Browser Core: recovering heavy browser state from revision",
+        heavy.revision,
+        "instead of missing revision",
+        lightRevision
+      );
     }
     return {
       ...cleanLightweight ?? {},
       ...heavy.state
     };
   }
-  async save(state) {
+  save(state) {
+    const next = this.saveQueue.then(() => this.saveNow(state));
+    this.saveQueue = next.catch(() => void 0);
+    return next;
+  }
+  async saveNow(state) {
     const previousRevision = this.revision;
     const revision = Math.max(Date.now(), this.revision + 1);
     const heavy = {
@@ -8945,17 +8957,38 @@ var HybridBrowserPersistence = class {
         request.onsuccess = () => resolve(request.result ?? null);
         request.onerror = () => reject(request.error);
       });
-      const raw = typeof revision === "number" ? await read(this.generationKey(revision)) : await read(this.scope);
-      if (!raw && typeof revision === "number") {
-        const legacy = await read(this.scope);
-        if (legacy && "revision" in legacy && legacy.revision === revision) {
-          return legacy;
-        }
-        return null;
+      const normalize = (raw) => {
+        if (!raw) return null;
+        if ("revision" in raw && "state" in raw) return raw;
+        return { revision: 0, state: raw };
+      };
+      const readLatestGeneration = () => new Promise((resolve, reject) => {
+        const tx = database.transaction(STORE, "readonly");
+        const request = tx.objectStore(STORE).openCursor();
+        let latest = null;
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) {
+            resolve(latest);
+            return;
+          }
+          const key = String(cursor.key);
+          const value = cursor.value;
+          if (key.startsWith(this.scope + ":") && value && "revision" in value && "state" in value) {
+            const candidate = value;
+            if (!latest || candidate.revision > latest.revision) latest = candidate;
+          }
+          cursor.continue();
+        };
+        request.onerror = () => reject(request.error);
+      });
+      if (typeof revision === "number") {
+        const exact = normalize(await read(this.generationKey(revision)));
+        if (exact) return exact;
       }
-      if (!raw) return null;
-      if ("revision" in raw && "state" in raw) return raw;
-      return { revision: 0, state: raw };
+      const legacy = normalize(await read(this.scope));
+      if (legacy && (typeof revision !== "number" || legacy.revision === revision)) return legacy;
+      return await readLatestGeneration() ?? legacy;
     } catch {
       return null;
     } finally {

@@ -1171,6 +1171,33 @@ retentionState.history.leaves["old-leaf"]!.closedAt = 1;
 const historyRemoved = retentionHistory.sweep({ historyRetentionDays: 1, historyMaxNodes: 1000 }, 3 * 24 * 60 * 60 * 1000);
 assert.ok(historyRemoved > 0, "expired closed history should be removable by retention policy");
 
+const shutdownRetentionState = BrowserCore.normalize(null);
+const shutdownRetentionHistory = new HistoryGraph(shutdownRetentionState.history);
+shutdownRetentionHistory.beginLeaf({ leafId: "shutdown-leaf", containerId: "default" });
+shutdownRetentionHistory.addNavigation({
+  leafId: "shutdown-leaf",
+  containerId: "default",
+  url: "https://shutdown.example/one",
+  timestamp: 1,
+});
+shutdownRetentionHistory.addNavigation({
+  leafId: "shutdown-leaf",
+  containerId: "default",
+  url: "https://shutdown.example/two",
+  timestamp: 2,
+});
+shutdownRetentionHistory.closeLeaf("shutdown-leaf", "shutdown");
+assert.equal(
+  shutdownRetentionHistory.sweep({ historyRetentionDays: 1, historyMaxNodes: 1 }, 3 * 24 * 60 * 60 * 1000),
+  0,
+  "plugin shutdown must not make live-session history eligible for retention deletion",
+);
+assert.equal(
+  shutdownRetentionHistory.allNodes().length,
+  2,
+  "shutdown retention must preserve the complete live-session history graph",
+);
+
 const protectedRetentionState = BrowserCore.normalize(null);
 const protectedRetentionHistory = new HistoryGraph(protectedRetentionState.history);
 protectedRetentionHistory.beginLeaf({
@@ -1266,5 +1293,36 @@ persistenceState.history.leaves.persisted = {
 await hybrid.save(persistenceState);
 const reloadedFallback = await hybrid.load();
 assert.ok(reloadedFallback?.history?.leaves.persisted, "hybrid persistence fallback must preserve heavy state when IndexedDB is unavailable");
+
+let releaseFirstSave!: () => void;
+let signalFirstSaveStarted!: () => void;
+const firstSaveStarted = new Promise<void>((resolve) => { signalFirstSaveStarted = resolve; });
+const firstSaveGate = new Promise<void>((resolve) => { releaseFirstSave = resolve; });
+let persistenceCalls = 0;
+let activePersistenceSaves = 0;
+let peakPersistenceSaves = 0;
+const serializedHybrid = new HybridBrowserPersistence("serialized-smoke", {
+  load: async () => null,
+  save: async () => {
+    persistenceCalls++;
+    activePersistenceSaves++;
+    peakPersistenceSaves = Math.max(peakPersistenceSaves, activePersistenceSaves);
+    if (persistenceCalls === 1) {
+      signalFirstSaveStarted();
+      await firstSaveGate;
+    }
+    activePersistenceSaves--;
+  },
+});
+const serializedState = BrowserCore.normalize(null);
+const firstSerializedSave = serializedHybrid.save(serializedState);
+await firstSaveStarted;
+const secondSerializedSave = serializedHybrid.save(serializedState);
+await Promise.resolve();
+assert.equal(persistenceCalls, 1, "a second hybrid save must wait for the in-flight save");
+releaseFirstSave();
+await Promise.all([firstSerializedSave, secondSerializedSave]);
+assert.equal(peakPersistenceSaves, 1, "hybrid persistence writes must never overlap");
+assert.equal(persistenceCalls, 2, "queued hybrid saves must still be committed");
 
 console.log("core smoke tests passed");
