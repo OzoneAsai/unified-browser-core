@@ -29,6 +29,9 @@ export class BrowserSettingTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl).setName(t("Playback and authentication")).setHeading();
+    new Setting(containerEl).setName(t("Password manager"))
+      .setDesc(t("Manage the encrypted vault, Windows Hello, recovery keys, backups, and automatic locking."))
+      .addButton(button => button.setButtonText(t("Open password vault")).onClick(() => void this.plugin.openBrowser({ url: "browser://passwords" })));
     new Setting(containerEl)
       .setName(t("Autoplay"))
       .setDesc(t("Block audible autoplay until you interact with the page. Muted videos may still play. Reopen tabs after changing this setting."))

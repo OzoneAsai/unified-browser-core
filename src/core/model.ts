@@ -175,7 +175,7 @@ export interface BrowserSessionLeaf {
   siteAssignmentBypassReason?: SiteAssignmentBypassReason;
   pinned: boolean;
   manualRetention: ManualRetention;
-  internalSurface?: "home" | "history" | "bookmarks";
+  internalSurface?: "home" | "history" | "bookmarks" | "passwords";
   transientHistory?: BrowserTransientHistoryEntry[];
   transientIndex?: number;
 }
@@ -276,7 +276,7 @@ export interface BrowserLeafViewState extends Record<string, unknown> {
   restoredFromLeafId?: LeafId;
   restoreTargetUrl?: string;
   restoreTargetIndex?: number;
-  internalSurface?: "home" | "history" | "bookmarks";
+  internalSurface?: "home" | "history" | "bookmarks" | "passwords";
   transientHistory?: BrowserTransientHistoryEntry[];
   transientIndex?: number;
 }

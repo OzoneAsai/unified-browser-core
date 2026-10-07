@@ -1,4 +1,7 @@
 import { bindAddressSuggestions } from "./address-suggestions";
+import { renderPasswordPage, unlockVault, editPassword, passwordPopover, passwordButton } from "../passwords/ui";
+import { readPasswordEvent, fillPassword, type PasswordGuestEvent } from "../passwords/guest";
+import { passwordOrigin, generatePassword } from "../passwords/crypto";
 import { observeGuestInteraction } from "../adapters/guest-interaction";
 import { ItemView, Menu, Notice, setIcon, type ViewStateResult, type WorkspaceLeaf } from "obsidian";
 import type UnifiedBrowserCorePlugin from "../main";
@@ -63,6 +66,13 @@ export class BrowserView extends ItemView {
   private reloadButtonEl!: HTMLButtonElement;
   private favoritesBarEl!: HTMLDivElement;
   private bookmarkButtonEl!: HTMLButtonElement;
+  private passwordButtonEl!: HTMLButtonElement;
+  private passwordPageDispose?: () => void;
+  private passwordPopoverClose?: () => void;
+  private passwordPoll?: number;
+  private passwordPolling = false;
+  private passwordSavePopover = false;
+  private passwordUnsubscribe?: () => void;
   private recoveryBannerEl!: HTMLDivElement;
   private browserContentEl!: HTMLDivElement;
   private webLayerEl!: HTMLDivElement;
@@ -180,6 +190,9 @@ export class BrowserView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.passwordPageDispose?.(); this.passwordPopoverClose?.();
+    this.passwordUnsubscribe?.();
+    if (this.passwordPoll !== undefined) window.clearInterval(this.passwordPoll);
     this.activeContainerMenu?.hide();
     await this.captureRecoveryState();
     this.disconnectHistoryObserver();
@@ -726,6 +739,9 @@ export class BrowserView extends ItemView {
     menu.addItem((item) => item.setTitle(t("Home")).setIcon("home").onClick(() => this.showInternal("home")));
     menu.addItem((item) => item.setTitle(t("History")).setIcon("history").onClick(() => this.showInternal("history")));
     menu.addItem((item) => item.setTitle(t("Bookmarks")).setIcon("book-open").onClick(() => this.showInternal("bookmarks")));
+    menu.addItem((item) => item.setTitle(t("Passwords")).setIcon("key-round").onClick(() => this.showInternal("passwords")));
+    if (!this.internalSurface) menu.addItem((item) => item.setTitle(t("Fill password")).setIcon("key-round").onClick(() => void this.openPasswordSuggestions()));
+    if (this.plugin.passwords.unlocked) menu.addItem((item) => item.setTitle(t("Lock password vault")).setIcon("lock").onClick(() => this.plugin.passwords.lock()));
     const closed = this.plugin.core.history.recentlyClosed(1)[0];
     menu.addItem((item) => item.setTitle(t("Reopen closed tab")).setIcon("rotate-ccw").setDisabled(!closed)
       .onClick(() => { if (closed) void this.plugin.restoreLeaf(closed.id); }));
@@ -935,6 +951,20 @@ export class BrowserView extends ItemView {
     });
 
     this.bookmarkButtonEl = this.addToolbarButton("bookmark", t("Bookmark page"), () => this.bookmarkCurrentPage());
+    this.passwordButtonEl = this.addToolbarButton("key-round", t("Passwords"), () => void this.openPasswordSuggestions());
+    this.passwordButtonEl.hidden = true;
+    this.passwordUnsubscribe = this.plugin.passwords.subscribe(() => {
+      this.passwordPopoverClose?.();
+      if (this.webview) void readPasswordEvent(this.webview, this.plugin.passwords.unlocked, this.plugin.managedWebviewBackend.browserApis).catch(() => {});
+    });
+    this.passwordPoll = window.setInterval(() => void this.pollPasswordEvents(), 1200);
+    const updateGuestActivity = () => {
+      if(this.webview)this.plugin.managedWebviewBackend.browserApis.update(this.webview,
+        !this.internalSurface && this.rootEl.isConnected && this.rootEl.offsetParent !== null && this.plugin.app.workspace.getMostRecentLeaf(this.leaf.getContainer()) === this.leaf,
+        this.plugin.core.settings().blockPasskeyRequests);
+    };
+    this.registerEvent(this.plugin.app.workspace.on("active-leaf-change", updateGuestActivity));
+    this.registerEvent(this.plugin.app.workspace.on("layout-change", updateGuestActivity));
 
     this.containerButtonEl = this.addToolbarButton("box", t("Container"), (event) => this.showContainerMenu(event));
     this.containerButtonEl.addClass("ubc-container-button");
@@ -1121,9 +1151,12 @@ export class BrowserView extends ItemView {
     discardRestore = true,
   ): void {
     if (discardRestore) this.discardPendingRestore();
+    this.passwordPageDispose?.(); this.passwordPageDispose = undefined;
+    this.passwordPopoverClose?.(); this.passwordButtonEl.hidden = true;
     const resolvedSurface = surface ?? "home";
     this.disconnectHistoryObserver();
     this.internalSurface = resolvedSurface;
+    if(this.webview)this.plugin.managedWebviewBackend.browserApis.update(this.webview,false,this.plugin.core.settings().blockPasskeyRequests);
     this.siteAssignmentBypassOrigin = undefined;
     this.siteAssignmentBypassReason = undefined;
     this.faviconDataUrl = undefined;
@@ -1137,8 +1170,9 @@ export class BrowserView extends ItemView {
     this.internalLayerEl.empty();
     if (resolvedSurface === "history") this.renderHistory();
     else if (resolvedSurface === "bookmarks") this.renderBookmarks();
+    else if (resolvedSurface === "passwords") this.passwordPageDispose = renderPasswordPage(this.internalLayerEl, this.plugin.app, this.plugin.passwords);
     else this.renderHome();
-    this.currentTitle = t(resolvedSurface === "history" ? "History" : resolvedSurface === "bookmarks" ? "Bookmarks" : "Home");
+    this.currentTitle = t(resolvedSurface === "history" ? "History" : resolvedSurface === "bookmarks" ? "Bookmarks" : resolvedSurface === "passwords" ? "Passwords" : "Home");
     this.plugin.core.history.touchLeaf(this.leafId(), {
       lastUrl: this.currentUrlValue,
       lastTitle: this.currentTitle,
@@ -1309,6 +1343,7 @@ export class BrowserView extends ItemView {
 
   private bindWebview(webview: WebviewElement): void {
     webview.addEventListener("will-navigate", () => {
+      void this.pollPasswordEvents();
       void this.captureRecoveryState();
     });
     webview.addEventListener("did-attach", () => {
@@ -1546,6 +1581,9 @@ export class BrowserView extends ItemView {
   }
 
   private bindGuestRuntime(webview: WebviewElement, finalAttempt: boolean): void {
+    this.plugin.managedWebviewBackend.browserApis.update(webview,
+      !this.internalSurface && this.rootEl.offsetParent !== null && this.plugin.app.workspace.getMostRecentLeaf(this.leaf.getContainer()) === this.leaf,
+      this.plugin.core.settings().blockPasskeyRequests);
     // Guest WebContents is not addressable when the <webview> element is first
     // created. Install input observers alongside the other guest-bound
     // adapters, after did-attach/dom-ready exposes the guest contents.
@@ -1553,6 +1591,7 @@ export class BrowserView extends ItemView {
       this.popupInteractionDisposer = observeGuestInteraction(webview, () => {
         this.dismissTransientPopups();
         this.bookmarkPopoverClose?.();
+        this.passwordPopoverClose?.();
       });
     }
     if (!this.popupDisposer) {
@@ -1583,6 +1622,8 @@ export class BrowserView extends ItemView {
   }
 
   private handleCommittedNavigation(url: string): void {
+    this.passwordPageDispose?.(); this.passwordPageDispose = undefined;
+    if(!this.passwordSavePopover){this.passwordPopoverClose?.(); this.passwordButtonEl.hidden = true;}
     const reason = this.pendingHistoryIntent || "navigate";
     this.pendingHistoryIntent = null;
     this.lastNavigatedUrl = this.currentUrlValue;
@@ -2041,6 +2082,80 @@ export class BrowserView extends ItemView {
     // guest page is visible, covering it would flash the theme background.
     if (this.webviewDomReady) return;
     this.loadingShieldEl?.removeClass("is-hidden");
+  }
+
+  private async pollPasswordEvents(): Promise<void> {
+    if (this.passwordPolling || this.internalSurface || !this.webviewDomReady || !this.webview || !this.rootEl.isConnected || this.rootEl.offsetParent === null) return;
+    this.passwordPolling = true;
+    const guest = this.webview;
+    try {
+      passwordOrigin(this.currentUrlValue);
+      const event = await readPasswordEvent(guest, this.plugin.passwords.unlocked, this.plugin.managedWebviewBackend.browserApis);
+      if (!event) return;
+      if (guest !== this.webview || this.internalSurface || (event.kind !== "save" && event.origin !== passwordOrigin(this.currentUrlValue))) { if (event.password) event.password = ""; return; }
+      this.passwordButtonEl.hidden = false;
+      if (event.kind === "focus") { await this.openPasswordSuggestions(false); return; }
+      if (event.kind !== "save" || !this.plugin.passwords.unlocked || !event.password || this.plugin.passwords.excluded(event.origin)) { event.password = ""; return; }
+      this.showPasswordSave(event);
+    } catch { /* Unsupported/insecure guest pages never receive credentials. */ }
+    finally { this.passwordPolling = false; }
+  }
+
+  async openPasswordSuggestions(allowUnlock = true): Promise<void> {
+    if (this.internalSurface || !this.webview || !this.plugin.passwords.exists) { if(allowUnlock)this.showInternal("passwords"); return; }
+    try {
+      const origin = passwordOrigin(this.currentUrlValue), guest = this.webview;
+      if(!this.plugin.passwords.unlocked && !allowUnlock){
+        this.passwordPopoverClose?.();
+        this.passwordPopoverClose=passwordPopover(this.passwordButtonEl,"Unlock password vault",panel=>{
+          passwordButton(panel,"Unlock password vault",async()=>{this.passwordPopoverClose?.();if(await unlockVault(this.plugin.app,this.plugin.passwords))await this.openPasswordSuggestions();},true);
+        });return;
+      }
+      if (!this.plugin.passwords.unlocked && (!allowUnlock || !await unlockVault(this.plugin.app, this.plugin.passwords))) return;
+      if (guest !== this.webview || this.internalSurface || passwordOrigin(this.currentUrlValue) !== origin) return;
+      await readPasswordEvent(guest, true, this.plugin.managedWebviewBackend.browserApis);
+      this.passwordButtonEl.hidden = false;
+      const candidates = this.plugin.passwords.matches(origin, this.containerId);
+      this.passwordPopoverClose?.();
+      let close = () => {}; let off = () => {};
+      const dismiss = passwordPopover(this.passwordButtonEl, "Choose an account", panel => {
+        panel.createDiv({ text: origin, cls: "ubc-password-note" });
+        if (!candidates.length) panel.createEl("p", { text: t("No saved passwords") });
+        for (const entry of candidates) passwordButton(panel, entry.username || t("No username"), async () => {
+          if (!this.plugin.passwords.unlocked || guest !== this.webview || this.internalSurface) return;
+          if (!await fillPassword(guest, origin, entry.username, entry.password)) throw new Error("No supported login form");
+          this.plugin.passwords.touch(); close();
+        });
+        passwordButton(panel, "Generate and fill password", async () => {
+          if (!this.plugin.passwords.unlocked || guest !== this.webview || this.internalSurface) return;
+          if (!await fillPassword(guest, origin, null, generatePassword())) throw new Error("No supported login form");
+          close();
+        });
+        passwordButton(panel, "Manage passwords", () => { close(); this.showInternal("passwords"); });
+      }, () => { off(); for (const entry of candidates) entry.password = ""; });
+      close = dismiss;
+      off = this.plugin.passwords.subscribe(close);
+      this.passwordPopoverClose = close;
+    } catch { new Notice(t("Password input is unavailable on this page. Use an HTTPS page with a visible login form.")); }
+  }
+
+  private showPasswordSave(event: PasswordGuestEvent): void {
+    const existing = this.plugin.passwords.matches(event.origin, this.containerId).find(entry => entry.username === (event.username || ""));
+    if (existing?.password === event.password) { event.password = ""; return; }
+    const draft = { id: existing?.id, origin: event.origin, username: event.username || "", password: event.password!, title: this.currentTitle, container: existing ? existing.container : this.containerId };
+    if (existing) existing.password = "";
+    this.passwordPopoverClose?.();
+    let close = () => {}; let off = () => {};
+    this.passwordSavePopover = true;
+    const dismiss = passwordPopover(this.passwordButtonEl, existing ? "Update password?" : "Save password?", panel => {
+      panel.createDiv({ text: event.origin }); panel.createDiv({ text: event.username || t("No username") });
+      passwordButton(panel, existing ? "Update password" : "Save password", async () => { await this.plugin.passwords.save(draft); close(); }, true);
+      passwordButton(panel, "Edit", () => { const copy = { ...draft }; close(); void editPassword(this.plugin.app, this.plugin.passwords, copy); });
+      passwordButton(panel, "Never for this site", async () => { await this.plugin.passwords.exclude(event.origin); close(); });
+      passwordButton(panel, "Not now", () => close());
+    }, () => { this.passwordSavePopover = false; off(); draft.password = ""; event.password = ""; });
+    close = dismiss; off = this.plugin.passwords.subscribe(close);
+    this.passwordPopoverClose = close;
   }
 
   refreshLanguage(): void {
@@ -3688,6 +3803,7 @@ function internalSurfaceLabel(url: string | undefined): string | undefined {
   const surface = url.slice("browser://".length).split(/[/?#]/, 1)[0] || "home";
   if (surface === "history") return "History";
   if (surface === "bookmarks") return "Bookmarks";
+  if (surface === "passwords") return "Passwords";
   if (surface === "home") return "Home";
   return "Browser Core";
 }

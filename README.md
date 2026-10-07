@@ -12,6 +12,7 @@ Unified Browser Core is a desktop-only browser plugin for [Obsidian](https://obs
 - Save and organize bookmarks, including importing from Obsidian's Bookmarks core plugin, Web viewer Bookmarks, and Surfing.
 - Restore tabs and windows after restarting Obsidian.
 - Handle browser permissions and popup requests through Browser Core.
+- Manage an encrypted password vault, unlock with Windows Hello or a recovery key, and choose an account before filling a login form.
 - Optionally recover form contents for sites you explicitly allow. Form recovery is off by default and excludes password, payment, one-time-code, WebAuthn, file, and hidden fields.
 - Expose a public API for other Obsidian plugins.
 
@@ -44,6 +45,25 @@ UBC also imports Surfing bookmarks from `.obsidian/surfing-bookmark.json`, inclu
 - Obsidian 1.8.0 or later
 - Obsidian desktop (this plugin does not support mobile)
 - Node.js and npm to build from source
+- Windows, .NET SDK 10, and Visual Studio C++ build tools to build the embedded Windows Hello helper. Release users do not need these tools or an additional desktop application.
+
+## Password manager (0.3.0)
+
+Open **Passwords** from the browser menu or navigate to `browser://passwords`. Create a vault with Windows Hello on a compatible Windows 11 device, or use a recovery key on other desktops. Hello setup verifies the PRF key twice before enabling it. Save the generated recovery key outside the vault and acknowledge it before setup completes. Cancellation or failed authentication never selects another unlock method automatically.
+
+Accounts are encrypted in a separate `password-vault.json` inside the plugin folder, using a random AES-256-GCM data key. The key is wrapped separately for Windows Hello and the 256-bit recovery key. Account names, site origins, and passwords are all inside the encrypted payload. UBC locks after the configured idle period, on screen lock or suspend when Electron exposes those events, and when the plugin unloads. Unlock is always required after restart.
+
+On a supported login form, the key button offers account selection, password generation, and manual filling. UBC checks the exact HTTPS origin and the account's Container scope, refuses cross-origin form actions, and never submits forms automatically. Trusted submit actions offer **Save**, **Update**, **Edit**, or **Never for this site**. Captured candidates are short-lived and survive ordinary page navigation. Password input and capture run in isolated worlds. Login forms inside iframes and closed shadow roots are not supported; use the site's direct login page. Recovery-only setup works without Windows Hello. This release does not store website passkeys.
+
+The management page provides search, editing, deletion, idle-lock settings, and encrypted backup import/export. Backup export excludes the device-specific Hello credential; import requires the backup's recovery key and replaces the current vault after verification. Enable Hello again on the destination PC if desired. Old backups still require their original recovery keys after key rotation.
+
+Other Obsidian plugins execute in the same trusted host process. This encryption protects the vault at rest; it cannot isolate an unlocked vault from a compromised Obsidian plugin or operating system. JavaScript strings cannot be reliably erased from process memory. Avoid installing untrusted plugins.
+
+## Website dialogs and passkey requests (0.3.0)
+
+Foreground pages support synchronous `alert`, `confirm`, and `prompt` through host dialogs. Background requests are dismissed, and repeated dialogs are limited to prevent a page from trapping the host UI. Switching away closes an open site dialog. Messages show the requesting origin and are escaped in the prompt UI.
+
+Main-frame passkey requests are rejected in inactive tabs. An ongoing request is aborted when its tab becomes inactive. The existing **Block website passkey requests** option still disables website requests globally, including iframe response policies. UBC's own explicit Windows Hello vault unlock is separate from website requests.
 
 ## Install from source
 
@@ -51,6 +71,7 @@ UBC also imports Surfing bookmarks from `.obsidian/surfing-bookmark.json`, inclu
 git clone https://github.com/OzoneAsai/unified-browser-core.git
 cd unified-browser-core
 npm install
+npm run build:hello
 npm run build
 ```
 
@@ -73,17 +94,19 @@ git tag 0.1.0-beta.1
 git push origin 0.1.0-beta.1
 ```
 
-GitHub Actions builds the plugin and creates a release containing `main.js`, `manifest.json`, and `styles.css`. Keep the tag and both manifest versions identical. Tags with a prerelease suffix, such as `-beta.1`, are published as pre-releases.
+GitHub Actions builds the native Hello helper on Windows, embeds it, verifies the plugin, and creates a release containing `main.js`, `manifest.json`, and `styles.css`. Keep the tag and both manifest versions identical. Tags with a prerelease suffix, such as `-beta.1`, are published as pre-releases. On Linux or macOS, download `native.generated.ts` from the workflow's `windows-hello-embedded` artifact into `src/passwords/` before building.
 
-The repository is currently private. BRAT users need access to a private repository; for general beta testing, the repository must be public.
+The repository is public and can be added directly in BRAT.
 
 ## Development
 
 ```sh
 npm install
+npm run build:hello # Windows native build, required once before bundling
 npm run dev       # rebuild on source changes
 npm run typecheck # check TypeScript types
 npm test          # run the core smoke checks
+npm run test:passwords # vault, recovery, backup, and website API regression checks
 npm run build     # create the plugin files in dist/
 ```
 

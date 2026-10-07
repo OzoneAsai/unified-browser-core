@@ -1,15 +1,17 @@
 {
   "name": "unified-browser-core",
-  "version": "0.2.8",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "node esbuild.config.mjs",
+    "build:hello": "node scripts/build-hello.mjs",
     "dev": "node esbuild.config.mjs --watch",
     "typecheck": "tsc --noEmit",
     "test": "node scripts/smoke-test.mjs",
+    "test:passwords": "node scripts/verify-passwords.mjs",
     "release:verify": "node scripts/verify-release.mjs",
-    "verify": "npm run typecheck && npm test && npm run build && npm run release:verify"
+    "verify": "npm run typecheck && npm test && npm run test:passwords && npm run build && npm run release:verify"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

@@ -1,4 +1,8 @@
 node_modules/
+native/**/bin/
+native/**/obj/
+native/**/publish/
+src/passwords/native.generated.ts
 .DS_Store
 *.log
 .fslckout

@@ -41,6 +41,10 @@ import { confirmAction } from "./ui/confirm-modal";
 import { TabSearchModal } from "./ui/tab-search-modal";
 import { HybridBrowserPersistence } from "./persistence/hybrid-persistence";
 import type { WebviewElement } from "./ui/webview-types";
+import { PasswordVault } from "./passwords/vault";
+import { FileSystemAdapter } from "obsidian";
+import { join } from "node:path";
+import { resolveElectronRemote } from "./adapters/electron-compat";
 
 export interface BrowserOpenRequest {
   url?: string;
@@ -53,6 +57,7 @@ export interface BrowserOpenRequest {
 
 export default class UnifiedBrowserCorePlugin extends Plugin {
   core!: BrowserCore;
+  passwords!: PasswordVault;
   api!: BrowserPublicApi;
   readonly permissionAdapter = new ElectronPermissionAdapter();
   readonly sessionDataAdapter = new ElectronSessionDataAdapter();
@@ -111,6 +116,19 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
   }
 
   async onload(): Promise<void> {
+    const adapter = this.app.vault.adapter;
+    if (!(adapter instanceof FileSystemAdapter)) throw new Error("Password vault requires a local desktop vault");
+    this.passwords = new PasswordVault(join(adapter.getBasePath(), this.app.vault.configDir, "plugins", this.manifest.id, "password-vault.json"));
+    await this.passwords.load();
+    this.register(() => this.passwords.dispose());
+    const power = resolveElectronRemote()?.powerMonitor;
+    const lockPasswords = () => this.passwords.lock();
+    for (const event of ["lock-screen", "suspend"]) {
+      power?.on?.(event, lockPasswords);
+      this.register(() => power?.removeListener?.(event, lockPasswords));
+    }
+    this.addCommand({ id: "open-passwords", name: t("Open password vault"), callback: () => this.openBrowser({ url: "browser://passwords" }) });
+    this.addCommand({ id: "lock-passwords", name: t("Lock password vault"), callback: () => this.passwords.lock() });
     this.homeAdapter = new ObsidianHomeAdapter(this.app);
     this.bookmarksAdapter = new ObsidianBookmarksAdapter(this.app);
     this.webViewerBookmarksAdapter = new WebViewerBookmarksAdapter(this.app);

@@ -9,7 +9,24 @@ permissions:
   contents: write
 
 jobs:
+  windows-hello:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build native Windows Hello bridge
+        run: node scripts/build-hello.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-hello-embedded
+          path: src/passwords/native.generated.ts
   release:
+    needs: windows-hello
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
@@ -23,6 +40,10 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-hello-embedded
+          path: src/passwords
 
       - name: Verify release version
         env:
@@ -41,7 +62,7 @@ jobs:
           NODE
 
       - name: Build plugin
-        run: npm run build
+        run: npm run verify
 
       - name: Publish GitHub release
         env:

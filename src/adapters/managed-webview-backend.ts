@@ -1,6 +1,8 @@
 import { resolvePartitionSession } from "./electron-compat";
 import type { BrowserSettings } from "../core/model";
 import type { WebviewElement } from "../ui/webview-types";
+import { GuestBrowserApis } from "./guest-browser-apis";
+import { pathToFileURL } from "node:url";
 
 /**
  * Compatibility backend for Browser Core features that need a dedicated
@@ -9,6 +11,7 @@ import type { WebviewElement } from "../ui/webview-types";
  */
 export class ManagedWebviewBackend {
   private readonly liveGuests = new Set<WebviewElement>();
+  readonly browserApis = new GuestBrowserApis();
 
   private readonly policySessions = new Map<string, PolicySession>();
   private settings?: () => BrowserSettings;
@@ -19,6 +22,8 @@ export class ManagedWebviewBackend {
     const webview = doc.createElement("webview") as WebviewElement;
     webview.addClass("ubc-webview");
     webview.partition = partition;
+    const preload = this.browserApis.preload();
+    if (preload) webview.setAttribute("preload", pathToFileURL(preload).href);
     // Keep the Surfing-compatible popup capability available while the guest
     // is attaching. BrowserView binds ElectronWindowOpenAdapter as soon as
     // guest WebContents is addressable and removes this attribute if that
@@ -33,6 +38,7 @@ export class ManagedWebviewBackend {
   }
 
   destroy(webview: WebviewElement): void {
+    this.browserApis.remove(webview);
     this.liveGuests.delete(webview);
     try {
       webview.stop?.();
@@ -65,6 +71,7 @@ export class ManagedWebviewBackend {
   }
 
   dispose(): void {
+    this.browserApis.dispose();
     for (const session of this.policySessions.values()) session.webRequest?.onHeadersReceived(null);
     this.policySessions.clear();
     for (const webview of [...this.liveGuests]) this.destroy(webview);
