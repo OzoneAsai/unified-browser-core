@@ -181,12 +181,36 @@ if (!globalThis[singletonKey]) {
     if (value === "new-window") return "new-window";
     return "new-tab";
   };
+  const parseFeatures = (value) => {
+    const features = new Map();
+    for (const rawPart of (value || "").split(",")) {
+      const part = rawPart.trim();
+      if (!part) continue;
+      const equals = part.indexOf("=");
+      const key = (equals >= 0 ? part.slice(0, equals) : part).trim().toLowerCase();
+      if (!key) continue;
+      const featureValue = equals >= 0 ? part.slice(equals + 1).trim().toLowerCase() : "";
+      features.set(key, featureValue);
+    }
+    return features;
+  };
+  const featureEnabled = (features, key) => {
+    if (!features.has(key)) return false;
+    return !["0", "no", "false", "off"].includes(features.get(key));
+  };
   const classify = (details) => {
+    const features = parseFeatures(details.features);
+    if (featureEnabled(features, "noopener") || featureEnabled(features, "noreferrer")) {
+      return "core-tab";
+    }
     const frameName = details.frameName && details.frameName.trim();
     if (frameName && !["_blank", "_self", "_top", "_parent"].includes(frameName.toLowerCase())) {
       return "auxiliary";
     }
-    if (details.features && details.features.trim()) return "auxiliary";
+    if (featureEnabled(features, "popup")) return "auxiliary";
+    if (["width", "height", "left", "top", "screenx", "screeny"].some((key) => features.has(key))) {
+      return "auxiliary";
+    }
     return "core-tab";
   };
   const closeChild = (child) => {
@@ -415,10 +439,30 @@ function normalizeDisposition(value) {
   return "new-tab";
 }
 function classifyWindowOpen(details) {
+  const features = parseWindowFeatures(details.features);
+  if (featureEnabled(features, "noopener") || featureEnabled(features, "noreferrer")) return "core-tab";
   const frameName = details.frameName?.trim();
   if (frameName && !["_blank", "_self", "_top", "_parent"].includes(frameName.toLowerCase())) return "auxiliary";
-  if (details.features?.trim()) return "auxiliary";
+  if (featureEnabled(features, "popup")) return "auxiliary";
+  if (["width", "height", "left", "top", "screenx", "screeny"].some((key) => features.has(key))) return "auxiliary";
   return "core-tab";
+}
+function parseWindowFeatures(value) {
+  const features = /* @__PURE__ */ new Map();
+  for (const rawPart of (value ?? "").split(",")) {
+    const part = rawPart.trim();
+    if (!part) continue;
+    const equals = part.indexOf("=");
+    const key = (equals >= 0 ? part.slice(0, equals) : part).trim().toLowerCase();
+    if (!key) continue;
+    const featureValue = equals >= 0 ? part.slice(equals + 1).trim().toLowerCase() : "";
+    features.set(key, featureValue);
+  }
+  return features;
+}
+function featureEnabled(features, key) {
+  if (!features.has(key)) return false;
+  return !["0", "no", "false", "off"].includes(features.get(key) ?? "");
 }
 
 // src/adapters/electron-context-menu.ts
@@ -2330,7 +2374,7 @@ var HistoryGraph = class {
     return { nodes, leaves };
   }
   sweep(settings, now = Date.now()) {
-    const candidates = Object.values(this.state.leaves).filter((leaf) => typeof leaf.closedAt === "number").filter((leaf) => !this.isProtectedLeaf(leaf.id)).sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0));
+    const candidates = Object.values(this.state.leaves).filter((leaf) => typeof leaf.closedAt === "number").filter((leaf) => leaf.closeReason !== "shutdown").filter((leaf) => !this.isProtectedLeaf(leaf.id)).sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0));
     let removed = 0;
     if (settings.historyRetentionDays > 0) {
       const cutoff = now - settings.historyRetentionDays * 24 * 60 * 60 * 1e3;
@@ -3323,6 +3367,18 @@ var ja = {
   "Delete \u201C{v0}\u201D from browser history?": "\u300C{v0}\u300D\u3092\u30D6\u30E9\u30A6\u30B6\u5C65\u6B74\u304B\u3089\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
   "No browser history yet.": "\u95B2\u89A7\u5C65\u6B74\u306F\u307E\u3060\u3042\u308A\u307E\u305B\u3093\u3002",
   "No history yet": "\u5C65\u6B74\u306F\u307E\u3060\u3042\u308A\u307E\u305B\u3093",
+  "Saved history version": "\u4FDD\u5B58\u3055\u308C\u305F\u5C65\u6B74\u306E\u7248",
+  "Current history": "\u73FE\u5728\u306E\u5C65\u6B74",
+  "Unknown saved time": "\u4FDD\u5B58\u6642\u523B\u4E0D\u660E",
+  "Loading saved history\u2026": "\u4FDD\u5B58\u3055\u308C\u305F\u5C65\u6B74\u3092\u8AAD\u307F\u8FBC\u307F\u4E2D\u2026",
+  "Legacy saved history": "\u65E7\u5F62\u5F0F\u306E\u4FDD\u5B58\u5C65\u6B74",
+  "Viewing saved history from {v0}. Read-only \xB7 {v1}": "{v0} \u306B\u4FDD\u5B58\u3055\u308C\u305F\u5C65\u6B74\u3092\u8868\u793A\u4E2D\uFF08\u8AAD\u307F\u53D6\u308A\u5C02\u7528\uFF09\u30FB{v1}",
+  "This saved history version is no longer available.": "\u3053\u306E\u4FDD\u5B58\u5C65\u6B74\u306E\u7248\u306F\u5229\u7528\u3067\u304D\u306A\u304F\u306A\u308A\u307E\u3057\u305F\u3002",
+  "This saved tab no longer has a restorable URL.": "\u3053\u306E\u4FDD\u5B58\u7248\u306E\u30BF\u30D6\u306B\u306F\u5FA9\u5143\u3067\u304D\u308BURL\u304C\u3042\u308A\u307E\u305B\u3093\u3002",
+  "This saved visit is no longer available.": "\u3053\u306E\u4FDD\u5B58\u7248\u306E\u8A2A\u554F\u5C65\u6B74\u306F\u5229\u7528\u3067\u304D\u306A\u304F\u306A\u308A\u307E\u3057\u305F\u3002",
+  "Restore saved visit": "\u4FDD\u5B58\u7248\u306E\u8A2A\u554F\u3092\u5FA9\u5143",
+  "Load older history": "\u3055\u3089\u306B\u53E4\u3044\u5C65\u6B74\u3092\u8AAD\u307F\u8FBC\u3080",
+  "{v0} \xB7 {v1} visit{v2}": "{v0}\u30FB{v1}\u4EF6\u306E\u8A2A\u554F",
   "No history matches these filters.": "\u3053\u306E\u6761\u4EF6\u306B\u4E00\u81F4\u3059\u308B\u5C65\u6B74\u306F\u3042\u308A\u307E\u305B\u3093\u3002",
   "No matching visits": "\u4E00\u81F4\u3059\u308B\u8A2A\u554F\u304C\u3042\u308A\u307E\u305B\u3093",
   "Try clearing one or more filters.": "\u7D5E\u308A\u8FBC\u307F\u6761\u4EF6\u3092\u6E1B\u3089\u3057\u3066\u307F\u3066\u304F\u3060\u3055\u3044\u3002",
@@ -6065,6 +6121,10 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
   pendingTransientTraversalIndex = null;
   historyObserver = null;
   historyRevealNodeId;
+  historyVersionId;
+  historyVersionState = null;
+  historyVersionMeta = null;
+  historyVersionLoadToken = 0;
   closeReasonOverride;
   expandedHistoryBranches = /* @__PURE__ */ new Set();
   expandedResidualParents = /* @__PURE__ */ new Set();
@@ -8430,6 +8490,10 @@ ${item.url}` }
       }
     });
     this.historySearchEl = search;
+    const versionFilter = filters.createEl("select", {
+      attr: { "aria-label": t("Saved history version") }
+    });
+    versionFilter.createEl("option", { text: t("Current history"), value: "" });
     const dayFilter = filters.createEl("input", {
       attr: { type: "date", "aria-label": t("Filter history by day") }
     });
@@ -8443,22 +8507,25 @@ ${item.url}` }
     const clearFilters = filters.createEl("button", { text: t("Clear filters") });
     const summary = page.createDiv({ cls: "ubc-history-summary", attr: { "aria-live": "polite" } });
     const timeline = page.createDiv({ cls: "ubc-history-timeline" });
+    let versions = [];
     const render = () => {
       this.disconnectHistoryObserver();
       timeline.empty();
+      const historyState = this.historyVersionState ?? this.plugin.core.state.history;
+      const savedVersionId = this.historyVersionState && this.historyVersionId ? this.historyVersionId : void 0;
       const needle = search.value.toLowerCase().trim();
       const selectedDay = dayFilter.value;
       const selectedContainer = containerFilter.value;
-      const nodes = this.plugin.core.history.allNodes().filter((node) => node.kind !== "residual").filter((node) => {
+      const nodes = Object.values(historyState.nodes).sort((a, b) => b.timestamp - a.timestamp).filter((node) => node.kind !== "residual").filter((node) => {
         const day = historyDayKey(node.timestamp, this.plugin.core.settings().historyDayStartMinutes);
         if (selectedDay && day !== selectedDay) return false;
         if (selectedContainer) {
-          const nodeContainerId = node.kind === "navigation" ? node.containerId : this.plugin.core.state.history.leaves[node.leafId]?.containerId;
+          const nodeContainerId = node.kind === "navigation" ? node.containerId : historyState.leaves[node.leafId]?.containerId;
           if (nodeContainerId !== selectedContainer) return false;
         }
         if (!needle) return true;
         if (node.kind !== "navigation") return false;
-        const leafTitle = this.plugin.core.state.history.leaves[node.leafId]?.lastTitle || "";
+        const leafTitle = historyState.leaves[node.leafId]?.lastTitle || "";
         let domain = "";
         try {
           domain = new URL(node.url).hostname;
@@ -8478,9 +8545,17 @@ ${item.url}` }
       const navigationCount = nodes.filter((node) => node.kind === "navigation").length;
       const tombstoneCount = nodes.filter((node) => node.kind === "tombstone").length;
       const filtersActive = Boolean(needle || selectedDay || selectedContainer);
-      summary.setText(
-        navigationCount ? t("{v0} visit{v1} across {v2} day{v3}{v4}{v5}", { v0: navigationCount, v1: navigationCount === 1 ? "" : "s", v2: days.length, v3: days.length === 1 ? "" : "s", v4: tombstoneCount ? ` \xB7 ${tombstoneCount} deleted entr${tombstoneCount === 1 ? "y" : "ies"} retained` : "", v5: filtersActive ? " \xB7 filtered" : "" }) : tombstoneCount ? t("{v0} deleted histor{v1} retained to preserve navigation paths{v2}", { v0: tombstoneCount, v1: tombstoneCount === 1 ? "y entry" : "y entries", v2: filtersActive ? " \xB7 filtered" : "" }) : filtersActive ? t("No history matches these filters.") : t("No browser history yet.")
-      );
+      const countSummary = navigationCount ? t("{v0} visit{v1} across {v2} day{v3}{v4}{v5}", { v0: navigationCount, v1: navigationCount === 1 ? "" : "s", v2: days.length, v3: days.length === 1 ? "" : "s", v4: tombstoneCount ? ` \xB7 ${tombstoneCount} deleted entr${tombstoneCount === 1 ? "y" : "ies"} retained` : "", v5: filtersActive ? " \xB7 filtered" : "" }) : tombstoneCount ? t("{v0} deleted histor{v1} retained to preserve navigation paths{v2}", { v0: tombstoneCount, v1: tombstoneCount === 1 ? "y entry" : "y entries", v2: filtersActive ? " \xB7 filtered" : "" }) : filtersActive ? t("No history matches these filters.") : t("No browser history yet.");
+      if (savedVersionId) {
+        const capturedAt = this.historyVersionMeta?.capturedAt;
+        const capturedLabel = capturedAt ? new Date(capturedAt).toLocaleString() : t("Unknown saved time");
+        summary.setText(t("Viewing saved history from {v0}. Read-only \xB7 {v1}", {
+          v0: capturedLabel,
+          v1: countSummary
+        }));
+      } else {
+        summary.setText(countSummary);
+      }
       clearFilters.toggleClass("is-hidden", !filtersActive);
       if (!days.length) {
         const empty = timeline.createDiv({ cls: "ubc-history-empty" });
@@ -8490,14 +8565,14 @@ ${item.url}` }
         });
         return;
       }
-      const revealNode = this.historyRevealNodeId ? this.plugin.core.state.history.nodes[this.historyRevealNodeId] : void 0;
+      const revealNode = !savedVersionId && this.historyRevealNodeId ? historyState.nodes[this.historyRevealNodeId] : void 0;
       const revealDay = revealNode ? historyDayKey(revealNode.timestamp, this.plugin.core.settings().historyDayStartMinutes) : void 0;
       const revealDayIndex = revealDay ? days.findIndex(([day]) => day === revealDay) : -1;
       let renderedDays = 0;
       const batchSize = 14;
       const sentinel = document.createElement("button");
       sentinel.className = "ubc-history-load-more";
-      sentinel.textContent = "Load older history";
+      sentinel.textContent = t("Load older history");
       const appendBatch = () => {
         sentinel.remove();
         const batch = days.slice(renderedDays, renderedDays + batchSize);
@@ -8505,13 +8580,15 @@ ${item.url}` }
         for (const [day, dayNodes] of batch) {
           const section = timeline.createEl("section", { cls: "ubc-history-day" });
           const dayHeading = section.createEl("h2", { text: day });
-          dayHeading.addEventListener("contextmenu", (event) => {
-            event.preventDefault();
-            this.showHistoryDayMenu(day, dayNodes, event, () => {
-              dayFilter.value = day;
-              render();
-            }, render);
-          });
+          if (!savedVersionId) {
+            dayHeading.addEventListener("contextmenu", (event) => {
+              event.preventDefault();
+              this.showHistoryDayMenu(day, dayNodes, event, () => {
+                dayFilter.value = day;
+                render();
+              }, render);
+            });
+          }
           const byLeaf = /* @__PURE__ */ new Map();
           for (const node of dayNodes.sort((a, b) => a.timestamp - b.timestamp)) {
             const bucket = byLeaf.get(node.leafId) ?? [];
@@ -8519,26 +8596,42 @@ ${item.url}` }
             byLeaf.set(node.leafId, bucket);
           }
           for (const [leafId, leafNodes] of byLeaf) {
-            const leafRecord = this.plugin.core.state.history.leaves[leafId];
+            const leafRecord = historyState.leaves[leafId];
             const group = section.createDiv({ cls: "ubc-history-leaf" });
             const leafHeader = group.createDiv({ cls: "ubc-history-leaf-header" });
             leafHeader.createSpan({
               text: leafRecord?.lastTitle || "Tab",
               attr: { title: this.plugin.core.containers.nameFor(leafRecord?.containerId) }
             });
-            leafHeader.addEventListener("contextmenu", (event) => {
-              event.preventDefault();
-              this.showHistoryLeafMenu(leafId, leafNodes, event, render);
-            });
-            if (leafRecord?.closedAt && leafRecord.lastUrl) {
-              const restore = leafHeader.createEl("button", { text: t("Restore") });
-              restore.addEventListener("click", () => this.plugin.restoreLeaf(leafId));
+            if (savedVersionId) {
+              const canRestore = Boolean(
+                leafRecord?.lastUrl || leafNodes.some((node) => node.kind === "navigation")
+              );
+              if (canRestore) {
+                const restore = leafHeader.createEl("button", { text: t("Restore") });
+                restore.addEventListener("click", () => {
+                  void (async () => {
+                    const restored = await this.plugin.restoreSavedHistoryLeaf(savedVersionId, leafId);
+                    if (!restored) new import_obsidian14.Notice(t("This saved tab no longer has a restorable URL."));
+                  })();
+                });
+              }
+              this.renderSavedHistoryLeafNodes(group, leafNodes, savedVersionId);
+            } else {
+              leafHeader.addEventListener("contextmenu", (event) => {
+                event.preventDefault();
+                this.showHistoryLeafMenu(leafId, leafNodes, event, render);
+              });
+              if (leafRecord?.closedAt && leafRecord.lastUrl) {
+                const restore = leafHeader.createEl("button", { text: t("Restore") });
+                restore.addEventListener("click", () => this.plugin.restoreLeaf(leafId));
+              }
+              this.renderHistoryLeafNodes(
+                group,
+                leafNodes,
+                Boolean(needle || selectedDay || selectedContainer)
+              );
             }
-            this.renderHistoryLeafNodes(
-              group,
-              leafNodes,
-              Boolean(needle || selectedDay || selectedContainer)
-            );
           }
         }
         if (renderedDays < days.length) timeline.appendChild(sentinel);
@@ -8546,7 +8639,7 @@ ${item.url}` }
       sentinel.addEventListener("click", appendBatch);
       const initialBatches = revealDayIndex >= 0 ? Math.floor(revealDayIndex / batchSize) + 1 : 1;
       for (let batch = 0; batch < initialBatches; batch++) appendBatch();
-      if (this.historyRevealNodeId) {
+      if (!savedVersionId && this.historyRevealNodeId) {
         const revealId = this.historyRevealNodeId;
         window.requestAnimationFrame(() => {
           const row = [...timeline.querySelectorAll("[data-history-node-id]")].find((candidate) => candidate.dataset.historyNodeId === revealId);
@@ -8571,6 +8664,31 @@ ${item.url}` }
         this.historyObserver.observe(sentinel);
       }
     };
+    const loadVersion = async (id) => {
+      const token = ++this.historyVersionLoadToken;
+      this.historyVersionId = id || void 0;
+      this.historyVersionState = null;
+      this.historyVersionMeta = null;
+      if (!id) {
+        render();
+        return;
+      }
+      timeline.empty();
+      summary.setText(t("Loading saved history\u2026"));
+      const state = await this.plugin.loadSavedHistoryVersion(id);
+      if (token !== this.historyVersionLoadToken || !page.isConnected) return;
+      if (!state) {
+        this.historyVersionId = void 0;
+        versionFilter.value = "";
+        new import_obsidian14.Notice(t("This saved history version is no longer available."));
+        render();
+        return;
+      }
+      this.historyVersionState = state;
+      this.historyVersionMeta = versions.find((version) => version.id === id) ?? null;
+      render();
+    };
+    versionFilter.addEventListener("change", () => void loadVersion(versionFilter.value));
     search.addEventListener("input", render);
     dayFilter.addEventListener("change", render);
     containerFilter.addEventListener("change", render);
@@ -8581,7 +8699,62 @@ ${item.url}` }
       render();
       search.focus();
     });
+    void (async () => {
+      versions = await this.plugin.listSavedHistoryVersions();
+      if (!page.isConnected) return;
+      const available = /* @__PURE__ */ new Set();
+      for (const version of versions) {
+        if (version.current && version.source === "generation") continue;
+        available.add(version.id);
+        const when = version.capturedAt ? new Date(version.capturedAt).toLocaleString() : t("Legacy saved history");
+        versionFilter.createEl("option", {
+          value: version.id,
+          text: t("{v0} \xB7 {v1} visit{v2}", {
+            v0: when,
+            v1: version.navigationCount,
+            v2: version.navigationCount === 1 ? "" : "s"
+          })
+        });
+      }
+      if (this.historyVersionId && available.has(this.historyVersionId)) {
+        versionFilter.value = this.historyVersionId;
+        if (!this.historyVersionState) await loadVersion(this.historyVersionId);
+      } else if (this.historyVersionId) {
+        this.historyVersionId = void 0;
+        this.historyVersionState = null;
+        this.historyVersionMeta = null;
+        versionFilter.value = "";
+        render();
+      }
+    })();
     render();
+  }
+  renderSavedHistoryLeafNodes(parent, nodes, versionId) {
+    for (const node of nodes) {
+      if (node.kind === "residual") continue;
+      const row = parent.createDiv({ cls: "ubc-history-node" });
+      if (node.kind === "tombstone") {
+        row.addClass("is-tombstone");
+        row.createEl("time", { text: new Date(node.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) });
+        row.createSpan({ text: t("Deleted history entry") });
+        continue;
+      }
+      row.createEl("time", { text: new Date(node.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) });
+      const button2 = row.createEl("button", {
+        cls: "ubc-history-link",
+        text: node.title || node.url,
+        attr: {
+          title: node.url,
+          "aria-label": t("Restore saved visit")
+        }
+      });
+      button2.addEventListener("click", () => {
+        void (async () => {
+          const restored = await this.plugin.restoreSavedHistoryNode(versionId, node.id);
+          if (!restored) new import_obsidian14.Notice(t("This saved visit is no longer available."));
+        })();
+      });
+    }
   }
   openWebTargetFromPointer(url, event) {
     url = resolveBookmarkUrl(url, this.plugin.app);
@@ -9599,24 +9772,226 @@ var HybridBrowserPersistence = class {
     this.dataPort = dataPort;
   }
   revision = 0;
+  saveQueue = Promise.resolve();
+  lastHistorySnapshotAt = 0;
   async load() {
     const lightweight = await this.dataPort.load();
     const lightRevision = lightweight?.__hybridRevision;
     const heavy = lightweight?.__hybridHeavyFallback ? null : await this.loadHeavy(lightRevision);
     if (!lightweight && !heavy) return null;
     if (typeof lightRevision === "number") this.revision = Math.max(this.revision, lightRevision);
+    if (heavy) this.revision = Math.max(this.revision, heavy.revision);
     const cleanLightweight = stripHybridMetadata(lightweight);
     if (lightweight?.__hybridHeavyFallback) return cleanLightweight;
     if (!heavy) return cleanLightweight;
     if (typeof lightRevision === "number" && heavy.revision !== lightRevision) {
-      return cleanLightweight;
+      console.warn(
+        "Unified Browser Core: recovering heavy browser state from revision",
+        heavy.revision,
+        "instead of missing revision",
+        lightRevision
+      );
     }
     return {
       ...cleanLightweight ?? {},
       ...heavy.state
     };
   }
-  async save(state) {
+  save(state) {
+    const next = this.saveQueue.then(() => this.saveNow(state));
+    this.saveQueue = next.catch(() => void 0);
+    return next;
+  }
+  async archiveExistingHistoryVersions() {
+    if (typeof indexedDB === "undefined") return 0;
+    let db;
+    try {
+      const database = await openDb();
+      db = database;
+      const generations = await new Promise((resolve, reject) => {
+        const tx = database.transaction(STORE, "readonly");
+        const request = tx.objectStore(STORE).openCursor();
+        const found = [];
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) {
+            resolve(found);
+            return;
+          }
+          const key = String(cursor.key);
+          if (key === this.scope || this.isGenerationKey(key)) {
+            const heavy = normalizeHeavyEnvelope(cursor.value);
+            if (heavy && Object.values(heavy.state.history.nodes).some((node) => node.kind === "navigation")) {
+              found.push(heavy);
+            }
+          }
+          cursor.continue();
+        };
+        request.onerror = () => reject(request.error);
+      });
+      if (!generations.length) return 0;
+      let syntheticCapturedAt = Math.max(Date.now(), this.lastHistorySnapshotAt + 1);
+      await new Promise((resolve, reject) => {
+        const tx = database.transaction(STORE, "readwrite");
+        const store = tx.objectStore(STORE);
+        for (const generation of generations) {
+          const timestamp = revisionTimestamp(generation.revision);
+          const capturedAt = timestamp || syntheticCapturedAt++;
+          const envelope = {
+            capturedAt,
+            sourceRevision: generation.revision,
+            history: generation.state.history
+          };
+          store.put(envelope, this.historySnapshotKey(capturedAt));
+          this.lastHistorySnapshotAt = Math.max(this.lastHistorySnapshotAt, capturedAt);
+        }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      });
+      await this.pruneHistorySnapshots();
+      return generations.length;
+    } catch {
+      return 0;
+    } finally {
+      db?.close();
+    }
+  }
+  async captureHistoryVersion(history) {
+    if (typeof indexedDB === "undefined" || Object.keys(history.nodes).length === 0) return false;
+    const snapshot = structuredClone(history);
+    const capturedAt = Math.max(Date.now(), this.lastHistorySnapshotAt + 1);
+    const envelope = {
+      capturedAt,
+      sourceRevision: this.revision,
+      history: snapshot
+    };
+    let db;
+    try {
+      const database = await openDb();
+      db = database;
+      await new Promise((resolve, reject) => {
+        const tx = database.transaction(STORE, "readwrite");
+        tx.objectStore(STORE).put(envelope, this.historySnapshotKey(capturedAt));
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      });
+      this.lastHistorySnapshotAt = capturedAt;
+      await this.pruneHistorySnapshots();
+      return true;
+    } catch {
+      return false;
+    } finally {
+      db?.close();
+    }
+  }
+  async listHistoryVersions() {
+    if (typeof indexedDB === "undefined") return [];
+    const versions = [];
+    let db;
+    try {
+      const database = await openDb();
+      db = database;
+      await new Promise((resolve, reject) => {
+        const tx = database.transaction(STORE, "readonly");
+        const request = tx.objectStore(STORE).openCursor();
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) {
+            resolve();
+            return;
+          }
+          const key = String(cursor.key);
+          const value = cursor.value;
+          if (this.isHistorySnapshotKey(key) && isHistorySnapshotEnvelope(value)) {
+            versions.push(summarizeHistoryVersion(
+              "snapshot:" + value.capturedAt,
+              value.capturedAt,
+              value.sourceRevision,
+              value.history,
+              "snapshot",
+              false
+            ));
+            this.lastHistorySnapshotAt = Math.max(this.lastHistorySnapshotAt, value.capturedAt);
+          } else if (this.isGenerationKey(key)) {
+            const heavy = normalizeHeavyEnvelope(value);
+            if (heavy) {
+              versions.push(summarizeHistoryVersion(
+                "generation:" + heavy.revision,
+                revisionTimestamp(heavy.revision),
+                heavy.revision,
+                heavy.state.history,
+                "generation",
+                heavy.revision === this.revision
+              ));
+            }
+          } else if (key === this.scope) {
+            const heavy = normalizeHeavyEnvelope(value);
+            if (heavy) {
+              versions.push(summarizeHistoryVersion(
+                "legacy",
+                revisionTimestamp(heavy.revision),
+                heavy.revision,
+                heavy.state.history,
+                "legacy",
+                heavy.revision === this.revision
+              ));
+            }
+          }
+          cursor.continue();
+        };
+        request.onerror = () => reject(request.error);
+      });
+      return versions.filter((version) => version.navigationCount > 0).sort((a, b) => b.capturedAt - a.capturedAt || b.sourceRevision - a.sourceRevision);
+    } catch {
+      return [];
+    } finally {
+      db?.close();
+    }
+  }
+  async loadHistoryVersion(id) {
+    if (typeof indexedDB === "undefined") return null;
+    let key;
+    let kind;
+    if (id === "legacy") {
+      key = this.scope;
+      kind = "legacy";
+    } else if (id.startsWith("snapshot:")) {
+      const capturedAt = Number(id.slice("snapshot:".length));
+      if (!Number.isFinite(capturedAt) || capturedAt <= 0) return null;
+      key = this.historySnapshotKey(capturedAt);
+      kind = "snapshot";
+    } else if (id.startsWith("generation:")) {
+      const revision = Number(id.slice("generation:".length));
+      if (!Number.isFinite(revision) || revision < 0) return null;
+      key = this.generationKey(revision);
+      kind = "generation";
+    } else {
+      return null;
+    }
+    let db;
+    try {
+      const database = await openDb();
+      db = database;
+      const value = await new Promise((resolve, reject) => {
+        const tx = database.transaction(STORE, "readonly");
+        const request = tx.objectStore(STORE).get(key);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      if (kind === "snapshot") {
+        return isHistorySnapshotEnvelope(value) ? value.history : null;
+      }
+      const heavy = normalizeHeavyEnvelope(value);
+      return heavy?.state.history ?? null;
+    } catch {
+      return null;
+    } finally {
+      db?.close();
+    }
+  }
+  async saveNow(state) {
     const previousRevision = this.revision;
     const revision = Math.max(Date.now(), this.revision + 1);
     const heavy = {
@@ -9669,17 +10044,30 @@ var HybridBrowserPersistence = class {
         request.onsuccess = () => resolve(request.result ?? null);
         request.onerror = () => reject(request.error);
       });
-      const raw = typeof revision === "number" ? await read(this.generationKey(revision)) : await read(this.scope);
-      if (!raw && typeof revision === "number") {
-        const legacy = await read(this.scope);
-        if (legacy && "revision" in legacy && legacy.revision === revision) {
-          return legacy;
-        }
-        return null;
+      const readLatestGeneration = () => new Promise((resolve, reject) => {
+        const tx = database.transaction(STORE, "readonly");
+        const request = tx.objectStore(STORE).openCursor();
+        let latest = null;
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) {
+            resolve(latest);
+            return;
+          }
+          const key = String(cursor.key);
+          const candidate = this.isGenerationKey(key) ? normalizeHeavyEnvelope(cursor.value) : null;
+          if (candidate && (!latest || candidate.revision > latest.revision)) latest = candidate;
+          cursor.continue();
+        };
+        request.onerror = () => reject(request.error);
+      });
+      if (typeof revision === "number") {
+        const exact = normalizeHeavyEnvelope(await read(this.generationKey(revision)));
+        if (exact) return exact;
       }
-      if (!raw) return null;
-      if ("revision" in raw && "state" in raw) return raw;
-      return { revision: 0, state: raw };
+      const legacy = normalizeHeavyEnvelope(await read(this.scope));
+      if (legacy && (typeof revision !== "number" || legacy.revision === revision)) return legacy;
+      return await readLatestGeneration() ?? legacy;
     } catch {
       return null;
     } finally {
@@ -9738,7 +10126,7 @@ var HybridBrowserPersistence = class {
           const cursor = request.result;
           if (!cursor) return;
           const key = String(cursor.key);
-          if (key === this.scope || key.startsWith(this.scope + ":") && key !== this.generationKey(keepRevision)) {
+          if (key === this.scope || this.isGenerationKey(key) && key !== this.generationKey(keepRevision)) {
             cursor.delete();
           }
           cursor.continue();
@@ -9753,10 +10141,93 @@ var HybridBrowserPersistence = class {
       db?.close();
     }
   }
+  async pruneHistorySnapshots() {
+    if (typeof indexedDB === "undefined") return;
+    let db;
+    try {
+      const database = await openDb();
+      db = database;
+      const keys = await new Promise((resolve, reject) => {
+        const tx = database.transaction(STORE, "readonly");
+        const request = tx.objectStore(STORE).openCursor();
+        const found = [];
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) {
+            resolve(found);
+            return;
+          }
+          const key = String(cursor.key);
+          if (this.isHistorySnapshotKey(key) && isHistorySnapshotEnvelope(cursor.value)) {
+            found.push({ key, capturedAt: cursor.value.capturedAt });
+          }
+          cursor.continue();
+        };
+        request.onerror = () => reject(request.error);
+      });
+      const remove = keys.sort((a, b) => b.capturedAt - a.capturedAt).slice(HISTORY_SNAPSHOT_LIMIT);
+      if (!remove.length) return;
+      await new Promise((resolve, reject) => {
+        const tx = database.transaction(STORE, "readwrite");
+        const store = tx.objectStore(STORE);
+        for (const entry of remove) store.delete(entry.key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      });
+    } catch {
+    } finally {
+      db?.close();
+    }
+  }
   generationKey(revision) {
     return this.scope + ":" + revision;
   }
+  isGenerationKey(key) {
+    const prefix = this.scope + ":";
+    if (!key.startsWith(prefix)) return false;
+    const suffix = key.slice(prefix.length);
+    return /^\d+$/.test(suffix);
+  }
+  historySnapshotKey(capturedAt) {
+    return this.scope + ":history:" + capturedAt;
+  }
+  isHistorySnapshotKey(key) {
+    const prefix = this.scope + ":history:";
+    if (!key.startsWith(prefix)) return false;
+    return /^\d+$/.test(key.slice(prefix.length));
+  }
 };
+function normalizeHeavyEnvelope(value) {
+  if (!value || typeof value !== "object") return null;
+  const raw = value;
+  if (typeof raw.revision === "number" && raw.state && typeof raw.state === "object") {
+    return raw;
+  }
+  if (raw.history && raw.restoreCapsules && raw.formRecovery) {
+    return { revision: 0, state: raw };
+  }
+  return null;
+}
+function isHistorySnapshotEnvelope(value) {
+  if (!value || typeof value !== "object") return false;
+  const raw = value;
+  return typeof raw.capturedAt === "number" && typeof raw.sourceRevision === "number" && Boolean(raw.history && typeof raw.history === "object");
+}
+function summarizeHistoryVersion(id, capturedAt, sourceRevision, history, source2, current) {
+  return {
+    id,
+    capturedAt,
+    sourceRevision,
+    navigationCount: Object.values(history.nodes).filter((node) => node.kind === "navigation").length,
+    leafCount: Object.keys(history.leaves).length,
+    source: source2,
+    current
+  };
+}
+function revisionTimestamp(revision) {
+  return revision >= 1e12 ? revision : 0;
+}
 function stripHybridMetadata(value) {
   if (!value) return null;
   const { __hybridRevision: _revision, __hybridHeavyFallback: _fallback, ...state } = value;
@@ -9764,6 +10235,7 @@ function stripHybridMetadata(value) {
 }
 var DB_NAME = "unified-browser-core";
 var STORE = "heavy-state";
+var HISTORY_SNAPSHOT_LIMIT = 16;
 function openDb() {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, 1);
@@ -10365,6 +10837,8 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
     );
     const raw = await this.persistence.load();
     const state = BrowserCore.normalize(raw);
+    await this.persistence.archiveExistingHistoryVersions();
+    await this.persistence.captureHistoryVersion(state.history);
     setLocaleResolver(import_obsidian17.getLanguage);
     setLanguage(state.settings.language);
     this.core = new BrowserCore(
@@ -10719,6 +11193,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
   }
   async onunload() {
     this.prepareForShutdown();
+    await this.persistence.captureHistoryVersion(this.core.state.history);
     const liveBrowserLeaves = this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE);
     for (const leaf of liveBrowserLeaves) {
       if (!(leaf.view instanceof BrowserView)) continue;
@@ -10804,6 +11279,42 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
       }
     });
     leaf.setPinned(pinned);
+  }
+  listSavedHistoryVersions() {
+    return this.persistence.listHistoryVersions();
+  }
+  loadSavedHistoryVersion(id) {
+    return this.persistence.loadHistoryVersion(id);
+  }
+  async restoreSavedHistoryNode(versionId, nodeId, options = {}) {
+    const history = await this.persistence.loadHistoryVersion(versionId);
+    const node = history?.nodes[nodeId];
+    if (!node || node.kind !== "navigation") return false;
+    await this.restoreHistoryNode(node, options);
+    return true;
+  }
+  async restoreSavedHistoryLeaf(versionId, leafId, options = {}) {
+    const history = await this.persistence.loadHistoryVersion(versionId);
+    if (!history) return false;
+    const record = history.leaves[leafId];
+    const currentId = history.currentByLeaf[leafId];
+    const current = currentId ? history.nodes[currentId] : void 0;
+    const latest = Object.values(history.nodes).filter((node2) => node2.kind === "navigation" && node2.leafId === leafId).sort((a, b) => b.timestamp - a.timestamp)[0];
+    const node = current?.kind === "navigation" ? current : latest;
+    const url = node?.url ?? record?.lastUrl;
+    if (!url) return false;
+    const pinned = options.pinned ?? record?.pinned ?? false;
+    const leaf = await this.openBrowser({
+      url,
+      containerId: options.containerId ?? node?.containerId ?? record?.containerId,
+      state: {
+        pinned,
+        restoreTargetUrl: node?.url,
+        restoreTargetIndex: node?.sessionEntryIndex
+      }
+    });
+    leaf.setPinned(pinned);
+    return true;
   }
   async requestPermission(origin, permission) {
     return promptPermission(this.app, origin, permission);

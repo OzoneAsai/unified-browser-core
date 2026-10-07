@@ -82,12 +82,36 @@ if (!globalThis[singletonKey]) {
     if (value === "new-window") return "new-window";
     return "new-tab";
   };
+  const parseFeatures = (value) => {
+    const features = new Map();
+    for (const rawPart of (value || "").split(",")) {
+      const part = rawPart.trim();
+      if (!part) continue;
+      const equals = part.indexOf("=");
+      const key = (equals >= 0 ? part.slice(0, equals) : part).trim().toLowerCase();
+      if (!key) continue;
+      const featureValue = equals >= 0 ? part.slice(equals + 1).trim().toLowerCase() : "";
+      features.set(key, featureValue);
+    }
+    return features;
+  };
+  const featureEnabled = (features, key) => {
+    if (!features.has(key)) return false;
+    return !["0", "no", "false", "off"].includes(features.get(key));
+  };
   const classify = (details) => {
+    const features = parseFeatures(details.features);
+    if (featureEnabled(features, "noopener") || featureEnabled(features, "noreferrer")) {
+      return "core-tab";
+    }
     const frameName = details.frameName && details.frameName.trim();
     if (frameName && !["_blank", "_self", "_top", "_parent"].includes(frameName.toLowerCase())) {
       return "auxiliary";
     }
-    if (details.features && details.features.trim()) return "auxiliary";
+    if (featureEnabled(features, "popup")) return "auxiliary";
+    if (["width", "height", "left", "top", "screenx", "screeny"].some((key) => features.has(key))) {
+      return "auxiliary";
+    }
     return "core-tab";
   };
   const closeChild = (child) => {
@@ -368,8 +392,31 @@ function normalizeDisposition(value: string | undefined): BrowserOpenDisposition
 export function classifyWindowOpen(
   details: Pick<WindowOpenDetails, "disposition" | "frameName" | "features">,
 ): "auxiliary" | "core-tab" {
+  const features = parseWindowFeatures(details.features);
+  if (featureEnabled(features, "noopener") || featureEnabled(features, "noreferrer")) return "core-tab";
+
   const frameName = details.frameName?.trim();
   if (frameName && !["_blank", "_self", "_top", "_parent"].includes(frameName.toLowerCase())) return "auxiliary";
-  if (details.features?.trim()) return "auxiliary";
+  if (featureEnabled(features, "popup")) return "auxiliary";
+  if (["width", "height", "left", "top", "screenx", "screeny"].some((key) => features.has(key))) return "auxiliary";
   return "core-tab";
+}
+
+function parseWindowFeatures(value: string | undefined): Map<string, string> {
+  const features = new Map<string, string>();
+  for (const rawPart of (value ?? "").split(",")) {
+    const part = rawPart.trim();
+    if (!part) continue;
+    const equals = part.indexOf("=");
+    const key = (equals >= 0 ? part.slice(0, equals) : part).trim().toLowerCase();
+    if (!key) continue;
+    const featureValue = equals >= 0 ? part.slice(equals + 1).trim().toLowerCase() : "";
+    features.set(key, featureValue);
+  }
+  return features;
+}
+
+function featureEnabled(features: ReadonlyMap<string, string>, key: string): boolean {
+  if (!features.has(key)) return false;
+  return !["0", "no", "false", "off"].includes(features.get(key) ?? "");
 }

@@ -168,6 +168,25 @@ Obsidian receives the original tab drag start and owns pane movement and split p
 Only UBC tab headers receive Firefox-style sizing and strip classes. If a tab group mixes UBC and ordinary Obsidian views, UBC keeps its own browser-tab decoration while the shared strip geometry and native tabs remain untouched. This also clears stale UBC layout classes from native tabs on refresh.
 
 
+### 0.2.11 saved history versions
+
+- Browser Core keeps bounded read-only history snapshots across plugin load/unload cycles instead of treating the newest persisted state as the only recoverable truth.
+- On startup, any surviving older IndexedDB heavy-state generations are archived before normal pruning can remove them.
+- The History page can switch between current history and saved versions. Saved versions are read-only; individual visits or whole saved tabs can be restored into new current tabs without replacing the active history database.
+- Up to 16 history snapshots are retained. Normal heavy-state generations can still be compacted independently.
+
+### 0.2.10 shutdown history safety
+
+- Disabling or unloading the plugin no longer makes the live browsing session eligible for history retention deletion.
+- Hybrid persistence writes are serialized so an older save cannot overwrite the lightweight revision and prune a newer IndexedDB history generation.
+- If an older build already left the lightweight revision out of sync with IndexedDB, UBC now recovers the newest surviving heavy-state generation instead of silently normalizing history to empty.
+
+### 0.2.9 browser ownership
+
+- Ordinary new-window requests remain under Browser Core ownership even when sites attach non-presentation window features such as `external`.
+- `noopener` and `noreferrer` requests stay in Browser Core tabs because they do not require native opener semantics.
+- Native auxiliary windows are reserved for opener-dependent named contexts or explicit popup/window geometry, preventing browser-renderable resources such as PDFs from being delegated to the host or operating-system browser.
+
 ### 0.2.8 bookmark deletion
 
 - Clicking Delete bookmark inside the editor no longer gets intercepted by outside-popup dismissal.

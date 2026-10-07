@@ -303,6 +303,7 @@ export class HistoryGraph {
   ): number {
     const candidates = Object.values(this.state.leaves)
       .filter((leaf) => typeof leaf.closedAt === "number")
+      .filter((leaf) => leaf.closeReason !== "shutdown")
       .filter((leaf) => !this.isProtectedLeaf(leaf.id))
       .sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0));
     let removed = 0;
