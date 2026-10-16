@@ -274,6 +274,8 @@ export interface BrowserLeafViewState extends Record<string, unknown> {
   pinned?: boolean;
   manualRetention?: ManualRetention;
   restoredFromLeafId?: LeafId;
+  /** Stable identity of the checkpoint leaf restored into this view. */
+  sessionSourceLeafId?: LeafId;
   restoreTargetUrl?: string;
   restoreTargetIndex?: number;
   internalSurface?: "home" | "history" | "bookmarks" | "passwords";

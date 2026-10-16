@@ -3,10 +3,11 @@ import { readFile, writeFile, rename, mkdir, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { passwordOrigin, parseRecovery, recoveryText, secretBytes, seal, unseal, wrappingKey, type Sealed } from "./crypto";
 import { WindowsHello } from "./windows-hello";
+import { DeviceKey, type DeviceWrapping } from "./device-key";
 
 export interface PasswordEntry { id: string; origin: string; username: string; password: string; title: string; container?: string; updated: number }
 interface Contents { entries: PasswordEntry[]; excluded: string[] }
-interface Envelope { version: 1; id: string; recovery: Sealed; hello?: { credential: string; salt: string; wrapped: Sealed }; payload: Sealed; idleMinutes: number }
+interface Envelope { version: 1; id: string; recovery: Sealed; hello?: { credential: string; salt: string; wrapped: Sealed }; device?: DeviceWrapping; payload: Sealed; idleMinutes: number }
 export class PasswordVault {
   private envelope?: Envelope;
   loadFailed = false;
@@ -19,11 +20,17 @@ export class PasswordVault {
   private operations: Promise<void> = Promise.resolve();
   private listeners = new Set<() => void>();
   readonly hello = new WindowsHello();
-  constructor(private path: string) {}
+  readonly device: DeviceKey;
+  constructor(private path: string, device = new DeviceKey()) { this.device = device; }
   async load(): Promise<void> {
     try {
       if ((await stat(this.path)).size > 16 * 1024 * 1024) throw new Error("Password vault is too large");
       this.envelope = validateEnvelope(JSON.parse(await readFile(this.path, "utf8")));
+      // Mac Keychain / Linux Secret Service can restore the vault key without
+      // asking for a long recovery key on every Obsidian restart.
+      if (this.envelope.device && this.device.available()) {
+        try { await this.unlockDevice(); } catch { /* Recovery key remains usable. */ }
+      }
     }
     catch (error: any) { if (error.code !== "ENOENT") this.loadFailed = true; }
   }
@@ -31,6 +38,7 @@ export class PasswordVault {
   get unlocked(): boolean { return !!this.key; }
   get lockEpoch(): number { return this.generation; }
   get usesHello(): boolean { return !!this.envelope?.hello; }
+  get usesDevice(): boolean { return !!this.envelope?.device; }
   get idleMinutes(): number { return this.envelope?.idleMinutes ?? 5; }
   subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   private emit(): void { for (const listener of this.listeners) listener(); }
@@ -41,14 +49,15 @@ export class PasswordVault {
     this.contents = undefined; this.emit();
   }
   dispose(): void { this.disposed = true; this.lock(); this.hello.dispose(); this.listeners.clear(); }
-  setup(useHello: boolean, acknowledge?: (key: string) => Promise<boolean>): Promise<string> { return this.operation(() => this.setupImpl(useHello, acknowledge)); }
-  private async setupImpl(useHello: boolean, acknowledge?: (key: string) => Promise<boolean>): Promise<string> {
+  setup(method: boolean | "device", acknowledge?: (key: string) => Promise<boolean>): Promise<string> { return this.operation(() => this.setupImpl(method, acknowledge)); }
+  private async setupImpl(method: boolean | "device", acknowledge?: (key: string) => Promise<boolean>): Promise<string> {
     if (this.exists) throw new Error("Password vault already exists");
     const generation = this.generation, id = randomUUID(), key = secretBytes(), recovery = secretBytes();
     let credential: string | undefined;
     try {
       const envelope: Envelope = { version: 1, id, recovery: wrap(recovery, key, id, "recovery"), payload: seal(key, Buffer.from(JSON.stringify({ entries: [], excluded: [] })), id + ":payload"), idleMinutes: 5 };
-      if (useHello) {
+      if (method === "device") envelope.device = this.device.wrap(key);
+      if (method === true) {
         const salt = secretBytes().toString("base64");
         const created = await this.hello.request("create", { Salt: salt, User: secretBytes().toString("base64") });
         credential = created.Credential;
@@ -79,6 +88,27 @@ export class PasswordVault {
     const secret = Buffer.from(reply.Secret || "", "base64"); reply.Secret = undefined;
     try { this.activate(unwrap(secret, envelope.hello.wrapped, envelope.id, "hello"), generation); } finally { secret.fill(0); }
   }
+  async unlockDevice(): Promise<void> {
+    const envelope = this.envelope;
+    if (!envelope?.device) throw new Error("OS-protected unlock is not enabled");
+    if (!this.device.available()) throw new Error("OS-protected unlock is unavailable");
+    const generation = this.generation;
+    this.activate(this.device.unwrap(envelope.device), generation);
+  }
+  enableDevice(): Promise<void> { return this.operation(async () => {
+    this.requireUnlocked();
+    const generation = this.generation;
+    const device = this.device.wrap(this.key!);
+    if (generation !== this.generation) throw new Error("Password vault operation cancelled");
+    const next = { ...this.envelope!, device };
+    await this.persist(next);
+    this.envelope = next; this.touch(); this.emit();
+  }); }
+  disableDevice(): Promise<void> { return this.operation(async () => {
+    this.requireUnlocked();
+    const next = { ...this.envelope! }; delete next.device;
+    await this.persist(next); this.envelope = next; this.touch(); this.emit();
+  }); }
   unlockRecovery(text: string): void {
     const envelope = this.envelope; if (!envelope) throw new Error("No password vault");
     const secret = parseRecovery(text);
@@ -134,12 +164,12 @@ export class PasswordVault {
     finally { key.fill(0); }
   }
   disableHello(): Promise<void> { return this.operation(async () => { this.requireUnlocked(); const previous = this.envelope!.hello; const next = { ...this.envelope! }; delete next.hello; await this.persist(next); this.envelope = next; this.emit(); if(previous) try{await this.hello.request("delete",{Credential:previous.credential});}catch{} }); }
-  async exportBackup(): Promise<string> { await this.queue; if(!this.envelope) throw new Error("No password vault"); return JSON.stringify({ ...this.envelope, hello: undefined }, null, 2); }
+  async exportBackup(): Promise<string> { await this.queue; if(!this.envelope) throw new Error("No password vault"); return JSON.stringify({ ...this.envelope, hello: undefined, device: undefined }, null, 2); }
   importBackup(text: string, recoveryTextValue: string): Promise<void> { return this.operation(() => this.importBackupImpl(text, recoveryTextValue)); }
   private async importBackupImpl(text: string, recoveryTextValue: string): Promise<void> {
     const generation = this.generation;
     if(text.length>16*1024*1024) throw new Error("Backup is too large");
-    const imported = validateEnvelope(JSON.parse(text)); delete imported.hello;
+    const imported = validateEnvelope(JSON.parse(text)); delete imported.hello; delete imported.device;
     const secret = parseRecovery(recoveryTextValue); let key: Buffer | undefined;
     try {
       key = unwrap(secret,imported.recovery,imported.id,"recovery"); const plain = unseal(key,imported.payload,imported.id+":payload");
@@ -173,6 +203,7 @@ function validateEnvelope(value: any): Envelope {
   if(value?.version!==1 || typeof value.id!=="string" || value.id.length>128 || !value.recovery || !value.payload || !Number.isInteger(value.idleMinutes) || value.idleMinutes<1 || value.idleMinutes>60) throw new Error("Invalid password vault");
   for(const sealed of [value.recovery,value.payload,value.hello?.wrapped].filter(Boolean)) if(![sealed.nonce,sealed.data,sealed.tag].every(v=>typeof v==="string") || sealed.data.length>24*1024*1024) throw new Error("Invalid encrypted vault");
   if(value.hello && (typeof value.hello.credential!=="string" || typeof value.hello.salt!=="string" || !value.hello.wrapped)) throw new Error("Invalid Hello configuration");
+  if(value.device && (!["darwin","linux"].includes(value.device.platform) || typeof value.device.data !== "string" || value.device.data.length < 16 || value.device.data.length > 16384 || !/^[a-z\d+/]+={0,2}$/i.test(value.device.data))) throw new Error("Invalid OS-protected key");
   return value;
 }
 function validateContents(value: any): Contents {

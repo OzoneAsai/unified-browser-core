@@ -1,6 +1,6 @@
 import { bindAddressSuggestions } from "./address-suggestions";
 import { renderPasswordPage, unlockVault, editPassword, passwordPopover, passwordButton } from "../passwords/ui";
-import { readPasswordEvent, fillPassword, type PasswordGuestEvent } from "../passwords/guest";
+import { readPasswordEvent, readCurrentPasswordSnapshot, fillPassword, type PasswordGuestEvent } from "../passwords/guest";
 import { passwordOrigin, generatePassword } from "../passwords/crypto";
 import { observeGuestInteraction } from "../adapters/guest-interaction";
 import { ItemView, Menu, Notice, setIcon, type ViewStateResult, type WorkspaceLeaf } from "obsidian";
@@ -40,6 +40,8 @@ import { showRecoveryDetails } from "./recovery-details-modal";
 import { showFormRecoveryCandidates } from "./form-recovery-candidates-modal";
 import { confirmAction } from "./confirm-modal";
 import { resolveTabLayoutPolicy } from "../tabs/tab-layout-policy";
+import { gateLeafDetach } from "../adapters/leaf-close-gate";
+import { RICH_NAVIGATION_RESTORE_ENABLED } from "../core/experimental-features";
 import { normalizeBrowserAddress } from "../navigation/address-normalizer";
 import type { VaultHomeFile } from "../adapters/obsidian-home";
 import { buildWebContentMenuEntries } from "./web-content-menu-model";
@@ -105,6 +107,7 @@ export class BrowserView extends ItemView {
   private pendingViewState: BrowserLeafViewState | undefined;
   private manualRetention: "default" | "preserve" = "default";
   private restoredFromLeafId: string | undefined;
+  private sessionSourceLeafId: string | undefined;
   private restoreTargetUrl: string | undefined;
   private restoreTargetIndex: number | undefined;
   private checkpointTimer: number | undefined;
@@ -126,6 +129,8 @@ export class BrowserView extends ItemView {
   private historyVersionMeta: HistoryVersionSummary | null = null;
   private historyVersionLoadToken = 0;
   private closeReasonOverride: BrowserLeafRecord["closeReason"] | undefined;
+  private releaseLeafDetachGate?: () => void;
+  private preparingLeafClose = false;
   private readonly expandedHistoryBranches = new Set<string>();
   private readonly expandedResidualParents = new Set<string>();
   private readonly collapsedBookmarkFolders = new Set<string>();
@@ -167,6 +172,8 @@ export class BrowserView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
+    this.releaseLeafDetachGate = gateLeafDetach(this.leaf, () => this.prepareForLeafClose(),
+      error => console.warn("Unified Browser Core: graceful browser tab close failed", error));
     this.rootEl = this.contentEl as HTMLDivElement;
     this.rootEl.empty();
     this.rootEl.addClass("ubc-browser-view");
@@ -196,6 +203,8 @@ export class BrowserView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.releaseLeafDetachGate?.();
+    this.releaseLeafDetachGate = undefined;
     this.passwordPageDispose?.(); this.passwordPopoverClose?.();
     this.passwordUnsubscribe?.();
     if (this.passwordPoll !== undefined) window.clearInterval(this.passwordPoll);
@@ -203,7 +212,7 @@ export class BrowserView extends ItemView {
     await this.captureRecoveryState();
     this.disconnectHistoryObserver();
     if (this.webview) await this.teardownFormRecoveryInstrumentation(this.webview);
-    this.destroyWebview();
+    await this.destroyWebview();
     this.clearTabStyle();
     this.browserHeaderTitleEl?.removeClass("ubc-browser-title-container");
     this.browserHeaderEl?.removeClass("ubc-browser-view-header");
@@ -234,6 +243,20 @@ export class BrowserView extends ItemView {
     }, 0);
   }
 
+  private async prepareForLeafClose(): Promise<void> {
+    const guest = this.webview;
+    if (this.plugin.isUnloading() || !guest) return;
+    try {
+      await this.captureRecoveryState();
+    } finally {
+      // An about:blank teardown is not user navigation: do not rewrite the
+      // saved URL, title, history, or workspace checkpoint.
+      if (this.webview !== guest || !guest.isConnected) return;
+      this.preparingLeafClose = true;
+      await this.plugin.managedWebviewBackend.prepareGuestForRemoval(guest);
+    }
+  }
+
   private finalizeClose(reason: BrowserLeafRecord["closeReason"]): void {
     this.plugin.core.history.closeLeaf(this.leafId(), reason);
     this.plugin.core.scheduleSave();
@@ -252,6 +275,7 @@ export class BrowserView extends ItemView {
       pinned: this.pinned,
       manualRetention: this.manualRetention,
       restoredFromLeafId: this.restoredFromLeafId,
+      sessionSourceLeafId: this.sessionSourceLeafId,
       internalSurface: this.internalSurface ?? undefined,
       transientHistory: [...this.transientHistory],
       transientIndex: this.transientIndex,
@@ -284,6 +308,7 @@ export class BrowserView extends ItemView {
           siteAssignmentBypassReason: state.siteAssignmentBypassReason,
           restoreTargetUrl: state.restoreTargetUrl,
           restoreTargetIndex: state.restoreTargetIndex,
+          sessionSourceLeafId: state.sessionSourceLeafId ?? state.restoredFromLeafId,
           internalSurface: state.internalSurface,
           transientHistory: state.transientHistory,
           transientIndex: state.transientIndex,
@@ -310,6 +335,7 @@ export class BrowserView extends ItemView {
       state.siteAssignmentBypassOrigin ? "explicit" : undefined
     );
     this.restoredFromLeafId = state.restoredFromLeafId;
+    this.sessionSourceLeafId = state.sessionSourceLeafId ?? state.restoredFromLeafId ?? this.sessionSourceLeafId;
     this.restoreTargetUrl = state.restoreTargetUrl;
     this.restoreTargetIndex = state.restoreTargetIndex;
 
@@ -747,6 +773,7 @@ export class BrowserView extends ItemView {
     menu.addItem((item) => item.setTitle(t("Bookmarks")).setIcon("book-open").onClick(() => this.showInternal("bookmarks")));
     menu.addItem((item) => item.setTitle(t("Passwords")).setIcon("key-round").onClick(() => this.showInternal("passwords")));
     if (!this.internalSurface) menu.addItem((item) => item.setTitle(t("Fill password")).setIcon("key-round").onClick(() => void this.openPasswordSuggestions()));
+    if (!this.internalSurface) menu.addItem((item) => item.setTitle(t("Save password for this site")).setIcon("save").onClick(() => void this.savePasswordForCurrentSite()));
     if (this.plugin.passwords.unlocked) menu.addItem((item) => item.setTitle(t("Lock password vault")).setIcon("lock").onClick(() => this.plugin.passwords.lock()));
     const closed = this.plugin.core.history.recentlyClosed(1)[0];
     menu.addItem((item) => item.setTitle(t("Reopen closed tab")).setIcon("rotate-ccw").setDisabled(!closed)
@@ -960,8 +987,8 @@ export class BrowserView extends ItemView {
     this.passwordButtonEl = this.addToolbarButton("key-round", t("Passwords"), () => void this.openPasswordSuggestions());
     this.passwordButtonEl.hidden = true;
     this.passwordUnsubscribe = this.plugin.passwords.subscribe(() => {
-      this.passwordPopoverClose?.();
-      if (this.webview) void readPasswordEvent(this.webview, this.plugin.passwords.unlocked, this.plugin.managedWebviewBackend.browserApis).catch(() => {});
+      if (!this.passwordSavePopover) this.passwordPopoverClose?.();
+      if (this.webview) this.plugin.managedWebviewBackend.browserApis.enablePasswordCapture(this.webview, this.plugin.passwords.exists);
     });
     this.passwordPoll = window.setInterval(() => void this.pollPasswordEvents(), 1200);
     const updateGuestActivity = () => {
@@ -1326,7 +1353,8 @@ export class BrowserView extends ItemView {
       this.bindWebview(webview);
       this.webLayerEl.appendChild(webview);
 
-      if (this.plugin.core.settings().blockPasskeyRequests || (!this.richRestoreAttempted && this.restoredFromLeafId)) {
+      if (this.plugin.core.settings().blockPasskeyRequests ||
+          (RICH_NAVIGATION_RESTORE_ENABLED && !this.richRestoreAttempted && this.restoredFromLeafId)) {
         // Bootstrap first so guest-scoped response policies are ready.
         // A webview without src never creates a guest, so waiting for
         // did-attach before setting the first URL deadlocks. Use about:blank
@@ -1349,6 +1377,7 @@ export class BrowserView extends ItemView {
 
   private bindWebview(webview: WebviewElement): void {
     webview.addEventListener("will-navigate", () => {
+      if (this.webview !== webview || this.plugin.isUnloading() || this.preparingLeafClose) return;
       void this.pollPasswordEvents();
       void this.captureRecoveryState();
     });
@@ -1357,6 +1386,7 @@ export class BrowserView extends ItemView {
       void this.initializeAttachedWebview(webview);
     });
     webview.addEventListener("did-navigate", (rawEvent: Event) => {
+      if (this.webview !== webview || this.plugin.isUnloading() || this.preparingLeafClose) return;
       const event = rawEvent as WebviewNavigateEvent;
       if (event.isMainFrame === false) return;
       const url = event.url || this.safeWebviewUrl(webview) || this.currentUrlValue;
@@ -1367,8 +1397,10 @@ export class BrowserView extends ItemView {
         this.clearBootstrapHistoryAfterFallback = false;
       }
       this.handleCommittedNavigation(url);
+      this.plugin.managedWebviewBackend.scheduleStorageFlush();
     });
     webview.addEventListener("did-navigate-in-page", (rawEvent: Event) => {
+      if (this.webview !== webview || this.plugin.isUnloading() || this.preparingLeafClose) return;
       const event = rawEvent as WebviewNavigateEvent;
       if (event.isMainFrame === false) return;
       const url = event.url || this.safeWebviewUrl(webview) || this.currentUrlValue;
@@ -1418,12 +1450,14 @@ export class BrowserView extends ItemView {
       }
       this.plugin.core.scheduleSave();
       this.plugin.scheduleSessionCheckpoint();
+      this.plugin.managedWebviewBackend.scheduleStorageFlush();
       void this.captureRecoveryState();
       if (this.formRecoveryWatchEnabled && this.hasRecoverableFormValues()) {
         void this.restoreFormValues({ silent: true, watchNextSteps: true });
       }
     });
     webview.addEventListener("did-redirect-navigation", (rawEvent: Event) => {
+      if (this.webview !== webview || this.plugin.isUnloading() || this.preparingLeafClose) return;
       const event = rawEvent as WebviewNavigateEvent;
       if (!event.url) return;
       this.plugin.core.history.addResidual({
@@ -1435,6 +1469,7 @@ export class BrowserView extends ItemView {
       this.plugin.core.scheduleSave();
     });
     webview.addEventListener("page-title-updated", (rawEvent: Event) => {
+      if (this.webview !== webview || this.plugin.isUnloading() || this.preparingLeafClose) return;
       if (this.ignoreBootstrapAboutBlank && this.safeWebviewUrl(webview) === "about:blank") return;
       const event = rawEvent as WebviewTitleEvent;
       this.syncWebviewTitle(webview, event.title);
@@ -1476,7 +1511,7 @@ export class BrowserView extends ItemView {
       this.setNavigationStatus(offline ? "offline" : "failed", event.errorDescription || undefined);
     });
     webview.addEventListener("dom-ready", () => {
-      if (this.webview !== webview || !webview.isConnected) return;
+      if (this.webview !== webview || !webview.isConnected || this.preparingLeafClose) return;
       this.webviewDomReady = true;
       // Surfing binds guest WebContents handlers at dom-ready. The guest id
       // can exist during did-attach while remote WebContents lookup is still
@@ -1514,7 +1549,7 @@ export class BrowserView extends ItemView {
     const restoreGeneration = this.restoreIntentGeneration;
     const fallbackUrl = this.pendingInitialWebUrl;
     this.pendingInitialWebUrl = undefined;
-    if (!this.richRestoreAttempted && this.restoredFromLeafId) {
+    if (RICH_NAVIGATION_RESTORE_ENABLED && !this.richRestoreAttempted && this.restoredFromLeafId) {
       this.richRestoreAttempted = true;
       const capsule = this.plugin.core.restore.get(this.restoredFromLeafId);
       const targetIndex =
@@ -1590,6 +1625,7 @@ export class BrowserView extends ItemView {
     this.plugin.managedWebviewBackend.browserApis.update(webview,
       !this.internalSurface && this.rootEl.offsetParent !== null && this.plugin.app.workspace.getMostRecentLeaf(this.leaf.getContainer()) === this.leaf,
       this.plugin.core.settings().blockPasskeyRequests);
+    this.plugin.managedWebviewBackend.browserApis.enablePasswordCapture(webview, this.plugin.passwords.exists);
     // Guest WebContents is not addressable when the <webview> element is first
     // created. Install input observers alongside the other guest-bound
     // adapters, after did-attach/dom-ready exposes the guest contents.
@@ -1629,7 +1665,7 @@ export class BrowserView extends ItemView {
 
   private handleCommittedNavigation(url: string): void {
     this.passwordPageDispose?.(); this.passwordPageDispose = undefined;
-    if(!this.passwordSavePopover){this.passwordPopoverClose?.(); this.passwordButtonEl.hidden = true;}
+    if(!this.passwordSavePopover){this.passwordPopoverClose?.(); this.passwordButtonEl.hidden = !webOrigin(url);}
     const reason = this.pendingHistoryIntent || "navigate";
     this.pendingHistoryIntent = null;
     this.lastNavigatedUrl = this.currentUrlValue;
@@ -1688,6 +1724,8 @@ export class BrowserView extends ItemView {
   private async handleDomReady(): Promise<void> {
     const webview = this.readyWebview();
     if (!webview) return;
+    this.passwordButtonEl.hidden = !webOrigin(this.currentUrlValue);
+    this.plugin.managedWebviewBackend.browserApis.enablePasswordCapture(webview, this.plugin.passwords.exists);
     this.refreshZoom();
     if (!this.faviconDataUrl) void this.captureFavicon(webview, []);
     if (this.formRecoveryEnabledForSite()) {
@@ -1771,6 +1809,7 @@ export class BrowserView extends ItemView {
   }
 
   private showRecoveryBanner(message: string, tone: "success" | "warning"): void {
+    if (!RICH_NAVIGATION_RESTORE_ENABLED) { this.hideRecoveryBanner(); return; }
     if (!this.recoveryBannerEl) return;
     if (!this.plugin.core.settings().showRecoveryNotifications) { this.hideRecoveryBanner(); return; }
     this.recoveryBannerEl.empty();
@@ -1823,6 +1862,7 @@ export class BrowserView extends ItemView {
   }
 
   refreshRecoveryNotification(): void {
+    if (!RICH_NAVIGATION_RESTORE_ENABLED) { this.hideRecoveryBanner(); return; }
     if (!this.plugin.core.settings().showRecoveryNotifications) this.hideRecoveryBanner();
   }
 
@@ -1833,6 +1873,7 @@ export class BrowserView extends ItemView {
   }
 
   private async retryRichRestore(): Promise<void> {
+    if (!RICH_NAVIGATION_RESTORE_ENABLED) return;
     const webview = this.readyWebview();
     if (!webview || !this.restoredFromLeafId) return;
     const capsule = this.plugin.core.restore.get(this.restoredFromLeafId);
@@ -1865,11 +1906,13 @@ export class BrowserView extends ItemView {
     if (!recoveryUrl || recoveryUrl.startsWith("browser://")) return;
 
     const leafRecord = this.plugin.core.state.history.leaves[this.leafId()];
-    if (leafRecord?.richRestoreSuppressed) {
-      if (this.plugin.core.restore.get(this.leafId())) this.plugin.core.restore.remove(this.leafId());
-    } else {
-      const capsule = this.navigationHistoryAdapter.capture(webview, this.leafId());
-      if (capsule) this.plugin.core.restore.put(capsule);
+    if (RICH_NAVIGATION_RESTORE_ENABLED) {
+      if (leafRecord?.richRestoreSuppressed) {
+        if (this.plugin.core.restore.get(this.leafId())) this.plugin.core.restore.remove(this.leafId());
+      } else {
+        const capsule = this.navigationHistoryAdapter.capture(webview, this.leafId());
+        if (capsule) this.plugin.core.restore.put(capsule);
+      }
     }
 
     if (this.formRecoveryEnabledForSite()) {
@@ -1879,7 +1922,7 @@ export class BrowserView extends ItemView {
       }
     }
 
-    this.plugin.core.sweepRestoreCapsules();
+    if (RICH_NAVIGATION_RESTORE_ENABLED) this.plugin.core.sweepRestoreCapsules();
     this.plugin.core.scheduleSave();
   }
 
@@ -2056,7 +2099,7 @@ export class BrowserView extends ItemView {
     }
   }
 
-  private destroyWebview(): void {
+  private async destroyWebview(): Promise<void> {
     this.bookmarkPopoverClose?.();
     this.hideRecoveryBanner();
     if (this.checkpointTimer !== undefined) {
@@ -2064,6 +2107,8 @@ export class BrowserView extends ItemView {
       this.checkpointTimer = undefined;
     }
     if (!this.webview) return;
+    const guest = this.webview;
+    this.webview = null;
     this.webviewDomReady = false;
     this.popupInteractionDisposer?.();
     this.popupInteractionDisposer = undefined;
@@ -2071,8 +2116,7 @@ export class BrowserView extends ItemView {
     this.popupDisposer = undefined;
     this.contextMenuDisposer?.();
     this.contextMenuDisposer = undefined;
-    this.plugin.managedWebviewBackend.destroy(this.webview);
-    this.webview = null;
+    await this.plugin.managedWebviewBackend.destroyGracefully(guest);
     this.hideLoadingShield();
   }
 
@@ -2096,12 +2140,12 @@ export class BrowserView extends ItemView {
     const guest = this.webview;
     try {
       passwordOrigin(this.currentUrlValue);
-      const event = await readPasswordEvent(guest, this.plugin.passwords.unlocked, this.plugin.managedWebviewBackend.browserApis);
+      const event = await readPasswordEvent(guest, this.plugin.passwords.exists, this.plugin.managedWebviewBackend.browserApis);
       if (!event) return;
       if (guest !== this.webview || this.internalSurface || (event.kind !== "save" && event.origin !== passwordOrigin(this.currentUrlValue))) { if (event.password) event.password = ""; return; }
       this.passwordButtonEl.hidden = false;
       if (event.kind === "focus") { await this.openPasswordSuggestions(false); return; }
-      if (event.kind !== "save" || !this.plugin.passwords.unlocked || !event.password || this.plugin.passwords.excluded(event.origin)) { event.password = ""; return; }
+      if (event.kind !== "save" || !event.password || (this.plugin.passwords.unlocked && this.plugin.passwords.excluded(event.origin))) { event.password = ""; return; }
       this.showPasswordSave(event);
     } catch { /* Unsupported/insecure guest pages never receive credentials. */ }
     finally { this.passwordPolling = false; }
@@ -2119,7 +2163,7 @@ export class BrowserView extends ItemView {
       }
       if (!this.plugin.passwords.unlocked && (!allowUnlock || !await unlockVault(this.plugin.app, this.plugin.passwords))) return;
       if (guest !== this.webview || this.internalSurface || passwordOrigin(this.currentUrlValue) !== origin) return;
-      await readPasswordEvent(guest, true, this.plugin.managedWebviewBackend.browserApis);
+      this.plugin.managedWebviewBackend.browserApis.enablePasswordCapture(guest, true);
       this.passwordButtonEl.hidden = false;
       const candidates = this.plugin.passwords.matches(origin, this.containerId);
       this.passwordPopoverClose?.();
@@ -2132,6 +2176,7 @@ export class BrowserView extends ItemView {
           if (!await fillPassword(guest, origin, entry.username, entry.password)) throw new Error("No supported login form");
           this.plugin.passwords.touch(); close();
         });
+        passwordButton(panel, "Save password for this site", async () => { close(); await this.savePasswordForCurrentSite(); });
         passwordButton(panel, "Generate and fill password", async () => {
           if (!this.plugin.passwords.unlocked || guest !== this.webview || this.internalSurface) return;
           if (!await fillPassword(guest, origin, null, generatePassword())) throw new Error("No supported login form");
@@ -2145,22 +2190,79 @@ export class BrowserView extends ItemView {
     } catch { new Notice(t("Password input is unavailable on this page. Use an HTTPS page with a visible login form.")); }
   }
 
+  async savePasswordForCurrentSite(): Promise<void> {
+    if (this.internalSurface) return;
+    let origin: string;
+    try { origin = passwordOrigin(this.currentUrlValue); }
+    catch { new Notice(t("Passwords require a secure website.")); return; }
+    if (!this.plugin.passwords.exists) { this.showInternal("passwords"); return; }
+    if (!this.plugin.passwords.unlocked && !await unlockVault(this.plugin.app, this.plugin.passwords)) return;
+    const guest = this.webview;
+    if (!guest) return;
+    try {
+      const event = await readCurrentPasswordSnapshot(guest, this.currentUrlValue);
+      if (guest !== this.webview || origin !== passwordOrigin(this.currentUrlValue)) {
+        if (event?.password) event.password = "";
+        return;
+      }
+      if (!event) {
+        new Notice(t("No filled-in password on this page. Open the login form and enter your password before choosing Save password for this site."));
+        return;
+      }
+      if (this.plugin.passwords.excluded(origin)) {
+        event.password = "";
+        new Notice(t("Password saving is disabled for this site. Allow save suggestions in Passwords settings."));
+        return;
+      }
+      this.showPasswordSave(event);
+    } catch {
+      new Notice(t("The filled-in password could not be read from this page."));
+    }
+  }
+
   private showPasswordSave(event: PasswordGuestEvent): void {
     const existing = this.plugin.passwords.matches(event.origin, this.containerId).find(entry => entry.username === (event.username || ""));
     if (existing?.password === event.password) { event.password = ""; return; }
     const draft = { id: existing?.id, origin: event.origin, username: event.username || "", password: event.password!, title: this.currentTitle, container: existing ? existing.container : this.containerId };
     if (existing) existing.password = "";
     this.passwordPopoverClose?.();
-    let close = () => {}; let off = () => {};
+    let close = () => {};
     this.passwordSavePopover = true;
     const dismiss = passwordPopover(this.passwordButtonEl, existing ? "Update password?" : "Save password?", panel => {
       panel.createDiv({ text: event.origin }); panel.createDiv({ text: event.username || t("No username") });
-      passwordButton(panel, existing ? "Update password" : "Save password", async () => { await this.plugin.passwords.save(draft); close(); }, true);
-      passwordButton(panel, "Edit", () => { const copy = { ...draft }; close(); void editPassword(this.plugin.app, this.plugin.passwords, copy); });
-      passwordButton(panel, "Never for this site", async () => { await this.plugin.passwords.exclude(event.origin); close(); });
+      passwordButton(panel, this.plugin.passwords.unlocked ? (existing ? "Update password" : "Save password") : "Unlock and save password", async () => {
+        // Closing the popover wipes draft.password. Keep a short-lived local
+        // copy only while explicitly unlocking, then wipe it on every path.
+        const pending = { ...draft };
+        try {
+          if (!this.plugin.passwords.unlocked) {
+            close();
+            if (!await unlockVault(this.plugin.app, this.plugin.passwords)) return;
+          }
+          if (this.plugin.passwords.excluded(event.origin)) return;
+          await this.plugin.passwords.save(pending);
+          close();
+        } finally { pending.password = ""; }
+      }, true);
+      passwordButton(panel, "Edit", async () => {
+        const copy = { ...draft };
+        try {
+          close();
+          if (!this.plugin.passwords.unlocked && !await unlockVault(this.plugin.app, this.plugin.passwords)) return;
+          await editPassword(this.plugin.app, this.plugin.passwords, copy);
+        } finally { copy.password = ""; }
+      });
+      passwordButton(panel, "Never for this site", async () => {
+        if (!this.plugin.passwords.unlocked) {
+          close();
+          if (!await unlockVault(this.plugin.app, this.plugin.passwords)) return;
+        }
+        await this.plugin.passwords.exclude(event.origin); close();
+      });
       passwordButton(panel, "Not now", () => close());
-    }, () => { this.passwordSavePopover = false; off(); draft.password = ""; event.password = ""; });
-    close = dismiss; off = this.plugin.passwords.subscribe(close);
+    }, () => { this.passwordSavePopover = false; window.clearTimeout(expiry); draft.password = ""; event.password = ""; });
+    const expiry = window.setTimeout(() => close(), 60_000);
+    close = dismiss;
     this.passwordPopoverClose = close;
   }
 

@@ -57,6 +57,7 @@ const onPassword=(event,value)=>{
 };
 ipcMain.on(channel+'-password',onPassword);
 module.exports={preload,
+  enablePasswordCapture(id,enabled){const state=states.get(id);if(state)state.passwordEnabled=Boolean(enabled);},
   drainPassword(id,enabled){const state=states.get(id);if(!state)return null;state.passwordEnabled=Boolean(enabled);clearTimeout(state.passwordTimeout);const value=state.password;state.password=undefined;return enabled&&value&&Date.now()-value.time<15000?value:null;},
   update(id,active,block){let state=states.get(id);if(!state){state={times:[],busy:false};states.set(id,state);}state.active=Boolean(active);state.block=Boolean(block);if(!active)state.cancel?.();},
   remove(id){const state=states.get(id);state?.cancel?.();clearTimeout(state?.passwordTimeout);if(state?.password)state.password.password='';states.delete(id);},
@@ -64,7 +65,7 @@ module.exports={preload,
 };
 `;
 export class GuestBrowserApis {
-  private runtime?: { preload: string; drainPassword(id:number,enabled:boolean):any; update(id:number,active:boolean,block:boolean):void; remove(id:number):void; dispose():void };
+  private runtime?: { preload: string; drainPassword(id:number,enabled:boolean):any; enablePasswordCapture(id:number,enabled:boolean):void; update(id:number,active:boolean,block:boolean):void; remove(id:number):void; dispose():void };
   preload(): string | undefined {
     this.runtime ??= compileMainProcessModule("ubc-site-browser-apis.cjs", source.replace("__PRELOAD_SOURCE__", JSON.stringify(sitePreload)));
     return this.runtime?.preload;
@@ -72,8 +73,10 @@ export class GuestBrowserApis {
   update(webview: WebviewElement, active: boolean, block: boolean): void {
     try { const wc=resolveGuestWebContents<any>(webview);if(wc)this.runtime?.update(wc.id,active,block); } catch {}
   }
+  enablePasswordCapture(webview: WebviewElement, enabled: boolean): void {
+    try { const wc=resolveGuestWebContents<any>(webview); if(wc)this.runtime?.enablePasswordCapture(wc.id,enabled); } catch {}
+  }
   drainPassword(webview: WebviewElement,enabled:boolean):any {try {const id=webview.getWebContentsId?.();return typeof id==='number'?this.runtime?.drainPassword(id,enabled):null;}catch{return null;}}
   remove(webview: WebviewElement): void { try { const id=webview.getWebContentsId?.();if(typeof id==="number")this.runtime?.remove(id); } catch {} }
   dispose():void {this.runtime?.dispose();this.runtime=undefined;}
 }
-

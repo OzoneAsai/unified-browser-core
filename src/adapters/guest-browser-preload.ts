@@ -31,7 +31,7 @@ if(process.argv.includes('--ubc-prompt')) {
 if(!process.argv.includes('--ubc-prompt')) {
  const capture=target=>{
   if(!ipcRenderer.sendSync('__CHANNEL__','password-enabled'))return;
-  const form=target instanceof HTMLFormElement?target:target?.form,scope=form||document;
+  const form=target instanceof HTMLFormElement?target:target?.form||target?.closest?.('form'),scope=form||document;
   if(form?.action&&new URL(form.action,location.href).origin!==location.origin)return;
   const visible=f=>!f.disabled&&!f.readOnly&&f.getClientRects().length&&f.offsetWidth>0&&f.offsetHeight>0;
   const passwords=Array.from(scope.querySelectorAll('input[type="password"]')).filter(visible);
@@ -42,6 +42,19 @@ if(!process.argv.includes('--ubc-prompt')) {
   ipcRenderer.send('__CHANNEL__-password',{username:(user?.value||'').slice(0,4096),password:password.value});
  };
  document.addEventListener('submit',e=>{if(e.isTrusted)capture(e.target);},true);
- document.addEventListener('click',e=>{if(!e.isTrusted)return;const b=e.target?.closest?.('button,input[type="submit"]');if(b?.form&&b.type==='submit')capture(b.form);},true);
+ document.addEventListener('click',e=>{
+  if(!e.isTrusted)return;
+  const b=e.target?.closest?.('button,input[type="submit"],[role="button"]');
+  if(!b)return;
+  const label=(b.textContent||b.getAttribute?.('aria-label')||b.value||'').trim();
+  // Single-page login buttons (including Discord) frequently have no native
+  // form or type="submit"; do not capture unrelated buttons.
+  if(b.type==='submit'||/^(log\s*in|sign\s*in|log\s*on|continue|ログイン|サインイン|次へ)(?:\s|$)/i.test(label))capture(b.form||b);
+ },true);
+ document.addEventListener('keydown',e=>{
+  if(!e.isTrusted||e.key!=='Enter'||e.repeat||e.isComposing)return;
+  const target=e.target;
+  if(target instanceof HTMLInputElement&&['password','email','text'].includes(target.type))capture(target.form||target);
+ },true);
 }
 `;

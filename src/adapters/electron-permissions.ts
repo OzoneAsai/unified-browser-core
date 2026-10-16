@@ -51,7 +51,7 @@ export class ElectronPermissionAdapter {
     session.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
       const origin = normalizeOrigin(requestingOrigin);
       if (!origin) return false;
-      return store.decision(containerId, origin, permission) === "allow";
+      return shouldAllowPermissionCheck(store, containerId, origin, permission);
     });
 
     session.setPermissionRequestHandler((webContents, permission, callback, details) => {
@@ -63,6 +63,13 @@ export class ElectronPermissionAdapter {
       const remembered = store.decision(containerId, origin, permission);
       if (remembered !== "ask") {
         callback(remembered === "allow");
+        return;
+      }
+      // Match Electron's default behavior for browser storage access. The
+      // blanket check handler otherwise reports "denied" even for sites that
+      // have never requested a permission decision, unlike a normal webview.
+      if (isStorageAccessPermission(permission)) {
+        callback(true);
         return;
       }
       void prompt(origin, permission).then((decision) => {
@@ -97,6 +104,20 @@ export class ElectronPermissionAdapter {
   private resolve(webview: WebviewElement): WebContentsLike | undefined {
     return resolveGuestWebContents<WebContentsLike>(webview);
   }
+}
+
+export function shouldAllowPermissionCheck(
+  store: PermissionStore,
+  containerId: ContainerId,
+  origin: string,
+  permission: string,
+): boolean {
+  const decision = store.decision(containerId, origin, permission);
+  return decision === "allow" || (decision === "ask" && isStorageAccessPermission(permission));
+}
+
+function isStorageAccessPermission(permission: string): boolean {
+  return permission === "storage-access" || permission === "top-level-storage-access";
 }
 
 function normalizeOrigin(value: string): string | undefined {

@@ -7,7 +7,11 @@ import { inferBookmarkMedia, classifyBookmark } from "../src/bookmarks/bookmark-
 import { t, setLanguage, setLocaleResolver } from "../src/i18n";
 import { RestoreStore } from "../src/core/restore-store";
 import { BrowserCore } from "../src/core/browser-core";
+import { RICH_NAVIGATION_RESTORE_ENABLED } from "../src/core/experimental-features";
 import { PermissionStore } from "../src/core/permission-store";
+import { shouldAllowPermissionCheck } from "../src/adapters/electron-permissions";
+import { ManagedWebviewBackend } from "../src/adapters/managed-webview-backend";
+import { gateLeafDetach } from "../src/adapters/leaf-close-gate";
 import { permissionDecisionLabel, permissionLabel } from "../src/ui/permission-label";
 import { FormRecoveryStore } from "../src/core/form-recovery-store";
 import { SiteZoomStore } from "../src/core/site-zoom-store";
@@ -19,6 +23,7 @@ import { resolveTabLayoutPolicy } from "../src/tabs/tab-layout-policy";
 import { BrowserPublicApi } from "../src/api/browser-api";
 import { BrowserEventBus } from "../src/core/events";
 import { normalizeBrowserAddress } from "../src/navigation/address-normalizer";
+import { completionHistoryVisits, inlineAddressCompletion, rankedHistoryHosts } from "../src/ui/address-suggestions";
 import { ObsidianCommandAdapter } from "../src/adapters/obsidian-commands";
 import { buildWebContentMenuEntries } from "../src/ui/web-content-menu-model";
 import { ElectronContextMenuAdapter } from "../src/adapters/electron-context-menu";
@@ -28,6 +33,60 @@ import { normalizeObsidianBookmarkItems } from "../src/adapters/obsidian-bookmar
 import { WebViewerBookmarksAdapter, normalizeWebViewerBookmarks } from "../src/adapters/webviewer-bookmarks";
 
 (globalThis as typeof globalThis & { window?: typeof globalThis }).window = globalThis;
+assert.equal(RICH_NAVIGATION_RESTORE_ENABLED, false,
+  "experimental navigation replay must remain disabled until explicitly reviewed");
+// Firefox-style host autofill uses browsing history only, ranked by
+// repeat visits before recency. No unvisited domain may be invented.
+const visitedHosts = rankedHistoryHosts("disc", [
+  {url:"https://discord.com/channels/@me",timestamp:120},
+  {url:"https://discord.gg/abc",timestamp:105},
+  {url:"https://discord.gg/xyz",timestamp:110},
+  {url:"https://discord.com/login",timestamp:100},
+  {url:"https://discord.gg/other",timestamp:90},
+  {url:"https://other.net/",timestamp:150},
+  {url:"javascript:discord.gg",timestamp:200},
+]);
+const redirectedVisits = completionHistoryVisits([
+  {kind:"navigation",url:"https://discord.com/channels/@me",timestamp:10},
+  {kind:"residual",residualKind:"redirect",fromUrl:"https://discord.gg/invite",timestamp:11},
+  {kind:"residual",residualKind:"redirect",fromUrl:"https://discord.gg/another",timestamp:12},
+  {kind:"residual",residualKind:"in-page",fromUrl:"https://ignored.example",timestamp:13},
+  {kind:"tombstone",timestamp:14},
+]);
+assert.deepEqual(rankedHistoryHosts("disc",redirectedVisits).map(x=>x.host),["discord.gg","discord.com"]);
+assert.equal(inlineAddressCompletion("disc",rankedHistoryHosts("disc",redirectedVisits).map(x=>x.host)),"discord.gg");
+assert.deepEqual(visitedHosts.map(x=>x.host), ["discord.gg","discord.com"]);
+assert.equal(inlineAddressCompletion("disc",visitedHosts.map(x=>x.host)),"discord.gg");
+assert.equal(inlineAddressCompletion("disc",[]),undefined);
+assert.equal(inlineAddressCompletion("disc",["unvisited.example"]),undefined);
+assert.equal(inlineAddressCompletion("https://discord",["discord.gg"]),undefined);
+assert.equal(inlineAddressCompletion("two words",["two.example"]),undefined);
+assert.equal(rankedHistoryHosts("disc",[]).length,0);
+assert.deepEqual(rankedHistoryHosts("moz",[
+  {url:"https://mozilla.org",timestamp:100},
+  {url:"https://mozilla.org/docs",timestamp:110},
+  {url:"https://moz.com",timestamp:130},
+]).map(x=>x.host),["mozilla.org","moz.com"]);
+assert.equal(rankedHistoryHosts("zzz",[{url:"https://mozilla.org",timestamp:100}]).length,0);
+assert.equal(rankedHistoryHosts("moz",[{url:"file:///moz",timestamp:100}]).length,0);
+assert.equal(inlineAddressCompletion("disc", ["discord.gg", "discord.com"]), "discord.gg");
+assert.equal(inlineAddressCompletion("DIS", ["discord.gg"]), "DIScord.gg");
+assert.equal(inlineAddressCompletion("git", ["github.com"]), "github.com");
+assert.equal(inlineAddressCompletion("discord.gg", ["discord.gg"]), undefined);
+assert.equal(inlineAddressCompletion("discord.gg/path", ["discord.gg"]), undefined);
+assert.equal(inlineAddressCompletion("my query", ["example.com"]), undefined);
+assert.equal(inlineAddressCompletion("https://disc", ["discord.gg"]), undefined);
+// Storage access is granted by Electron in a plain Surfing webview. An
+// unspecified decision must not turn into an unconditional deny in UBC.
+const storagePermissions = new PermissionStore([]);
+for (const permission of ["storage-access", "top-level-storage-access"]) {
+  assert.equal(shouldAllowPermissionCheck(storagePermissions, "default", "https://example.com", permission), true);
+  storagePermissions.set("default", "https://example.com", permission, "block");
+  assert.equal(shouldAllowPermissionCheck(storagePermissions, "default", "https://example.com", permission), false);
+  storagePermissions.set("default", "https://example.com", permission, "allow");
+  assert.equal(shouldAllowPermissionCheck(storagePermissions, "default", "https://example.com", permission), true);
+}
+assert.equal(shouldAllowPermissionCheck(storagePermissions, "default", "https://example.com", "notifications"), false);
 setLanguage("en");
 for (const [url, expected] of [
   ["https://www.google.com/", "reference"], ["https://docs.google.com/document/d/123", "reference"],
@@ -96,6 +155,112 @@ assert.deepEqual(
   ["leaf-a"],
   "session restore must recognize a live leaf with the original lifecycle id",
 );
+assert.deepEqual(
+  pendingSessionLeaves(frozenSessionCheckpoint, [
+    { lifecycleId: "leaf-a" }, { lifecycleId: "leaf-b" },
+  ]),
+  [],
+  "deferred as well as live workspace leaves must suppress duplicate restoration",
+);
+const storageBackend = new ManagedWebviewBackend();
+const storageCalls: string[] = [];
+const storageSession = {
+  webRequest: { onHeadersReceived: (_listener: unknown) => {} },
+  flushStorageData: async () => { storageCalls.push("site-storage"); },
+  cookies: { flushStore: async () => { storageCalls.push("cookie-store"); } },
+};
+const backendSessions = (storageBackend as unknown as {
+  policySessions: Map<string, typeof storageSession>;
+}).policySessions;
+backendSessions.set("persist:test-a", storageSession);
+backendSessions.set("persist:test-b", storageSession);
+await storageBackend.flushPersistentSessions();
+assert.deepEqual(storageCalls, ["site-storage", "cookie-store"],
+  "shared guest sessions must be flushed once, including cookies");
+storageBackend.scheduleStorageFlush(2);
+storageBackend.scheduleStorageFlush(2);
+await new Promise((resolve) => setTimeout(resolve, 20));
+assert.deepEqual(storageCalls, ["site-storage", "cookie-store", "site-storage", "cookie-store"],
+  "rapid navigations should debounce guest storage flushes");
+{
+  const closeCalls: string[] = [];
+  let releasePreparation!: () => void;
+  const wait = new Promise<void>(resolve => { releasePreparation = resolve; });
+  const leaf = { detach: () => { closeCalls.push("original-detach"); } };
+  const ownDetachInitially = Object.hasOwn(leaf, "detach");
+  const dispose = gateLeafDetach(leaf, async () => {
+    closeCalls.push("prepare"); await wait; closeCalls.push("prepared");
+  });
+  leaf.detach(); leaf.detach();
+  await Promise.resolve();
+  assert.deepEqual(closeCalls, ["prepare"], "native tab close must wait for guest cleanup");
+  releasePreparation();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(closeCalls, ["prepare","prepared","original-detach"],
+    "native tab close must run only once after graceful cleanup");
+  dispose();
+  assert.equal(Object.hasOwn(leaf,"detach"), ownDetachInitially,
+    "the original leaf method must be restored");
+}
+{
+  let closed = 0;
+  const leaf = { detach: () => { closed++; } };
+  const original = leaf.detach;
+  const dispose = gateLeafDetach(leaf, async () => { throw Error("Guest already destroyed"); },
+    () => undefined);
+  leaf.detach();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(closed, 1, "failed guest teardown must not trap a browser tab");
+  dispose();
+  assert.equal(leaf.detach, original);
+}
+{
+  let closed = 0;
+  let finish!: () => void;
+  const blocker = new Promise<void>(resolve => { finish=resolve; });
+  const leaf = {detach: () => { closed++; }};
+  const dispose = gateLeafDetach(leaf, () => blocker);
+  leaf.detach();
+  await Promise.resolve();
+  dispose(); // A different view replaced this browser view before cleanup.
+  finish();
+  await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(closed,0,"stale cleanup must not close a replacement view");
+}
+{
+  class PrototypeLeaf {
+    count = 0;
+    detach(): void { this.count++; }
+  }
+  const leaf = new PrototypeLeaf();
+  const dispose = gateLeafDetach(leaf, async () => undefined);
+  assert.equal(Object.hasOwn(leaf,"detach"),true,"only this leaf receives the wrapper");
+  dispose();
+  assert.equal(Object.hasOwn(leaf,"detach"),false,"prototype method must remain unmodified");
+  leaf.detach();
+  assert.equal(leaf.count,1);
+}
+storageCalls.length = 0;
+const teardownEvents: string[] = [];
+const dummyGuest = {
+  getURL: () => "https://fixture.example/path",
+  loadURL: async (url: string) => { teardownEvents.push("navigate:" + url); },
+  stop: () => { teardownEvents.push("stop"); },
+  remove: () => { teardownEvents.push("remove"); },
+};
+(storageBackend as unknown as { liveGuests: Set<typeof dummyGuest> }).liveGuests.add(dummyGuest);
+await storageBackend.destroyGracefully(dummyGuest as never);
+assert.deepEqual(teardownEvents, ["navigate:about:blank", "stop", "remove"],
+  "guest must navigate normally before Electron removes its webview");
+assert.deepEqual(storageCalls, ["site-storage", "cookie-store"],
+  "flush must occur after guest navigation");
+const alreadyDetached = { getURL: () => "about:blank", stop: () => {}, remove: () => {} };
+(storageBackend as unknown as { liveGuests: Set<typeof alreadyDetached> }).liveGuests.add(alreadyDetached);
+await storageBackend.prepareForShutdown();
+assert.equal(storageCalls.length, 4, "quit preparation must flush persistent site state");
+await storageBackend.prepareForShutdown();
+assert.equal(storageCalls.length, 4, "quit preparation must be idempotent");
+storageBackend.dispose();
 
 assert.equal(
   resolveGuestWebContents({

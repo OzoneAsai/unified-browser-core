@@ -14,6 +14,9 @@ export class ManagedWebviewBackend {
   readonly browserApis = new GuestBrowserApis();
 
   private readonly policySessions = new Map<string, PolicySession>();
+  private storageFlushTimer?: ReturnType<typeof setTimeout>;
+  private storageFlushQueue: Promise<void> = Promise.resolve();
+  private shutdownPreparation?: Promise<void>;
   private settings?: () => BrowserSettings;
 
   create(partition: string, settings?: () => BrowserSettings, doc: Document = document): WebviewElement {
@@ -48,6 +51,82 @@ export class ManagedWebviewBackend {
     webview.remove();
   }
 
+  /** A detached Electron webview does not dispatch normal page unload events.
+   * Navigate it first so sites can persist their own state, then flush the
+   * partition without inspecting or copying any site data. */
+  async destroyGracefully(webview: WebviewElement): Promise<void> {
+    try {
+      await this.unloadGuestPage(webview);
+      await this.flushPersistentSessions();
+    } finally {
+      this.destroy(webview);
+    }
+  }
+
+  /** Called while the Obsidian leaf is still attached. The host may detach
+   * its DOM before View.onClose, so this must run before leaf.detach(). */
+  async prepareGuestForRemoval(webview: WebviewElement): Promise<void> {
+    await this.unloadGuestPage(webview);
+    await this.flushPersistentSessions();
+  }
+
+  private async unloadGuestPage(webview: WebviewElement): Promise<void> {
+    if (!this.liveGuests.has(webview) || !webview.loadURL) return;
+    let url = "";
+    try { url = webview.getURL?.() || ""; } catch { return; }
+    if (!/^https?:\/\//i.test(url)) return;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        webview.loadURL("about:blank").catch(() => undefined),
+        new Promise<void>((resolve) => { timeout = setTimeout(resolve, 3000); }),
+      ]);
+    } catch {
+      // Guest may already be destroyed; bounded best-effort shutdown.
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
+  }
+
+  /** Run before the host tears down renderer contents. Sites get a real
+   * pagehide/beforeunload and their own persistence code runs first. */
+  prepareForShutdown(): Promise<void> {
+    if (!this.shutdownPreparation) {
+      this.shutdownPreparation = (async () => {
+        await Promise.all([...this.liveGuests].map((guest) => this.unloadGuestPage(guest)));
+        await this.flushPersistentSessions();
+      })();
+    }
+    return this.shutdownPreparation;
+  }
+
+  /** Flush all active persistent guest partitions, including cookies. This
+   * does not copy site credentials or browser data into plugin settings. */
+  flushPersistentSessions(): Promise<void> {
+    if (this.storageFlushTimer !== undefined) {
+      clearTimeout(this.storageFlushTimer);
+      this.storageFlushTimer = undefined;
+    }
+    const sessions = [...new Set(this.policySessions.values())];
+    const next = this.storageFlushQueue.then(async () => {
+      await Promise.all(sessions.map(async (session) => {
+        await session.flushStorageData?.();
+        await session.cookies?.flushStore?.();
+      }));
+    });
+    this.storageFlushQueue = next.catch(() => undefined);
+    return next;
+  }
+
+  scheduleStorageFlush(delayMs = 1500): void {
+    if (this.storageFlushTimer !== undefined) clearTimeout(this.storageFlushTimer);
+    this.storageFlushTimer = setTimeout(() => {
+      this.storageFlushTimer = undefined;
+      void this.flushPersistentSessions().catch(error =>
+        console.warn("Unified Browser Core: failed to flush guest storage", error));
+    }, delayMs);
+  }
+
   private bindPolicy(partition: string): void {
     if (this.policySessions.has(partition)) return;
     const session = resolvePartitionSession<PolicySession>(partition);
@@ -71,6 +150,8 @@ export class ManagedWebviewBackend {
   }
 
   dispose(): void {
+    if (this.storageFlushTimer !== undefined) clearTimeout(this.storageFlushTimer);
+    this.storageFlushTimer = undefined;
     this.browserApis.dispose();
     for (const session of this.policySessions.values()) session.webRequest?.onHeadersReceived(null);
     this.policySessions.clear();
@@ -83,6 +164,8 @@ export class ManagedWebviewBackend {
 }
 
 interface PolicySession {
+  flushStorageData?: () => Promise<void>;
+  cookies?: { flushStore?: () => Promise<void> };
   webRequest?: {
     onHeadersReceived: {
       (filter: { urls: string[] }, listener: (details: { webContentsId: number; resourceType: string; responseHeaders?: Record<string, string[]> }, callback: (response: { responseHeaders: Record<string, string[]> }) => void) => void): void;

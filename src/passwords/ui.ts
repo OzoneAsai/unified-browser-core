@@ -8,7 +8,7 @@ import { generatePassword } from "./crypto";
 
 function button(parent: HTMLElement, label: string, action: () => void | Promise<void>, primary = false): HTMLButtonElement {
   const el = parent.createEl("button", { text: t(label), cls: primary ? "mod-cta" : "", attr: { type: "button" } });
-  el.addEventListener("click", async () => { el.disabled = true; try { await action(); } catch { new Notice(t("Password operation failed. Check your key, Windows Hello, and file access.")); } finally { el.disabled = false; } });
+  el.addEventListener("click", async () => { el.disabled = true; try { await action(); } catch { new Notice(t("Password operation failed. Check the recovery key, OS keyring, and file access.")); } finally { el.disabled = false; } });
   return el;
 }
 function field(parent: HTMLElement, label: string, value = "", type = "text"): HTMLInputElement {
@@ -27,7 +27,7 @@ export function showRecoveryKey(app: App, vault: PasswordVault, key: string): Pr
     class RecoveryModal extends SensitiveModal {
       onOpen(): void {
         this.watch(); this.titleEl.setText(t("Save your recovery key"));
-        this.contentEl.createEl("p",{text:t("Store this key outside your vault. It unlocks encrypted backups when Windows Hello or this PC is unavailable.")});
+        this.contentEl.createEl("p",{text:t("Store this key outside your vault. It unlocks encrypted backups if the OS keyring, Windows Hello, or this device is unavailable.")});
         const value=field(this.contentEl,"Recovery key",key); value.readOnly=true;
         const check=this.contentEl.createEl("label",{cls:"ubc-password-field"}); const saved=check.createEl("input",{attr:{type:"checkbox"}}); check.createSpan({text:t("I saved the recovery key securely")});
         const done=button(this.contentEl,"Done",()=>{acknowledged=true;this.close();},true); done.disabled=true; saved.addEventListener("change",()=>{done.disabled=!saved.checked;});
@@ -45,7 +45,8 @@ export function unlockVault(app: App, vault: PasswordVault): Promise<boolean> {
       onOpen(): void {
         this.watch();
         this.titleEl.setText(t("Unlock password vault"));
-        this.contentEl.createEl("p",{text:t("Choose Windows Hello or enter your recovery key. Failed authentication never falls back automatically.")});
+        this.contentEl.createEl("p",{text:t("Choose your device keyring, Windows Hello, or enter the recovery key. A failed unlock never falls back automatically.")});
+        if(vault.usesDevice && vault.device.available()) button(this.contentEl,process.platform==="darwin"?"Unlock with macOS Keychain":"Unlock with Linux keyring",async()=>{await vault.unlockDevice();this.close();},true);
         if(vault.usesHello) button(this.contentEl,"Unlock with Windows Hello",async()=>{await vault.unlockHello();this.close();},true);
         const input=field(this.contentEl,"Recovery key","","password");
         button(this.contentEl,"Unlock with recovery key",()=>{vault.unlockRecovery(input.value);input.value="";this.close();});
@@ -82,7 +83,8 @@ export function renderPasswordPage(parent: HTMLElement,app: App,vault: PasswordV
     const actions=page.createDiv({cls:"ubc-password-actions"});
     if(!vault.exists){
       page.createEl("h2",{text:t("Create your password vault")});
-      page.createEl("p",{text:t("Windows Hello setup asks for authentication twice to verify that the key can be used again. A recovery key is issued for backups and other devices.")});
+      page.createEl("p",{text:t("Save the recovery key in a separate, secure location. On supported devices, the OS keyring can unlock your encrypted vault after restarting Obsidian.")});
+      if(vault.device.available())button(actions,process.platform==="darwin"?"Set up with macOS Keychain":"Set up with Linux keyring",async()=>{await vault.setup("device",key=>showRecoveryKey(app,vault,key));},true);
       if(process.platform==="win32")button(actions,"Set up with Windows Hello",async()=>{await vault.setup(true,key=>showRecoveryKey(app,vault,key));},true);
       button(actions,"Set up with recovery key",async()=>{await vault.setup(false,key=>showRecoveryKey(app,vault,key));});
     }else if(!vault.unlocked){
@@ -93,6 +95,8 @@ export function renderPasswordPage(parent: HTMLElement,app: App,vault: PasswordV
       button(actions,"Lock",()=>vault.lock());button(actions,"New password",()=>editPassword(app,vault));
       button(actions,"Export encrypted backup",()=>exportBackup(vault));
       button(actions,"New recovery key",async()=>{if(await confirmAction(app,t("New recovery key"),t("Keep old recovery keys for old backups. The new key applies to the current vault and future backups."),t("Continue")))await vault.rotateRecovery(key=>showRecoveryKey(app,vault,key));});
+      if(vault.device.available())button(actions,vault.usesDevice?(process.platform==="darwin"?"Refresh macOS Keychain unlock":"Refresh Linux keyring unlock"):(process.platform==="darwin"?"Enable macOS Keychain unlock":"Enable Linux keyring unlock"),()=>vault.enableDevice());
+      if(vault.usesDevice)button(actions,"Disable device keyring unlock",async()=>{if(await confirmAction(app,t("Disable device keyring unlock"),t("Future unlocks will require another method. Keep your recovery key."),t("Continue")))await vault.disableDevice();});
       if(process.platform==="win32")button(actions,vault.usesHello?"Replace Windows Hello key":"Enable Windows Hello",()=>vault.enableHello());
       if(vault.usesHello)button(actions,"Disable Windows Hello",async()=>{if(await confirmAction(app,t("Disable Windows Hello"),t("Make sure you have your recovery key. Future unlocks will require it."),t("Continue")))await vault.disableHello();});
       button(actions,"Allow save suggestions on all sites",()=>vault.clearExcluded());
@@ -112,7 +116,7 @@ export function renderPasswordPage(parent: HTMLElement,app: App,vault: PasswordV
       search.addEventListener("input",()=>{query=search.value;show();});show();
     }
     button(actions,"Import encrypted backup",()=>importBackup(app,vault));
-    page.createEl("p",{cls:"ubc-password-note",text:t("Windows Hello protects local unlock. Recovery keys unlock backups. Other Obsidian plugins share this process; unlocked credentials cannot be isolated from a compromised host.")});
+    page.createEl("p",{cls:"ubc-password-note",text:t("On macOS, Keychain protects device unlock. On Linux, a real desktop keyring is required; insecure basic_text encryption is rejected. Recovery keys unlock encrypted backups on any OS. Other Obsidian plugins share this process; unlocked credentials cannot be isolated from a compromised host.")});
   };
   const off=vault.subscribe(render);render();return()=>{disposed=true;off();parent.empty();};
 }

@@ -51,7 +51,7 @@ export interface BrowserCapabilitySnapshot {
   isolatedContainers: true;
   siteContainerAssignments: true;
   graphHistory: true;
-  richRestore: "best-effort";
+  richRestore: "best-effort" | "disabled";
   formRecovery: true;
   permissions: "best-effort";
   internalSurfaces: true;

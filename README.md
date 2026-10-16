@@ -16,6 +16,14 @@ Unified Browser Core is a desktop-only browser plugin for [Obsidian](https://obs
 - Optionally recover form contents for sites you explicitly allow. Form recovery is off by default and excludes password, payment, one-time-code, WebAuthn, file, and hidden fields.
 - Expose a public API for other Obsidian plugins.
 
+**Experimental recovery paused:** Rich navigation-history replay is frozen.
+UBC reopens saved URLs and restores ordinary tabs, workspace state, and
+persistent container sessions, but does not attempt experimental navigation
+capsule replay or display its recovery banners/popups. Existing recovery data
+is not cleared by this change. Opt-in form recovery is a separate feature.
+Research prototypes are retained in `research/v8-heap-injection/` but are not
+loaded by the plugin.
+
 ## Bookmark library and selected members
 
 The star in the browser toolbar saves a page and opens a lightweight editor. Choose a folder, change its type, or add it to **Selected members**. Changes are saved as you edit; **Done**, Escape, or a click outside closes the editor. Click the star on an existing bookmark to edit it; remove it with **Delete bookmark** in the editor.
@@ -147,7 +155,7 @@ Site zoom is relative to the containing Obsidian window (100% matches Surfing's 
 
 ### 0.2.1 interaction improvements
 
-- Recovery notifications float above the page, disappear on page interaction, and offer “Never show again”. The setting can be re-enabled in plugin settings.
+- Historical note: rich navigation replay once displayed recovery notifications. The experimental replay and its banners are now disabled.
 - Drag a browser tab within its tab strip to reorder it. Drag outside the strip (32 px vertically or 48 px horizontally) to switch to Obsidian pane movement. Alt-drag also starts pane movement immediately. Reordering commits once on drop and preserves the selected tab.
 - Address suggestions use local bookmarks and browsing history. Choose with Arrow Up/Down and Enter, or dismiss with Escape. Typed text is not sent to a suggestion service.
 - Home bookmark cards wrap long titles and keep URLs inside each card, including with themes that set a fixed button height.

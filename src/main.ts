@@ -21,6 +21,7 @@ import {
   type BrowserTabSnapshot,
 } from "./api/browser-api";
 import { BrowserCore } from "./core/browser-core";
+import { RICH_NAVIGATION_RESTORE_ENABLED } from "./core/experimental-features";
 import { createId } from "./core/id";
 import { t, setLanguage, setLocaleResolver } from "./i18n";
 import type {
@@ -75,6 +76,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
   private persistence!: HybridBrowserPersistence;
   private unloading = false;
   private sessionCheckpointTimer: number | undefined;
+  private initialSessionReconcileTimer: number | undefined;
   private sessionCheckpointArmed = false;
   private layoutInitializationInProgress = false;
   private homeTakeoverArmed = false;
@@ -113,6 +115,10 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       this.sessionCheckpointTimer = undefined;
       if (this.unloading) return;
       this.captureSessionCheckpoint();
+      // BrowserView mutates its own URL/title without calling setViewState.
+      // Persist Obsidian's workspace representation alongside our checkpoint,
+      // otherwise the reopened tab can have an older address than our history.
+      void this.app.workspace.requestSaveLayout();
     }, delayMs);
   }
 
@@ -208,6 +214,10 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     );
     this.core.sweepRetention();
     this.registerInterval(window.setInterval(() => this.core.sweepRetention(), 300_000));
+    this.registerInterval(window.setInterval(() => {
+      if (!this.unloading) void this.managedWebviewBackend.flushPersistentSessions().catch(error =>
+        console.warn("Unified Browser Core: failed periodic guest storage flush", error));
+    }, 15_000));
 
     this.registerView(BROWSER_VIEW_TYPE, (leaf) => new BrowserView(leaf, this));
     this.addSettingTab(new BrowserSettingTab(this.app, this));
@@ -417,6 +427,9 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       this.app.workspace.on("quit", (tasks) => {
         this.prepareForShutdown();
         tasks.addPromise(this.core.flush());
+        this.app.workspace.requestSaveLayout();
+        tasks.addPromise(Promise.resolve(this.app.workspace.requestSaveLayout.run()));
+        tasks.addPromise(this.managedWebviewBackend.prepareForShutdown());
       }),
     );
     this.tabStripAdapter.bind(
@@ -449,24 +462,35 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       const typedBrowserLeaves = this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE);
       const usableBrowserLeaves = typedBrowserLeaves.filter((leaf) => leaf.view instanceof BrowserView);
 
-      // During a plugin/renderer hot reload, leaves created by the previous
-      // module can briefly retain the same view type while failing instanceof
-      // against the new BrowserView constructor. Do not restore another copy
-      // of the session on top of them. Their detach emits layout-change, which
-      // re-enters initialization once the workspace has converged.
-      if (typedBrowserLeaves.length !== usableBrowserLeaves.length) return;
+      // Obsidian restores background tabs as deferred views. Waiting for all
+      // of them to become BrowserView instances deadlocks checkpoint saving:
+      // a deferred background tab may never activate in this app session.
+      // Their saved lifecycle IDs still identify them for deduplication.
 
-      if (usableBrowserLeaves.length === 0) {
-        const startup = this.core.settings().startupBehavior;
-        if (startup === "restore" && this.core.state.sessionCheckpoint.leaves.length > 0) {
-          await this.restorePreviousSession(false);
-        } else if (startup === "home") {
-          await this.openBrowser({ url: "browser://home" });
-        }
+      const startup = this.core.settings().startupBehavior;
+      // Obsidian may restore only some tabs from workspace.json. Restore the
+      // missing checkpoint leaves even when one UBC view already exists.
+      // pendingSessionLeaves prevents duplicating those already represented.
+      if (startup === "restore" && this.previousSessionCheckpoint.leaves.length > 0) {
+        await this.restorePreviousSession(false);
+      } else if (usableBrowserLeaves.length === 0 && startup === "home") {
+        await this.openBrowser({ url: "browser://home" });
       }
       await this.replaceMostRecentEmptyLeafWithHome();
       this.sessionCheckpointArmed = true;
       this.captureSessionCheckpoint();
+      void this.app.workspace.requestSaveLayout();
+      if (startup === "restore" && this.previousSessionCheckpoint.leaves.length > 0) {
+        // The host can still settle deferred workspace leaves after the first
+        // layout-ready callback. Reconcile once more with the immutable startup
+        // snapshot, preserving the identity of previously restored tabs.
+        this.initialSessionReconcileTimer = window.setTimeout(() => {
+          this.initialSessionReconcileTimer = undefined;
+          if (this.unloading) return;
+          void this.reconcileInitialSession().catch(error =>
+            console.warn("Unified Browser Core: startup reconciliation failed", error));
+        }, 1400);
+      }
       this.revealActiveTab();
     } finally {
       this.layoutInitializationInProgress = false;
@@ -483,6 +507,10 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
   private prepareForShutdown(): void {
     if (this.unloading) return;
     this.unloading = true;
+    if (this.initialSessionReconcileTimer !== undefined) {
+      window.clearTimeout(this.initialSessionReconcileTimer);
+      this.initialSessionReconcileTimer = undefined;
+    }
     if (this.sessionCheckpointTimer !== undefined) {
       window.clearTimeout(this.sessionCheckpointTimer);
       this.sessionCheckpointTimer = undefined;
@@ -522,6 +550,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
 
   async onunload(): Promise<void> {
     this.prepareForShutdown();
+    await this.managedWebviewBackend.prepareForShutdown();
     await this.persistence.captureHistoryVersion(this.core.state.history);
     const liveBrowserLeaves = this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE);
     for (const leaf of liveBrowserLeaves) {
@@ -579,6 +608,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
         siteAssignmentBypassOrigin: bypassOrigin,
         siteAssignmentBypassReason: bypassReason,
         restoredFromLeafId,
+        sessionSourceLeafId: initialState.sessionSourceLeafId ?? restoredFromLeafId,
       },
     });
     if (reveal) this.app.workspace.revealLeaf(leaf);
@@ -852,13 +882,24 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     if (notify) new Notice(t("Restored {v0} browser tab(s).", { v0: leavesToRestore.length }));
   }
 
+  private async reconcileInitialSession(): Promise<void> {
+    if (this.unloading) return;
+    await this.restorePreviousSession(false);
+    if (this.unloading) return;
+    this.captureSessionCheckpoint();
+    this.app.workspace.requestSaveLayout();
+    await this.core.flush();
+  }
+
   private pendingPreviousSessionLeaves() {
     const liveRepresentations = this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE).flatMap((leaf) => {
-      if (!(leaf.view instanceof BrowserView)) return [];
-      const state = leaf.view.getState();
+      const state = (leaf.view instanceof BrowserView
+        ? leaf.view.getState()
+        : leaf.getViewState().state) as BrowserLeafViewState;
+      if (!state?.lifecycleId) return [];
       return [{
-        lifecycleId: state.lifecycleId || leaf.view.lifecycleIdentity(),
-        restoredFromLeafId: state.restoredFromLeafId,
+        lifecycleId: state.lifecycleId,
+        restoredFromLeafId: state.sessionSourceLeafId ?? state.restoredFromLeafId,
       }];
     });
     return pendingSessionLeaves(this.previousSessionCheckpoint, liveRepresentations);
@@ -1241,7 +1282,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       isolatedContainers: true,
       siteContainerAssignments: true,
       graphHistory: true,
-      richRestore: "best-effort",
+      richRestore: RICH_NAVIGATION_RESTORE_ENABLED ? "best-effort" : "disabled",
       formRecovery: true,
       permissions: "best-effort",
       internalSurfaces: true,

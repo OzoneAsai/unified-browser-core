@@ -48,7 +48,7 @@ function resolveElectronRenderer() {
     return void 0;
   }
 }
-function compileMainProcessModule(virtualFilename, source2) {
+function compileMainProcessModule(virtualFilename, source3) {
   const remote = resolveElectronRemote();
   if (!remote?.require) return void 0;
   try {
@@ -57,7 +57,7 @@ function compileMainProcessModule(virtualFilename, source2) {
     const compiled = new Module(virtualFilename);
     compiled.filename = virtualFilename;
     compiled.paths = [];
-    compiled._compile(source2, virtualFilename);
+    compiled._compile(source3, virtualFilename);
     return compiled.exports;
   } catch {
     return void 0;
@@ -91,7 +91,7 @@ var ElectronPermissionAdapter = class {
     session.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
       const origin = normalizeOrigin(requestingOrigin);
       if (!origin) return false;
-      return store.decision(containerId, origin, permission) === "allow";
+      return shouldAllowPermissionCheck(store, containerId, origin, permission);
     });
     session.setPermissionRequestHandler((webContents, permission, callback, details) => {
       const origin = normalizeOrigin(details?.requestingUrl || webContents?.getURL?.() || "");
@@ -102,6 +102,10 @@ var ElectronPermissionAdapter = class {
       const remembered = store.decision(containerId, origin, permission);
       if (remembered !== "ask") {
         callback(remembered === "allow");
+        return;
+      }
+      if (isStorageAccessPermission(permission)) {
+        callback(true);
         return;
       }
       void prompt(origin, permission).then((decision) => {
@@ -132,6 +136,13 @@ var ElectronPermissionAdapter = class {
     return resolveGuestWebContents(webview);
   }
 };
+function shouldAllowPermissionCheck(store, containerId, origin, permission) {
+  const decision = store.decision(containerId, origin, permission);
+  return decision === "allow" || decision === "ask" && isStorageAccessPermission(permission);
+}
+function isStorageAccessPermission(permission) {
+  return permission === "storage-access" || permission === "top-level-storage-access";
+}
 function normalizeOrigin(value) {
   try {
     return new URL(value).origin;
@@ -755,7 +766,7 @@ if(process.argv.includes('--ubc-prompt')) {
 if(!process.argv.includes('--ubc-prompt')) {
  const capture=target=>{
   if(!ipcRenderer.sendSync('__CHANNEL__','password-enabled'))return;
-  const form=target instanceof HTMLFormElement?target:target?.form,scope=form||document;
+  const form=target instanceof HTMLFormElement?target:target?.form||target?.closest?.('form'),scope=form||document;
   if(form?.action&&new URL(form.action,location.href).origin!==location.origin)return;
   const visible=f=>!f.disabled&&!f.readOnly&&f.getClientRects().length&&f.offsetWidth>0&&f.offsetHeight>0;
   const passwords=Array.from(scope.querySelectorAll('input[type="password"]')).filter(visible);
@@ -766,7 +777,20 @@ if(!process.argv.includes('--ubc-prompt')) {
   ipcRenderer.send('__CHANNEL__-password',{username:(user?.value||'').slice(0,4096),password:password.value});
  };
  document.addEventListener('submit',e=>{if(e.isTrusted)capture(e.target);},true);
- document.addEventListener('click',e=>{if(!e.isTrusted)return;const b=e.target?.closest?.('button,input[type="submit"]');if(b?.form&&b.type==='submit')capture(b.form);},true);
+ document.addEventListener('click',e=>{
+  if(!e.isTrusted)return;
+  const b=e.target?.closest?.('button,input[type="submit"],[role="button"]');
+  if(!b)return;
+  const label=(b.textContent||b.getAttribute?.('aria-label')||b.value||'').trim();
+  // Single-page login buttons (including Discord) frequently have no native
+  // form or type="submit"; do not capture unrelated buttons.
+  if(b.type==='submit'||/^(log\s*in|sign\s*in|log\s*on|continue|ログイン|サインイン|次へ)(?:\s|$)/i.test(label))capture(b.form||b);
+ },true);
+ document.addEventListener('keydown',e=>{
+  if(!e.isTrusted||e.key!=='Enter'||e.repeat||e.isComposing)return;
+  const target=e.target;
+  if(target instanceof HTMLInputElement&&['password','email','text'].includes(target.type))capture(target.form||target);
+ },true);
 }
 `;
 
@@ -825,6 +849,7 @@ const onPassword=(event,value)=>{
 };
 ipcMain.on(channel+'-password',onPassword);
 module.exports={preload,
+  enablePasswordCapture(id,enabled){const state=states.get(id);if(state)state.passwordEnabled=Boolean(enabled);},
   drainPassword(id,enabled){const state=states.get(id);if(!state)return null;state.passwordEnabled=Boolean(enabled);clearTimeout(state.passwordTimeout);const value=state.password;state.password=undefined;return enabled&&value&&Date.now()-value.time<15000?value:null;},
   update(id,active,block){let state=states.get(id);if(!state){state={times:[],busy:false};states.set(id,state);}state.active=Boolean(active);state.block=Boolean(block);if(!active)state.cancel?.();},
   remove(id){const state=states.get(id);state?.cancel?.();clearTimeout(state?.passwordTimeout);if(state?.password)state.password.password='';states.delete(id);},
@@ -841,6 +866,13 @@ var GuestBrowserApis = class {
     try {
       const wc = resolveGuestWebContents(webview);
       if (wc) this.runtime?.update(wc.id, active, block);
+    } catch {
+    }
+  }
+  enablePasswordCapture(webview, enabled) {
+    try {
+      const wc = resolveGuestWebContents(webview);
+      if (wc) this.runtime?.enablePasswordCapture(wc.id, enabled);
     } catch {
     }
   }
@@ -871,6 +903,9 @@ var ManagedWebviewBackend = class {
   liveGuests = /* @__PURE__ */ new Set();
   browserApis = new GuestBrowserApis();
   policySessions = /* @__PURE__ */ new Map();
+  storageFlushTimer;
+  storageFlushQueue = Promise.resolve();
+  shutdownPreparation;
   settings;
   create(partition, settings, doc = document) {
     this.settings = settings ?? this.settings;
@@ -897,6 +932,80 @@ var ManagedWebviewBackend = class {
     }
     webview.remove();
   }
+  /** A detached Electron webview does not dispatch normal page unload events.
+   * Navigate it first so sites can persist their own state, then flush the
+   * partition without inspecting or copying any site data. */
+  async destroyGracefully(webview) {
+    try {
+      await this.unloadGuestPage(webview);
+      await this.flushPersistentSessions();
+    } finally {
+      this.destroy(webview);
+    }
+  }
+  /** Called while the Obsidian leaf is still attached. The host may detach
+   * its DOM before View.onClose, so this must run before leaf.detach(). */
+  async prepareGuestForRemoval(webview) {
+    await this.unloadGuestPage(webview);
+    await this.flushPersistentSessions();
+  }
+  async unloadGuestPage(webview) {
+    if (!this.liveGuests.has(webview) || !webview.loadURL) return;
+    let url = "";
+    try {
+      url = webview.getURL?.() || "";
+    } catch {
+      return;
+    }
+    if (!/^https?:\/\//i.test(url)) return;
+    let timeout;
+    try {
+      await Promise.race([
+        webview.loadURL("about:blank").catch(() => void 0),
+        new Promise((resolve) => {
+          timeout = setTimeout(resolve, 3e3);
+        })
+      ]);
+    } catch {
+    } finally {
+      if (timeout !== void 0) clearTimeout(timeout);
+    }
+  }
+  /** Run before the host tears down renderer contents. Sites get a real
+   * pagehide/beforeunload and their own persistence code runs first. */
+  prepareForShutdown() {
+    if (!this.shutdownPreparation) {
+      this.shutdownPreparation = (async () => {
+        await Promise.all([...this.liveGuests].map((guest) => this.unloadGuestPage(guest)));
+        await this.flushPersistentSessions();
+      })();
+    }
+    return this.shutdownPreparation;
+  }
+  /** Flush all active persistent guest partitions, including cookies. This
+   * does not copy site credentials or browser data into plugin settings. */
+  flushPersistentSessions() {
+    if (this.storageFlushTimer !== void 0) {
+      clearTimeout(this.storageFlushTimer);
+      this.storageFlushTimer = void 0;
+    }
+    const sessions = [...new Set(this.policySessions.values())];
+    const next = this.storageFlushQueue.then(async () => {
+      await Promise.all(sessions.map(async (session) => {
+        await session.flushStorageData?.();
+        await session.cookies?.flushStore?.();
+      }));
+    });
+    this.storageFlushQueue = next.catch(() => void 0);
+    return next;
+  }
+  scheduleStorageFlush(delayMs = 1500) {
+    if (this.storageFlushTimer !== void 0) clearTimeout(this.storageFlushTimer);
+    this.storageFlushTimer = setTimeout(() => {
+      this.storageFlushTimer = void 0;
+      void this.flushPersistentSessions().catch((error) => console.warn("Unified Browser Core: failed to flush guest storage", error));
+    }, delayMs);
+  }
   bindPolicy(partition) {
     if (this.policySessions.has(partition)) return;
     const session = resolvePartitionSession(partition);
@@ -922,6 +1031,8 @@ var ManagedWebviewBackend = class {
     this.policySessions.set(partition, session);
   }
   dispose() {
+    if (this.storageFlushTimer !== void 0) clearTimeout(this.storageFlushTimer);
+    this.storageFlushTimer = void 0;
     this.browserApis.dispose();
     for (const session of this.policySessions.values()) session.webRequest?.onHeadersReceived(null);
     this.policySessions.clear();
@@ -949,7 +1060,7 @@ var ObsidianTabStripAdapter = class {
     return Array.isArray(parent.children) ? parent.children.filter(Boolean) : [leaf];
   }
   bind(plugin, shouldHandle, onContextMenu) {
-    let source2;
+    let source3;
     let sourceStrip;
     let marker;
     let insertion = 0;
@@ -960,8 +1071,8 @@ var ObsidianTabStripAdapter = class {
     };
     const clear = () => {
       marker?.removeClass("ubc-drop-before", "ubc-drop-after");
-      if (source2) this.tabHeader(source2)?.removeClass("ubc-tab-dragging");
-      source2 = void 0;
+      if (source3) this.tabHeader(source3)?.removeClass("ubc-tab-dragging");
+      source3 = void 0;
       sourceStrip = void 0;
       marker = void 0;
       this.dragging = false;
@@ -979,21 +1090,21 @@ var ObsidianTabStripAdapter = class {
       const group = leaf?.parent;
       if (!leaf || this.leavesInSameGroup(leaf).length < 2 || typeof group?.updateTabDisplay !== "function") return;
       clear();
-      source2 = leaf;
+      source3 = leaf;
       sourceStrip = strip;
       insertion = this.leavesInSameGroup(leaf).indexOf(leaf);
       this.dragging = true;
       header.addClass("ubc-tab-dragging");
     }, true);
     plugin.registerDomEvent(document, "dragover", (event) => {
-      if (!source2 || !sourceStrip || !overStrip(event)) {
+      if (!source3 || !sourceStrip || !overStrip(event)) {
         marker?.removeClass("ubc-drop-before", "ubc-drop-after");
         return;
       }
       event.preventDefault();
       event.stopPropagation();
       if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-      const others = this.leavesInSameGroup(source2).filter((leaf) => leaf !== source2);
+      const others = this.leavesInSameGroup(source3).filter((leaf) => leaf !== source3);
       insertion = others.findIndex((leaf) => {
         const rect2 = this.tabHeader(leaf)?.getBoundingClientRect();
         return rect2 ? event.clientX < rect2.left + rect2.width / 2 : false;
@@ -1007,13 +1118,13 @@ var ObsidianTabStripAdapter = class {
       else if (event.clientX > rect.right - 24) sourceStrip.scrollLeft += 16;
     }, true);
     plugin.registerDomEvent(document, "drop", (event) => {
-      if (!source2 || !sourceStrip || !overStrip(event)) {
+      if (!source3 || !sourceStrip || !overStrip(event)) {
         clear();
         return;
       }
       event.preventDefault();
       event.stopPropagation();
-      const leaf = source2;
+      const leaf = source3;
       const group = leaf.parent;
       const selected = group.children[group.currentTab];
       const oldIndex = group.children.indexOf(leaf);
@@ -1167,8 +1278,8 @@ var ObsidianTabStripAdapter = class {
     const overflowModes = new Set(browserHeaders.map((header) => header.dataset.ubcTabOverflow).filter(Boolean));
     if (overflowModes.size !== 1) return;
     const mode = [...overflowModes][0];
-    const source2 = browserHeaders[0];
-    if (!source2) return;
+    const source3 = browserHeaders[0];
+    if (!source3) return;
     for (const variable of [
       "--ubc-tab-preferred",
       "--ubc-tab-min",
@@ -1177,7 +1288,7 @@ var ObsidianTabStripAdapter = class {
       "--ubc-tab-shrink",
       "--ubc-pinned-tab-width"
     ]) {
-      const value = source2.style.getPropertyValue(variable);
+      const value = source3.style.getPropertyValue(variable);
       if (value) strip.style.setProperty(variable, value);
     }
     for (const header of browserHeaders) header.addClass("ubc-browser-tab-layout");
@@ -1312,7 +1423,7 @@ var ObsidianBookmarksAdapter = class {
     }
   }
 };
-function normalizeObsidianBookmarkItems(items, source2 = "runtime") {
+function normalizeObsidianBookmarkItems(items, source3 = "runtime") {
   const entries = [];
   let skippedNonWeb = 0;
   const visit = (item, folderPath) => {
@@ -1334,7 +1445,7 @@ function normalizeObsidianBookmarkItems(items, source2 = "runtime") {
     skippedNonWeb += 1;
   };
   for (const item of items) visit(item, []);
-  return { available: true, source: source2, entries, skippedNonWeb };
+  return { available: true, source: source3, entries, skippedNonWeb };
 }
 function isWebUrl(value) {
   try {
@@ -3197,6 +3308,9 @@ function mergeDuplicateBookmarks(bookmarks) {
   return merged;
 }
 
+// src/core/experimental-features.ts
+var RICH_NAVIGATION_RESTORE_ENABLED = false;
+
 // src/i18n.ts
 var language = "auto";
 var resolveLocale = () => typeof navigator === "undefined" ? "en" : navigator.language;
@@ -3206,7 +3320,7 @@ function setLocaleResolver(resolver) {
 function setLanguage(value) {
   language = value;
 }
-function t(source2, values = {}) {
+function t(source3, values = {}) {
   let locale = language;
   if (locale === "auto") {
     try {
@@ -3215,7 +3329,7 @@ function t(source2, values = {}) {
       locale = "en";
     }
   }
-  const result = locale.toLowerCase().startsWith("ja") ? ja[source2] ?? source2 : source2;
+  const result = locale.toLowerCase().startsWith("ja") ? ja[source3] ?? source3 : source3;
   return result.replace(/\{(\w+)\}/g, (match, key) => String(values[key] ?? match));
 }
 var ja = {
@@ -4104,10 +4218,6 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
         }
       })
     );
-    new import_obsidian3.Setting(containerEl).setName(t("Show recovery notifications")).setDesc(t("Recovery notifications disappear when you interact with the page. Turn this on to show them again after choosing Never show again.")).addToggle((toggle) => toggle.setValue(this.plugin.core.settings().showRecoveryNotifications).onChange((value) => {
-      this.plugin.core.updateSettings({ showRecoveryNotifications: value });
-      this.plugin.refreshBrowserViews();
-    }));
     new import_obsidian3.Setting(containerEl).setName(t("Detailed tab recovery retention (days)")).setDesc(t("How long Browser Core should keep extra state that can restore recently closed tabs more accurately.")).addText(
       (text) => text.setValue(String(this.plugin.core.settings().restoreRetentionDays)).onChange((value) => {
         const days = Number(value);
@@ -4400,6 +4510,45 @@ function searchPresetForTemplate(template) {
 }
 
 // src/ui/address-suggestions.ts
+function completionHistoryVisits(nodes) {
+  return nodes.flatMap((node) => {
+    if (node.kind === "navigation" && node.url) return [{ url: node.url, timestamp: node.timestamp }];
+    if (node.kind === "residual" && node.residualKind === "redirect" && node.fromUrl) {
+      return [{ url: node.fromUrl, timestamp: node.timestamp }];
+    }
+    return [];
+  });
+}
+function rankedHistoryHosts(typed, history) {
+  const query = typed.trim().toLowerCase();
+  if (!query || /\s/.test(query) || /[^a-z0-9.-]/.test(query)) return [];
+  const hosts = /* @__PURE__ */ new Map();
+  for (const visit of history) {
+    let host;
+    try {
+      const url = new URL(visit.url);
+      if (url.protocol !== "https:" && url.protocol !== "http:") continue;
+      host = url.hostname.toLowerCase().replace(/^www\./, "");
+    } catch {
+      continue;
+    }
+    if (!host.startsWith(query) || host.length <= query.length) continue;
+    const previous = hosts.get(host);
+    if (previous) {
+      previous.visits += 1;
+      previous.lastVisited = Math.max(previous.lastVisited, visit.timestamp);
+    } else hosts.set(host, { host, visits: 1, lastVisited: visit.timestamp });
+  }
+  return [...hosts.values()].sort((a, b) => b.visits - a.visits || b.lastVisited - a.lastVisited || a.host.localeCompare(b.host)).slice(0, 12);
+}
+function inlineAddressCompletion(typed, hosts) {
+  const query = typed.trim();
+  if (!query || /\s/.test(query) || /^(?:https?:\/\/|browser:)/i.test(query) || /[/?#@]/.test(query)) return;
+  for (const host of hosts) {
+    const clean = host.replace(/^www\./i, "").toLowerCase();
+    if (clean.length > query.length && clean.startsWith(query.toLowerCase())) return typed + clean.slice(query.length);
+  }
+}
 function bindAddressSuggestions(input, core, navigate) {
   const doc = input.ownerDocument;
   const wrapper = doc.createElement("div");
@@ -4409,11 +4558,15 @@ function bindAddressSuggestions(input, core, navigate) {
   const list = wrapper.createDiv({ cls: "ubc-address-suggestions is-hidden", attr: { role: "listbox" } });
   list.id = `ubc-suggestions-${Math.random().toString(36).slice(2)}`;
   input.setAttribute("role", "combobox");
-  input.setAttribute("aria-autocomplete", "list");
+  input.setAttribute("aria-autocomplete", "both");
   input.setAttribute("aria-controls", list.id);
   input.setAttribute("autocomplete", "off");
   let choices = [];
   let selected = -1;
+  let inlinePrefix = "";
+  const historyVisits = () => completionHistoryVisits(core.history.allNodes());
+  const hostsFor = (query) => rankedHistoryHosts(query, historyVisits());
+  const hasInlineSelection = () => Boolean(inlinePrefix && input.selectionStart === inlinePrefix.length && input.selectionEnd === input.value.length && input.value.length > inlinePrefix.length);
   const close = () => {
     list.addClass("is-hidden");
     input.setAttribute("aria-expanded", "false");
@@ -4431,31 +4584,44 @@ function bindAddressSuggestions(input, core, navigate) {
       row.scrollIntoView({ block: "nearest" });
     } else input.removeAttribute("aria-activedescendant");
   };
-  const update = () => {
-    const query = input.value.trim().toLocaleLowerCase();
+  const update = (event) => {
+    const raw = input.value;
+    const query = raw.trim().toLocaleLowerCase();
     list.empty();
     selected = -1;
+    inlinePrefix = "";
     if (!query) {
       close();
       return;
     }
     const candidates = /* @__PURE__ */ new Map();
-    const add = (url, title, source2) => {
+    const add = (url, title, source3) => {
       if (!/^https?:\/\//i.test(url) || candidates.has(url)) return;
-      if ((title + " " + url).toLocaleLowerCase().includes(query)) candidates.set(url, { url, title, source: source2 });
+      if ((title + " " + url).toLocaleLowerCase().includes(query)) candidates.set(url, { url, title, source: source3 });
     };
+    for (const result of hostsFor(query)) add(`https://${result.host}/`, result.host, t("History"));
     for (const bookmark of core.bookmarks.allBookmarks()) add(bookmark.url, bookmark.title, t("Bookmarks"));
     for (const node of core.history.allNodes().sort((a, b) => b.timestamp - a.timestamp)) {
       if (node.kind === "navigation") add(node.url, node.title, t("History"));
     }
     choices = [...candidates.values()].slice(0, 8);
+    const inputEvent = event;
+    const cursorAtEnd = input.selectionStart === raw.length && input.selectionEnd === raw.length;
+    if (cursorAtEnd && !inputEvent?.isComposing && !inputEvent?.inputType?.startsWith("delete")) {
+      const completion = inlineAddressCompletion(raw, hostsFor(query).map((item) => item.host));
+      if (completion) {
+        inlinePrefix = raw;
+        input.value = completion;
+        input.setSelectionRange(raw.length, completion.length);
+      }
+    }
     for (const [index, choice] of choices.entries()) {
       const row = list.createDiv({ cls: "ubc-address-suggestion", attr: { role: "option", id: `${list.id}-${index}`, "aria-selected": "false" } });
       row.createDiv({ cls: "ubc-suggestion-title", text: choice.title || choice.url });
       row.createDiv({ cls: "ubc-suggestion-url", text: choice.url });
       row.createSpan({ cls: "ubc-suggestion-source", text: choice.source });
-      row.addEventListener("pointerdown", (event) => {
-        event.preventDefault();
+      row.addEventListener("pointerdown", (event2) => {
+        event2.preventDefault();
         input.value = choice.url;
         close();
         navigate(choice.url);
@@ -4467,8 +4633,18 @@ function bindAddressSuggestions(input, core, navigate) {
   const keydown = (event) => {
     if (event.isComposing) return;
     if (event.key === "Escape") {
+      if (hasInlineSelection()) input.value = inlinePrefix;
+      inlinePrefix = "";
       close();
       event.preventDefault();
+      return;
+    }
+    if ((event.key === "Tab" || event.key === "ArrowRight") && hasInlineSelection()) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      input.setSelectionRange(input.value.length, input.value.length);
+      inlinePrefix = "";
+      close();
       return;
     }
     if (list.hasClass("is-hidden")) return;
@@ -4485,16 +4661,25 @@ function bindAddressSuggestions(input, core, navigate) {
       input.value = choice.url;
       close();
       navigate(choice.url);
-    } else if (event.key === "Enter" || event.key === "Tab") close();
+    } else if (event.key === "Enter" || event.key === "Tab") {
+      if (hasInlineSelection()) input.setSelectionRange(input.value.length, input.value.length);
+      inlinePrefix = "";
+      close();
+    }
   };
   input.addEventListener("input", update);
   input.addEventListener("keydown", keydown, true);
-  input.addEventListener("blur", close);
+  const blur = () => {
+    if (hasInlineSelection()) input.value = inlinePrefix;
+    inlinePrefix = "";
+    close();
+  };
+  input.addEventListener("blur", blur);
   close();
   return () => {
     input.removeEventListener("input", update);
     input.removeEventListener("keydown", keydown, true);
-    input.removeEventListener("blur", close);
+    input.removeEventListener("blur", blur);
     list.remove();
   };
 }
@@ -4565,7 +4750,7 @@ function button(parent, label2, action, primary = false) {
     try {
       await action();
     } catch {
-      new import_obsidian4.Notice(t("Password operation failed. Check your key, Windows Hello, and file access."));
+      new import_obsidian4.Notice(t("Password operation failed. Check the recovery key, OS keyring, and file access."));
     } finally {
       el.disabled = false;
     }
@@ -4605,7 +4790,7 @@ function showRecoveryKey(app, vault, key) {
       onOpen() {
         this.watch();
         this.titleEl.setText(t("Save your recovery key"));
-        this.contentEl.createEl("p", { text: t("Store this key outside your vault. It unlocks encrypted backups when Windows Hello or this PC is unavailable.") });
+        this.contentEl.createEl("p", { text: t("Store this key outside your vault. It unlocks encrypted backups if the OS keyring, Windows Hello, or this device is unavailable.") });
         const value = field(this.contentEl, "Recovery key", key);
         value.readOnly = true;
         const check = this.contentEl.createEl("label", { cls: "ubc-password-field" });
@@ -4637,7 +4822,11 @@ function unlockVault(app, vault) {
       onOpen() {
         this.watch();
         this.titleEl.setText(t("Unlock password vault"));
-        this.contentEl.createEl("p", { text: t("Choose Windows Hello or enter your recovery key. Failed authentication never falls back automatically.") });
+        this.contentEl.createEl("p", { text: t("Choose your device keyring, Windows Hello, or enter the recovery key. A failed unlock never falls back automatically.") });
+        if (vault.usesDevice && vault.device.available()) button(this.contentEl, process.platform === "darwin" ? "Unlock with macOS Keychain" : "Unlock with Linux keyring", async () => {
+          await vault.unlockDevice();
+          this.close();
+        }, true);
         if (vault.usesHello) button(this.contentEl, "Unlock with Windows Hello", async () => {
           await vault.unlockHello();
           this.close();
@@ -4700,7 +4889,10 @@ function renderPasswordPage(parent, app, vault) {
     const actions = page.createDiv({ cls: "ubc-password-actions" });
     if (!vault.exists) {
       page.createEl("h2", { text: t("Create your password vault") });
-      page.createEl("p", { text: t("Windows Hello setup asks for authentication twice to verify that the key can be used again. A recovery key is issued for backups and other devices.") });
+      page.createEl("p", { text: t("Save the recovery key in a separate, secure location. On supported devices, the OS keyring can unlock your encrypted vault after restarting Obsidian.") });
+      if (vault.device.available()) button(actions, process.platform === "darwin" ? "Set up with macOS Keychain" : "Set up with Linux keyring", async () => {
+        await vault.setup("device", (key) => showRecoveryKey(app, vault, key));
+      }, true);
       if (process.platform === "win32") button(actions, "Set up with Windows Hello", async () => {
         await vault.setup(true, (key) => showRecoveryKey(app, vault, key));
       }, true);
@@ -4718,6 +4910,10 @@ function renderPasswordPage(parent, app, vault) {
       button(actions, "Export encrypted backup", () => exportBackup(vault));
       button(actions, "New recovery key", async () => {
         if (await confirmAction(app, t("New recovery key"), t("Keep old recovery keys for old backups. The new key applies to the current vault and future backups."), t("Continue"))) await vault.rotateRecovery((key) => showRecoveryKey(app, vault, key));
+      });
+      if (vault.device.available()) button(actions, vault.usesDevice ? process.platform === "darwin" ? "Refresh macOS Keychain unlock" : "Refresh Linux keyring unlock" : process.platform === "darwin" ? "Enable macOS Keychain unlock" : "Enable Linux keyring unlock", () => vault.enableDevice());
+      if (vault.usesDevice) button(actions, "Disable device keyring unlock", async () => {
+        if (await confirmAction(app, t("Disable device keyring unlock"), t("Future unlocks will require another method. Keep your recovery key."), t("Continue"))) await vault.disableDevice();
       });
       if (process.platform === "win32") button(actions, vault.usesHello ? "Replace Windows Hello key" : "Enable Windows Hello", () => vault.enableHello());
       if (vault.usesHello) button(actions, "Disable Windows Hello", async () => {
@@ -4757,7 +4953,7 @@ function renderPasswordPage(parent, app, vault) {
       show();
     }
     button(actions, "Import encrypted backup", () => importBackup(app, vault));
-    page.createEl("p", { cls: "ubc-password-note", text: t("Windows Hello protects local unlock. Recovery keys unlock backups. Other Obsidian plugins share this process; unlocked credentials cannot be isolated from a compromised host.") });
+    page.createEl("p", { cls: "ubc-password-note", text: t("On macOS, Keychain protects device unlock. On Linux, a real desktop keyring is required; insecure basic_text encryption is rejected. Recovery keys unlock encrypted backups on any OS. Other Obsidian plugins share this process; unlocked credentials cannot be isolated from a compromised host.") });
   };
   const off = vault.subscribe(render);
   render();
@@ -4826,7 +5022,7 @@ function passwordPopover(anchor, title, build, onClose) {
 
 // src/passwords/guest.ts
 var world = 973;
-var instrumentation = `(() => {
+var passwordEventInstrumentation = `(() => {
   if (!globalThis.__ubcPasswords) {
     const state = { pending: null, sequence: 0, enabled: false };
     const fields = (target) => {
@@ -4846,20 +5042,88 @@ var instrumentation = `(() => {
       if (state.pending?.kind === 'save') return;
       state.pending = { kind: 'focus', sequence: ++state.sequence, origin: location.origin, time: Date.now() };
     }, true);
+    // Electron hosts can discard <webview preload> scripts. Install the same
+    // capture path inside the isolated main-frame world used for filling.
+    // Only real user submits and login actions may propose saving a password.
+    const capture = target => {
+      if (!state.enabled || window !== window.top) return;
+      const found = fields(target);
+      if (!found) return;
+      if (found.form?.action && new URL(found.form.action, location.href).origin !== location.origin) return;
+      const password = found.password.value;
+      if (!password || password.length > 8192) return;
+      state.pending = {
+        kind: 'save', sequence: ++state.sequence, origin: location.origin,
+        username: (found.username?.value || '').slice(0, 4096),
+        password, time: Date.now()
+      };
+    };
+    document.addEventListener('submit', event => {
+      if (event.isTrusted) capture(event.target);
+    }, true);
+    document.addEventListener('click', event => {
+      if (!event.isTrusted) return;
+      const button = event.target?.closest?.('button,input[type="submit"],[role="button"]');
+      if (!button) return;
+      const label = String(button.textContent || button.getAttribute?.('aria-label') || button.value || '').trim();
+      if (button.type === 'submit' || /^(log\\s*in|sign\\s*in|log\\s*on|continue|\u30ED\u30B0\u30A4\u30F3|\u30B5\u30A4\u30F3\u30A4\u30F3|\u6B21\u3078)(?:\\s|$)/i.test(label)) {
+        capture(button.form || button);
+      }
+    }, true);
+    document.addEventListener('keydown', event => {
+      if (!event.isTrusted || event.key !== 'Enter' || event.isComposing || event.repeat) return;
+      if (event.target instanceof HTMLInputElement && ['password','email','text'].includes(event.target.type)) {
+        capture(event.target.form || event.target);
+      }
+    }, true);
     state.fields = fields;
     globalThis.__ubcPasswords = state;
   }
   const state = globalThis.__ubcPasswords, pending = state.pending; state.pending = null;
   state.enabled = __ENABLED__;
-  if (!state.enabled && pending?.kind !== 'focus') return null;
-  return pending && Date.now() - pending.time < 15000 ? pending : null;
+  if ((!state.enabled && pending?.kind !== 'focus') || (pending && Date.now() - pending.time >= 15000)) {
+    if (pending?.password) pending.password = '';
+    return null;
+  }
+  return pending || null;
 })()`;
+function currentPasswordSnapshotCode(origin) {
+  return `(() => {
+    if (window !== window.top || location.origin !== ${JSON.stringify(origin)}) return null;
+    const visible = field => !field.disabled && !field.readOnly
+      && field.getClientRects().length && field.offsetWidth > 0 && field.offsetHeight > 0;
+    const candidates = Array.from(document.querySelectorAll('input[type="password"]')).filter(visible);
+    const passwordField = candidates.find(field => field.autocomplete === 'current-password' && field.value)
+      || candidates.find(field => field.value);
+    if (!passwordField || typeof passwordField.value !== 'string'
+        || !passwordField.value || passwordField.value.length > 8192) return null;
+    const form = passwordField.form;
+    if (form?.action && new URL(form.action,location.href).origin !== location.origin) return null;
+    const inputs = Array.from((form || document).querySelectorAll('input')).filter(visible);
+    const usernameField = inputs.find(field => field.autocomplete === 'username')
+      || inputs.find(field => field.type === 'email')
+      || inputs.find(field => ['text','tel'].includes(field.type)
+        && /user|login|email|account/i.test(field.name + ' ' + field.id));
+    return { kind: 'save', origin: location.origin, sequence: Date.now(),
+      username: String(usernameField?.value || '').slice(0, 4096),
+      password: passwordField.value };
+  })()`;
+}
+async function readCurrentPasswordSnapshot(webview, expectedUrl) {
+  const origin = passwordOrigin(expectedUrl);
+  const wc = resolveGuestWebContents(webview);
+  if (!wc?.executeJavaScriptInIsolatedWorld || passwordOrigin(wc.getURL()) !== origin) return null;
+  const result = await wc.executeJavaScriptInIsolatedWorld(world, [{
+    code: currentPasswordSnapshotCode(origin)
+  }]);
+  return result?.kind === "save" && result.origin === origin && typeof result.password === "string" ? result : null;
+}
 async function readPasswordEvent(webview, enabled = true, apis) {
   const captured = apis?.drainPassword(webview, enabled);
   if (captured) return captured;
   const wc = resolveGuestWebContents(webview);
   if (!wc?.executeJavaScriptInIsolatedWorld) return null;
-  return await wc.executeJavaScriptInIsolatedWorld(world, [{ code: instrumentation.replace("__ENABLED__", String(enabled)) }]);
+  return await wc.executeJavaScriptInIsolatedWorld(world, [{ code: passwordEventInstrumentation.replace("__ENABLED__", String(enabled)) }]);
 }
 async function fillPassword(webview, expectedUrl, username, password) {
   const origin = passwordOrigin(expectedUrl), wc = resolveGuestWebContents(webview);
@@ -5078,24 +5342,24 @@ function renderBookmarkVisual(parent, bookmark, className = "ubc-bookmark-visual
     if (!host.firstElementChild) fallback();
     return host;
   }
-  const source2 = bookmark.visualKind === "image" ? resolveCustomImage(bookmark.visualValue, app) : bookmark.faviconUrl?.trim() || fallbackFaviconUrl(bookmark.url);
-  if (!source2) {
+  const source3 = bookmark.visualKind === "image" ? resolveCustomImage(bookmark.visualValue, app) : bookmark.faviconUrl?.trim() || fallbackFaviconUrl(bookmark.url);
+  if (!source3) {
     fallback();
     return host;
   }
   const image = host.createEl("img", {
     cls: "ubc-bookmark-visual-image",
-    attr: { src: source2, alt: "" }
+    attr: { src: source3, alt: "" }
   });
   image.addEventListener("error", fallback, { once: true });
   return host;
 }
 function resolveCustomImage(value, app) {
-  const source2 = value?.trim();
-  if (!source2) return void 0;
-  if (/^(?:https?:|data:image\/|app:|file:)/i.test(source2)) return source2;
-  const file = app?.vault.getAbstractFileByPath(source2);
-  return file instanceof import_obsidian5.TFile ? app.vault.getResourcePath(file) : source2;
+  const source3 = value?.trim();
+  if (!source3) return void 0;
+  if (/^(?:https?:|data:image\/|app:|file:)/i.test(source3)) return source3;
+  const file = app?.vault.getAbstractFileByPath(source3);
+  return file instanceof import_obsidian5.TFile ? app.vault.getResourcePath(file) : source3;
 }
 function fallbackFaviconUrl(url) {
   try {
@@ -5881,6 +6145,38 @@ function truncate(value, max) {
   return value.length > max ? value.slice(0, max - 1) + "\u2026" : value;
 }
 
+// src/adapters/leaf-close-gate.ts
+function gateLeafDetach(leaf, prepare, reportFailure = console.warn) {
+  const original = leaf.detach;
+  const originalDescriptor = Object.getOwnPropertyDescriptor(leaf, "detach");
+  let started = false;
+  let disposed = false;
+  const restore = () => {
+    if (leaf.detach !== guarded) return;
+    if (originalDescriptor) Object.defineProperty(leaf, "detach", originalDescriptor);
+    else delete leaf.detach;
+  };
+  const guarded = function() {
+    if (started) return;
+    started = true;
+    void Promise.resolve().then(prepare).catch((error) => {
+      try {
+        reportFailure(error);
+      } catch {
+      }
+    }).then(() => {
+      if (disposed) return;
+      restore();
+      original.call(leaf);
+    });
+  };
+  leaf.detach = guarded;
+  return () => {
+    disposed = true;
+    restore();
+  };
+}
+
 // src/navigation/address-normalizer.ts
 function normalizeBrowserAddress(value, searchUrl) {
   const trimmed = value.trim();
@@ -6105,6 +6401,7 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
   pendingViewState;
   manualRetention = "default";
   restoredFromLeafId;
+  sessionSourceLeafId;
   restoreTargetUrl;
   restoreTargetIndex;
   checkpointTimer;
@@ -6126,6 +6423,8 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
   historyVersionMeta = null;
   historyVersionLoadToken = 0;
   closeReasonOverride;
+  releaseLeafDetachGate;
+  preparingLeafClose = false;
   expandedHistoryBranches = /* @__PURE__ */ new Set();
   expandedResidualParents = /* @__PURE__ */ new Set();
   collapsedBookmarkFolders = /* @__PURE__ */ new Set();
@@ -6156,6 +6455,11 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
     return "globe";
   }
   async onOpen() {
+    this.releaseLeafDetachGate = gateLeafDetach(
+      this.leaf,
+      () => this.prepareForLeafClose(),
+      (error) => console.warn("Unified Browser Core: graceful browser tab close failed", error)
+    );
     this.rootEl = this.contentEl;
     this.rootEl.empty();
     this.rootEl.addClass("ubc-browser-view");
@@ -6181,6 +6485,8 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
     }
   }
   async onClose() {
+    this.releaseLeafDetachGate?.();
+    this.releaseLeafDetachGate = void 0;
     this.passwordPageDispose?.();
     this.passwordPopoverClose?.();
     this.passwordUnsubscribe?.();
@@ -6189,7 +6495,7 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
     await this.captureRecoveryState();
     this.disconnectHistoryObserver();
     if (this.webview) await this.teardownFormRecoveryInstrumentation(this.webview);
-    this.destroyWebview();
+    await this.destroyWebview();
     this.clearTabStyle();
     this.browserHeaderTitleEl?.removeClass("ubc-browser-title-container");
     this.browserHeaderEl?.removeClass("ubc-browser-view-header");
@@ -6212,6 +6518,17 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
       this.finalizeClose(reason);
     }, 0);
   }
+  async prepareForLeafClose() {
+    const guest = this.webview;
+    if (this.plugin.isUnloading() || !guest) return;
+    try {
+      await this.captureRecoveryState();
+    } finally {
+      if (this.webview !== guest || !guest.isConnected) return;
+      this.preparingLeafClose = true;
+      await this.plugin.managedWebviewBackend.prepareGuestForRemoval(guest);
+    }
+  }
   finalizeClose(reason) {
     this.plugin.core.history.closeLeaf(this.leafId(), reason);
     this.plugin.core.scheduleSave();
@@ -6229,6 +6546,7 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
       pinned: this.pinned,
       manualRetention: this.manualRetention,
       restoredFromLeafId: this.restoredFromLeafId,
+      sessionSourceLeafId: this.sessionSourceLeafId,
       internalSurface: this.internalSurface ?? void 0,
       transientHistory: [...this.transientHistory],
       transientIndex: this.transientIndex
@@ -6258,6 +6576,7 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
           siteAssignmentBypassReason: state.siteAssignmentBypassReason,
           restoreTargetUrl: state.restoreTargetUrl,
           restoreTargetIndex: state.restoreTargetIndex,
+          sessionSourceLeafId: state.sessionSourceLeafId ?? state.restoredFromLeafId,
           internalSurface: state.internalSurface,
           transientHistory: state.transientHistory,
           transientIndex: state.transientIndex
@@ -6280,6 +6599,7 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
     this.siteAssignmentBypassOrigin = state.siteAssignmentBypassOrigin;
     this.siteAssignmentBypassReason = state.siteAssignmentBypassReason ?? (state.siteAssignmentBypassOrigin ? "explicit" : void 0);
     this.restoredFromLeafId = state.restoredFromLeafId;
+    this.sessionSourceLeafId = state.sessionSourceLeafId ?? state.restoredFromLeafId ?? this.sessionSourceLeafId;
     this.restoreTargetUrl = state.restoreTargetUrl;
     this.restoreTargetIndex = state.restoreTargetIndex;
     if (state.transientHistory) this.transientHistory = [...state.transientHistory];
@@ -6661,8 +6981,8 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
       );
     }
   }
-  onPaneMenu(menu, source2) {
-    super.onPaneMenu(menu, source2);
+  onPaneMenu(menu, source3) {
+    super.onPaneMenu(menu, source3);
     trackDismissibleMenu(menu, this.rootEl?.ownerDocument ?? document);
     menu.addSeparator();
     menu.addItem((item) => item.setTitle(t("Home")).setIcon("home").onClick(() => this.showInternal("home")));
@@ -6670,6 +6990,7 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
     menu.addItem((item) => item.setTitle(t("Bookmarks")).setIcon("book-open").onClick(() => this.showInternal("bookmarks")));
     menu.addItem((item) => item.setTitle(t("Passwords")).setIcon("key-round").onClick(() => this.showInternal("passwords")));
     if (!this.internalSurface) menu.addItem((item) => item.setTitle(t("Fill password")).setIcon("key-round").onClick(() => void this.openPasswordSuggestions()));
+    if (!this.internalSurface) menu.addItem((item) => item.setTitle(t("Save password for this site")).setIcon("save").onClick(() => void this.savePasswordForCurrentSite()));
     if (this.plugin.passwords.unlocked) menu.addItem((item) => item.setTitle(t("Lock password vault")).setIcon("lock").onClick(() => this.plugin.passwords.lock()));
     const closed = this.plugin.core.history.recentlyClosed(1)[0];
     menu.addItem((item) => item.setTitle(t("Reopen closed tab")).setIcon("rotate-ccw").setDisabled(!closed).onClick(() => {
@@ -6821,9 +7142,8 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
     this.passwordButtonEl = this.addToolbarButton("key-round", t("Passwords"), () => void this.openPasswordSuggestions());
     this.passwordButtonEl.hidden = true;
     this.passwordUnsubscribe = this.plugin.passwords.subscribe(() => {
-      this.passwordPopoverClose?.();
-      if (this.webview) void readPasswordEvent(this.webview, this.plugin.passwords.unlocked, this.plugin.managedWebviewBackend.browserApis).catch(() => {
-      });
+      if (!this.passwordSavePopover) this.passwordPopoverClose?.();
+      if (this.webview) this.plugin.managedWebviewBackend.browserApis.enablePasswordCapture(this.webview, this.plugin.passwords.exists);
     });
     this.passwordPoll = window.setInterval(() => void this.pollPasswordEvents(), 1200);
     const updateGuestActivity = () => {
@@ -7163,7 +7483,7 @@ ${item.url}` }
       this.webviewDomReady = false;
       this.bindWebview(webview2);
       this.webLayerEl.appendChild(webview2);
-      if (this.plugin.core.settings().blockPasskeyRequests || !this.richRestoreAttempted && this.restoredFromLeafId) {
+      if (this.plugin.core.settings().blockPasskeyRequests || RICH_NAVIGATION_RESTORE_ENABLED && !this.richRestoreAttempted && this.restoredFromLeafId) {
         this.pendingInitialWebUrl = url;
         this.ignoreBootstrapAboutBlank = true;
         webview2.src = "about:blank";
@@ -7179,6 +7499,7 @@ ${item.url}` }
   }
   bindWebview(webview) {
     webview.addEventListener("will-navigate", () => {
+      if (this.webview !== webview || this.plugin.isUnloading() || this.preparingLeafClose) return;
       void this.pollPasswordEvents();
       void this.captureRecoveryState();
     });
@@ -7187,6 +7508,7 @@ ${item.url}` }
       void this.initializeAttachedWebview(webview);
     });
     webview.addEventListener("did-navigate", (rawEvent) => {
+      if (this.webview !== webview || this.plugin.isUnloading() || this.preparingLeafClose) return;
       const event = rawEvent;
       if (event.isMainFrame === false) return;
       const url = event.url || this.safeWebviewUrl(webview) || this.currentUrlValue;
@@ -7197,8 +7519,10 @@ ${item.url}` }
         this.clearBootstrapHistoryAfterFallback = false;
       }
       this.handleCommittedNavigation(url);
+      this.plugin.managedWebviewBackend.scheduleStorageFlush();
     });
     webview.addEventListener("did-navigate-in-page", (rawEvent) => {
+      if (this.webview !== webview || this.plugin.isUnloading() || this.preparingLeafClose) return;
       const event = rawEvent;
       if (event.isMainFrame === false) return;
       const url = event.url || this.safeWebviewUrl(webview) || this.currentUrlValue;
@@ -7248,12 +7572,14 @@ ${item.url}` }
       }
       this.plugin.core.scheduleSave();
       this.plugin.scheduleSessionCheckpoint();
+      this.plugin.managedWebviewBackend.scheduleStorageFlush();
       void this.captureRecoveryState();
       if (this.formRecoveryWatchEnabled && this.hasRecoverableFormValues()) {
         void this.restoreFormValues({ silent: true, watchNextSteps: true });
       }
     });
     webview.addEventListener("did-redirect-navigation", (rawEvent) => {
+      if (this.webview !== webview || this.plugin.isUnloading() || this.preparingLeafClose) return;
       const event = rawEvent;
       if (!event.url) return;
       this.plugin.core.history.addResidual({
@@ -7265,6 +7591,7 @@ ${item.url}` }
       this.plugin.core.scheduleSave();
     });
     webview.addEventListener("page-title-updated", (rawEvent) => {
+      if (this.webview !== webview || this.plugin.isUnloading() || this.preparingLeafClose) return;
       if (this.ignoreBootstrapAboutBlank && this.safeWebviewUrl(webview) === "about:blank") return;
       const event = rawEvent;
       this.syncWebviewTitle(webview, event.title);
@@ -7306,7 +7633,7 @@ ${item.url}` }
       this.setNavigationStatus(offline ? "offline" : "failed", event.errorDescription || void 0);
     });
     webview.addEventListener("dom-ready", () => {
-      if (this.webview !== webview || !webview.isConnected) return;
+      if (this.webview !== webview || !webview.isConnected || this.preparingLeafClose) return;
       this.webviewDomReady = true;
       this.bindGuestRuntime(webview, true);
       this.refreshNavigationButtons();
@@ -7335,7 +7662,7 @@ ${item.url}` }
     const restoreGeneration = this.restoreIntentGeneration;
     const fallbackUrl = this.pendingInitialWebUrl;
     this.pendingInitialWebUrl = void 0;
-    if (!this.richRestoreAttempted && this.restoredFromLeafId) {
+    if (RICH_NAVIGATION_RESTORE_ENABLED && !this.richRestoreAttempted && this.restoredFromLeafId) {
       this.richRestoreAttempted = true;
       const capsule = this.plugin.core.restore.get(this.restoredFromLeafId);
       const targetIndex = this.restoreTargetUrl && typeof this.restoreTargetIndex === "number" ? capsule && this.navigationHistoryAdapter.entryMatches(
@@ -7390,6 +7717,7 @@ ${item.url}` }
       !this.internalSurface && this.rootEl.offsetParent !== null && this.plugin.app.workspace.getMostRecentLeaf(this.leaf.getContainer()) === this.leaf,
       this.plugin.core.settings().blockPasskeyRequests
     );
+    this.plugin.managedWebviewBackend.browserApis.enablePasswordCapture(webview, this.plugin.passwords.exists);
     if (!this.popupInteractionDisposer) {
       this.popupInteractionDisposer = observeGuestInteraction(webview, () => {
         this.dismissTransientPopups();
@@ -7427,7 +7755,7 @@ ${item.url}` }
     this.passwordPageDispose = void 0;
     if (!this.passwordSavePopover) {
       this.passwordPopoverClose?.();
-      this.passwordButtonEl.hidden = true;
+      this.passwordButtonEl.hidden = !webOrigin(url);
     }
     const reason = this.pendingHistoryIntent || "navigate";
     this.pendingHistoryIntent = null;
@@ -7482,6 +7810,8 @@ ${item.url}` }
   async handleDomReady() {
     const webview = this.readyWebview();
     if (!webview) return;
+    this.passwordButtonEl.hidden = !webOrigin(this.currentUrlValue);
+    this.plugin.managedWebviewBackend.browserApis.enablePasswordCapture(webview, this.plugin.passwords.exists);
     this.refreshZoom();
     if (!this.faviconDataUrl) void this.captureFavicon(webview, []);
     if (this.formRecoveryEnabledForSite()) {
@@ -7549,16 +7879,20 @@ ${item.url}` }
     }
   }
   rememberFaviconSource(candidates, url = this.currentUrlValue) {
-    const source2 = candidates.find((candidate) => /^https?:/i.test(candidate)) ?? fallbackFaviconUrl(url);
-    if (!source2 || source2 === this.faviconSourceUrl) return;
-    this.faviconSourceUrl = source2;
+    const source3 = candidates.find((candidate) => /^https?:/i.test(candidate)) ?? fallbackFaviconUrl(url);
+    if (!source3 || source3 === this.faviconSourceUrl) return;
+    this.faviconSourceUrl = source3;
     const bookmark = this.plugin.core.bookmarks.findByUrl(url);
-    if (!bookmark || bookmark.visualKind !== "favicon" || bookmark.faviconUrl === source2) return;
-    this.plugin.core.bookmarks.updateBookmark(bookmark.id, { faviconUrl: source2 });
+    if (!bookmark || bookmark.visualKind !== "favicon" || bookmark.faviconUrl === source3) return;
+    this.plugin.core.bookmarks.updateBookmark(bookmark.id, { faviconUrl: source3 });
     this.plugin.core.scheduleSave();
     this.renderFavoritesBar();
   }
   showRecoveryBanner(message, tone) {
+    if (!RICH_NAVIGATION_RESTORE_ENABLED) {
+      this.hideRecoveryBanner();
+      return;
+    }
     if (!this.recoveryBannerEl) return;
     if (!this.plugin.core.settings().showRecoveryNotifications) {
       this.hideRecoveryBanner();
@@ -7609,6 +7943,10 @@ ${item.url}` }
     this.recoveryInteractionDisposer = observeGuestInteraction(this.webview, () => this.hideRecoveryBanner());
   }
   refreshRecoveryNotification() {
+    if (!RICH_NAVIGATION_RESTORE_ENABLED) {
+      this.hideRecoveryBanner();
+      return;
+    }
     if (!this.plugin.core.settings().showRecoveryNotifications) this.hideRecoveryBanner();
   }
   hideRecoveryBanner() {
@@ -7617,6 +7955,7 @@ ${item.url}` }
     this.recoveryInteractionDisposer = void 0;
   }
   async retryRichRestore() {
+    if (!RICH_NAVIGATION_RESTORE_ENABLED) return;
     const webview = this.readyWebview();
     if (!webview || !this.restoredFromLeafId) return;
     const capsule = this.plugin.core.restore.get(this.restoredFromLeafId);
@@ -7646,11 +7985,13 @@ ${item.url}` }
     const recoveryUrl = this.safeWebviewUrl(webview) || "";
     if (!recoveryUrl || recoveryUrl.startsWith("browser://")) return;
     const leafRecord = this.plugin.core.state.history.leaves[this.leafId()];
-    if (leafRecord?.richRestoreSuppressed) {
-      if (this.plugin.core.restore.get(this.leafId())) this.plugin.core.restore.remove(this.leafId());
-    } else {
-      const capsule = this.navigationHistoryAdapter.capture(webview, this.leafId());
-      if (capsule) this.plugin.core.restore.put(capsule);
+    if (RICH_NAVIGATION_RESTORE_ENABLED) {
+      if (leafRecord?.richRestoreSuppressed) {
+        if (this.plugin.core.restore.get(this.leafId())) this.plugin.core.restore.remove(this.leafId());
+      } else {
+        const capsule = this.navigationHistoryAdapter.capture(webview, this.leafId());
+        if (capsule) this.plugin.core.restore.put(capsule);
+      }
     }
     if (this.formRecoveryEnabledForSite()) {
       const fields = await this.captureFormFields(webview);
@@ -7658,7 +7999,7 @@ ${item.url}` }
         this.plugin.core.formRecovery.put(this.containerId, recoveryUrl, fields, this.plugin.core.settings());
       }
     }
-    this.plugin.core.sweepRestoreCapsules();
+    if (RICH_NAVIGATION_RESTORE_ENABLED) this.plugin.core.sweepRestoreCapsules();
     this.plugin.core.scheduleSave();
   }
   async captureFormFields(webview) {
@@ -7828,7 +8169,7 @@ ${item.url}` }
       return void 0;
     }
   }
-  destroyWebview() {
+  async destroyWebview() {
     this.bookmarkPopoverClose?.();
     this.hideRecoveryBanner();
     if (this.checkpointTimer !== void 0) {
@@ -7836,6 +8177,8 @@ ${item.url}` }
       this.checkpointTimer = void 0;
     }
     if (!this.webview) return;
+    const guest = this.webview;
+    this.webview = null;
     this.webviewDomReady = false;
     this.popupInteractionDisposer?.();
     this.popupInteractionDisposer = void 0;
@@ -7843,8 +8186,7 @@ ${item.url}` }
     this.popupDisposer = void 0;
     this.contextMenuDisposer?.();
     this.contextMenuDisposer = void 0;
-    this.plugin.managedWebviewBackend.destroy(this.webview);
-    this.webview = null;
+    await this.plugin.managedWebviewBackend.destroyGracefully(guest);
     this.hideLoadingShield();
   }
   dismissTransientPopups() {
@@ -7863,7 +8205,7 @@ ${item.url}` }
     const guest = this.webview;
     try {
       passwordOrigin(this.currentUrlValue);
-      const event = await readPasswordEvent(guest, this.plugin.passwords.unlocked, this.plugin.managedWebviewBackend.browserApis);
+      const event = await readPasswordEvent(guest, this.plugin.passwords.exists, this.plugin.managedWebviewBackend.browserApis);
       if (!event) return;
       if (guest !== this.webview || this.internalSurface || event.kind !== "save" && event.origin !== passwordOrigin(this.currentUrlValue)) {
         if (event.password) event.password = "";
@@ -7874,7 +8216,7 @@ ${item.url}` }
         await this.openPasswordSuggestions(false);
         return;
       }
-      if (event.kind !== "save" || !this.plugin.passwords.unlocked || !event.password || this.plugin.passwords.excluded(event.origin)) {
+      if (event.kind !== "save" || !event.password || this.plugin.passwords.unlocked && this.plugin.passwords.excluded(event.origin)) {
         event.password = "";
         return;
       }
@@ -7903,7 +8245,7 @@ ${item.url}` }
       }
       if (!this.plugin.passwords.unlocked && (!allowUnlock || !await unlockVault(this.plugin.app, this.plugin.passwords))) return;
       if (guest !== this.webview || this.internalSurface || passwordOrigin(this.currentUrlValue) !== origin) return;
-      await readPasswordEvent(guest, true, this.plugin.managedWebviewBackend.browserApis);
+      this.plugin.managedWebviewBackend.browserApis.enablePasswordCapture(guest, true);
       this.passwordButtonEl.hidden = false;
       const candidates = this.plugin.passwords.matches(origin, this.containerId);
       this.passwordPopoverClose?.();
@@ -7919,6 +8261,10 @@ ${item.url}` }
           if (!await fillPassword(guest, origin, entry.username, entry.password)) throw new Error("No supported login form");
           this.plugin.passwords.touch();
           close();
+        });
+        button(panel, "Save password for this site", async () => {
+          close();
+          await this.savePasswordForCurrentSite();
         });
         button(panel, "Generate and fill password", async () => {
           if (!this.plugin.passwords.unlocked || guest !== this.webview || this.internalSurface) return;
@@ -7940,6 +8286,42 @@ ${item.url}` }
       new import_obsidian14.Notice(t("Password input is unavailable on this page. Use an HTTPS page with a visible login form."));
     }
   }
+  async savePasswordForCurrentSite() {
+    if (this.internalSurface) return;
+    let origin;
+    try {
+      origin = passwordOrigin(this.currentUrlValue);
+    } catch {
+      new import_obsidian14.Notice(t("Passwords require a secure website."));
+      return;
+    }
+    if (!this.plugin.passwords.exists) {
+      this.showInternal("passwords");
+      return;
+    }
+    if (!this.plugin.passwords.unlocked && !await unlockVault(this.plugin.app, this.plugin.passwords)) return;
+    const guest = this.webview;
+    if (!guest) return;
+    try {
+      const event = await readCurrentPasswordSnapshot(guest, this.currentUrlValue);
+      if (guest !== this.webview || origin !== passwordOrigin(this.currentUrlValue)) {
+        if (event?.password) event.password = "";
+        return;
+      }
+      if (!event) {
+        new import_obsidian14.Notice(t("No filled-in password on this page. Open the login form and enter your password before choosing Save password for this site."));
+        return;
+      }
+      if (this.plugin.passwords.excluded(origin)) {
+        event.password = "";
+        new import_obsidian14.Notice(t("Password saving is disabled for this site. Allow save suggestions in Passwords settings."));
+        return;
+      }
+      this.showPasswordSave(event);
+    } catch {
+      new import_obsidian14.Notice(t("The filled-in password could not be read from this page."));
+    }
+  }
   showPasswordSave(event) {
     const existing = this.plugin.passwords.matches(event.origin, this.containerId).find((entry) => entry.username === (event.username || ""));
     if (existing?.password === event.password) {
@@ -7951,34 +8333,51 @@ ${item.url}` }
     this.passwordPopoverClose?.();
     let close = () => {
     };
-    let off = () => {
-    };
     this.passwordSavePopover = true;
     const dismiss = passwordPopover(this.passwordButtonEl, existing ? "Update password?" : "Save password?", (panel) => {
       panel.createDiv({ text: event.origin });
       panel.createDiv({ text: event.username || t("No username") });
-      button(panel, existing ? "Update password" : "Save password", async () => {
-        await this.plugin.passwords.save(draft);
-        close();
+      button(panel, this.plugin.passwords.unlocked ? existing ? "Update password" : "Save password" : "Unlock and save password", async () => {
+        const pending = { ...draft };
+        try {
+          if (!this.plugin.passwords.unlocked) {
+            close();
+            if (!await unlockVault(this.plugin.app, this.plugin.passwords)) return;
+          }
+          if (this.plugin.passwords.excluded(event.origin)) return;
+          await this.plugin.passwords.save(pending);
+          close();
+        } finally {
+          pending.password = "";
+        }
       }, true);
-      button(panel, "Edit", () => {
+      button(panel, "Edit", async () => {
         const copy = { ...draft };
-        close();
-        void editPassword(this.plugin.app, this.plugin.passwords, copy);
+        try {
+          close();
+          if (!this.plugin.passwords.unlocked && !await unlockVault(this.plugin.app, this.plugin.passwords)) return;
+          await editPassword(this.plugin.app, this.plugin.passwords, copy);
+        } finally {
+          copy.password = "";
+        }
       });
       button(panel, "Never for this site", async () => {
+        if (!this.plugin.passwords.unlocked) {
+          close();
+          if (!await unlockVault(this.plugin.app, this.plugin.passwords)) return;
+        }
         await this.plugin.passwords.exclude(event.origin);
         close();
       });
       button(panel, "Not now", () => close());
     }, () => {
       this.passwordSavePopover = false;
-      off();
+      window.clearTimeout(expiry);
       draft.password = "";
       event.password = "";
     });
+    const expiry = window.setTimeout(() => close(), 6e4);
     close = dismiss;
-    off = this.plugin.passwords.subscribe(close);
     this.passwordPopoverClose = close;
   }
   refreshLanguage() {
@@ -10214,14 +10613,14 @@ function isHistorySnapshotEnvelope(value) {
   const raw = value;
   return typeof raw.capturedAt === "number" && typeof raw.sourceRevision === "number" && Boolean(raw.history && typeof raw.history === "object");
 }
-function summarizeHistoryVersion(id, capturedAt, sourceRevision, history, source2, current) {
+function summarizeHistoryVersion(id, capturedAt, sourceRevision, history, source3, current) {
   return {
     id,
     capturedAt,
     sourceRevision,
     navigationCount: Object.values(history.nodes).filter((node) => node.kind === "navigation").length,
     leafCount: Object.keys(history.leaves).length,
-    source: source2,
+    source: source3,
     current
   };
 }
@@ -10336,10 +10735,69 @@ var WindowsHello = class {
   }
 };
 
+// src/passwords/device-key.ts
+var source2 = String.raw`
+const { app, safeStorage } = require("electron");
+const supported = () => {
+  if (process.platform !== "darwin" && process.platform !== "linux") return false;
+  if (!app.isReady() || !safeStorage?.isEncryptionAvailable?.()) return false;
+  if (process.platform === "linux") {
+    const backend = safeStorage.getSelectedStorageBackend?.();
+    if (!backend || backend === "basic_text" || backend === "unknown") return false;
+  }
+  return true;
+};
+module.exports = {
+  available: supported,
+  encrypt(value) {
+    if (!supported()) throw new Error("A protected OS keyring is unavailable");
+    return safeStorage.encryptString(value).toString("base64");
+  },
+  decrypt(value) {
+    if (!supported()) throw new Error("A protected OS keyring is unavailable");
+    return safeStorage.decryptString(Buffer.from(value, "base64"));
+  }
+};
+`;
+var DeviceKey = class {
+  runtime;
+  resolve() {
+    this.runtime ??= compileMainProcessModule("ubc-password-device-key.cjs", source2);
+    return this.runtime;
+  }
+  get platform() {
+    return process.platform === "darwin" || process.platform === "linux" ? process.platform : void 0;
+  }
+  available() {
+    try {
+      return Boolean(this.platform && this.resolve()?.available());
+    } catch {
+      return false;
+    }
+  }
+  wrap(key) {
+    if (!this.platform || !this.available() || key.length !== 32) throw new Error("OS-protected password unlock is unavailable");
+    const data = this.resolve().encrypt(key.toString("base64"));
+    if (!data || !/^[a-z\d+/]+={0,2}$/i.test(data)) throw new Error("Invalid OS-protected key");
+    return { platform: this.platform, data };
+  }
+  unwrap(value) {
+    if (value.platform !== this.platform || !this.available()) throw new Error("The original device keyring is unavailable");
+    const text = this.resolve().decrypt(value.data);
+    const key = Buffer.from(text, "base64");
+    if (key.length !== 32 || key.toString("base64") !== text) {
+      key.fill(0);
+      throw new Error("Invalid OS-protected vault key");
+    }
+    return key;
+  }
+};
+
 // src/passwords/vault.ts
 var PasswordVault = class {
-  constructor(path) {
+  constructor(path, device = new DeviceKey()) {
     this.path = path;
+    this.device = device;
   }
   envelope;
   loadFailed = false;
@@ -10352,10 +10810,17 @@ var PasswordVault = class {
   operations = Promise.resolve();
   listeners = /* @__PURE__ */ new Set();
   hello = new WindowsHello();
+  device;
   async load() {
     try {
       if ((await (0, import_promises3.stat)(this.path)).size > 16 * 1024 * 1024) throw new Error("Password vault is too large");
       this.envelope = validateEnvelope(JSON.parse(await (0, import_promises3.readFile)(this.path, "utf8")));
+      if (this.envelope.device && this.device.available()) {
+        try {
+          await this.unlockDevice();
+        } catch {
+        }
+      }
     } catch (error) {
       if (error.code !== "ENOENT") this.loadFailed = true;
     }
@@ -10371,6 +10836,9 @@ var PasswordVault = class {
   }
   get usesHello() {
     return !!this.envelope?.hello;
+  }
+  get usesDevice() {
+    return !!this.envelope?.device;
   }
   get idleMinutes() {
     return this.envelope?.idleMinutes ?? 5;
@@ -10401,16 +10869,17 @@ var PasswordVault = class {
     this.hello.dispose();
     this.listeners.clear();
   }
-  setup(useHello, acknowledge) {
-    return this.operation(() => this.setupImpl(useHello, acknowledge));
+  setup(method, acknowledge) {
+    return this.operation(() => this.setupImpl(method, acknowledge));
   }
-  async setupImpl(useHello, acknowledge) {
+  async setupImpl(method, acknowledge) {
     if (this.exists) throw new Error("Password vault already exists");
     const generation = this.generation, id = (0, import_node_crypto3.randomUUID)(), key = secretBytes(), recovery = secretBytes();
     let credential;
     try {
       const envelope = { version: 1, id, recovery: wrap(recovery, key, id, "recovery"), payload: seal(key, Buffer.from(JSON.stringify({ entries: [], excluded: [] })), id + ":payload"), idleMinutes: 5 };
-      if (useHello) {
+      if (method === "device") envelope.device = this.device.wrap(key);
+      if (method === true) {
         const salt = secretBytes().toString("base64");
         const created = await this.hello.request("create", { Salt: salt, User: secretBytes().toString("base64") });
         credential = created.Credential;
@@ -10469,6 +10938,37 @@ var PasswordVault = class {
     } finally {
       secret.fill(0);
     }
+  }
+  async unlockDevice() {
+    const envelope = this.envelope;
+    if (!envelope?.device) throw new Error("OS-protected unlock is not enabled");
+    if (!this.device.available()) throw new Error("OS-protected unlock is unavailable");
+    const generation = this.generation;
+    this.activate(this.device.unwrap(envelope.device), generation);
+  }
+  enableDevice() {
+    return this.operation(async () => {
+      this.requireUnlocked();
+      const generation = this.generation;
+      const device = this.device.wrap(this.key);
+      if (generation !== this.generation) throw new Error("Password vault operation cancelled");
+      const next = { ...this.envelope, device };
+      await this.persist(next);
+      this.envelope = next;
+      this.touch();
+      this.emit();
+    });
+  }
+  disableDevice() {
+    return this.operation(async () => {
+      this.requireUnlocked();
+      const next = { ...this.envelope };
+      delete next.device;
+      await this.persist(next);
+      this.envelope = next;
+      this.touch();
+      this.emit();
+    });
   }
   unlockRecovery(text) {
     const envelope = this.envelope;
@@ -10638,7 +11138,7 @@ var PasswordVault = class {
   async exportBackup() {
     await this.queue;
     if (!this.envelope) throw new Error("No password vault");
-    return JSON.stringify({ ...this.envelope, hello: void 0 }, null, 2);
+    return JSON.stringify({ ...this.envelope, hello: void 0, device: void 0 }, null, 2);
   }
   importBackup(text, recoveryTextValue) {
     return this.operation(() => this.importBackupImpl(text, recoveryTextValue));
@@ -10648,6 +11148,7 @@ var PasswordVault = class {
     if (text.length > 16 * 1024 * 1024) throw new Error("Backup is too large");
     const imported = validateEnvelope(JSON.parse(text));
     delete imported.hello;
+    delete imported.device;
     const secret = parseRecovery(recoveryTextValue);
     let key;
     try {
@@ -10745,6 +11246,7 @@ function validateEnvelope(value) {
   if (value?.version !== 1 || typeof value.id !== "string" || value.id.length > 128 || !value.recovery || !value.payload || !Number.isInteger(value.idleMinutes) || value.idleMinutes < 1 || value.idleMinutes > 60) throw new Error("Invalid password vault");
   for (const sealed of [value.recovery, value.payload, value.hello?.wrapped].filter(Boolean)) if (![sealed.nonce, sealed.data, sealed.tag].every((v) => typeof v === "string") || sealed.data.length > 24 * 1024 * 1024) throw new Error("Invalid encrypted vault");
   if (value.hello && (typeof value.hello.credential !== "string" || typeof value.hello.salt !== "string" || !value.hello.wrapped)) throw new Error("Invalid Hello configuration");
+  if (value.device && (!["darwin", "linux"].includes(value.device.platform) || typeof value.device.data !== "string" || value.device.data.length < 16 || value.device.data.length > 16384 || !/^[a-z\d+/]+={0,2}$/i.test(value.device.data))) throw new Error("Invalid OS-protected key");
   return value;
 }
 function validateContents(value) {
@@ -10776,6 +11278,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
   persistence;
   unloading = false;
   sessionCheckpointTimer;
+  initialSessionReconcileTimer;
   sessionCheckpointArmed = false;
   layoutInitializationInProgress = false;
   homeTakeoverArmed = false;
@@ -10805,6 +11308,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
       this.sessionCheckpointTimer = void 0;
       if (this.unloading) return;
       this.captureSessionCheckpoint();
+      void this.app.workspace.requestSaveLayout();
     }, delayMs);
   }
   async onload() {
@@ -10899,6 +11403,9 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
     );
     this.core.sweepRetention();
     this.registerInterval(window.setInterval(() => this.core.sweepRetention(), 3e5));
+    this.registerInterval(window.setInterval(() => {
+      if (!this.unloading) void this.managedWebviewBackend.flushPersistentSessions().catch((error) => console.warn("Unified Browser Core: failed periodic guest storage flush", error));
+    }, 15e3));
     this.registerView(BROWSER_VIEW_TYPE, (leaf) => new BrowserView(leaf, this));
     this.addSettingTab(new BrowserSettingTab(this.app, this));
     this.addRibbonIcon("globe", t("Open browser"), () => this.openBrowser());
@@ -11106,6 +11613,9 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
       this.app.workspace.on("quit", (tasks) => {
         this.prepareForShutdown();
         tasks.addPromise(this.core.flush());
+        this.app.workspace.requestSaveLayout();
+        tasks.addPromise(Promise.resolve(this.app.workspace.requestSaveLayout.run()));
+        tasks.addPromise(this.managedWebviewBackend.prepareForShutdown());
       })
     );
     this.tabStripAdapter.bind(
@@ -11135,18 +11645,23 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
     try {
       const typedBrowserLeaves = this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE);
       const usableBrowserLeaves = typedBrowserLeaves.filter((leaf) => leaf.view instanceof BrowserView);
-      if (typedBrowserLeaves.length !== usableBrowserLeaves.length) return;
-      if (usableBrowserLeaves.length === 0) {
-        const startup = this.core.settings().startupBehavior;
-        if (startup === "restore" && this.core.state.sessionCheckpoint.leaves.length > 0) {
-          await this.restorePreviousSession(false);
-        } else if (startup === "home") {
-          await this.openBrowser({ url: "browser://home" });
-        }
+      const startup = this.core.settings().startupBehavior;
+      if (startup === "restore" && this.previousSessionCheckpoint.leaves.length > 0) {
+        await this.restorePreviousSession(false);
+      } else if (usableBrowserLeaves.length === 0 && startup === "home") {
+        await this.openBrowser({ url: "browser://home" });
       }
       await this.replaceMostRecentEmptyLeafWithHome();
       this.sessionCheckpointArmed = true;
       this.captureSessionCheckpoint();
+      void this.app.workspace.requestSaveLayout();
+      if (startup === "restore" && this.previousSessionCheckpoint.leaves.length > 0) {
+        this.initialSessionReconcileTimer = window.setTimeout(() => {
+          this.initialSessionReconcileTimer = void 0;
+          if (this.unloading) return;
+          void this.reconcileInitialSession().catch((error) => console.warn("Unified Browser Core: startup reconciliation failed", error));
+        }, 1400);
+      }
       this.revealActiveTab();
     } finally {
       this.layoutInitializationInProgress = false;
@@ -11161,6 +11676,10 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
   prepareForShutdown() {
     if (this.unloading) return;
     this.unloading = true;
+    if (this.initialSessionReconcileTimer !== void 0) {
+      window.clearTimeout(this.initialSessionReconcileTimer);
+      this.initialSessionReconcileTimer = void 0;
+    }
     if (this.sessionCheckpointTimer !== void 0) {
       window.clearTimeout(this.sessionCheckpointTimer);
       this.sessionCheckpointTimer = void 0;
@@ -11193,6 +11712,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
   }
   async onunload() {
     this.prepareForShutdown();
+    await this.managedWebviewBackend.prepareForShutdown();
     await this.persistence.captureHistoryVersion(this.core.state.history);
     const liveBrowserLeaves = this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE);
     for (const leaf of liveBrowserLeaves) {
@@ -11233,7 +11753,8 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
         containerId: resolvedContainer,
         siteAssignmentBypassOrigin: bypassOrigin,
         siteAssignmentBypassReason: bypassReason,
-        restoredFromLeafId
+        restoredFromLeafId,
+        sessionSourceLeafId: initialState.sessionSourceLeafId ?? restoredFromLeafId
       }
     });
     if (reveal) this.app.workspace.revealLeaf(leaf);
@@ -11474,13 +11995,21 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
     }
     if (notify) new import_obsidian17.Notice(t("Restored {v0} browser tab(s).", { v0: leavesToRestore.length }));
   }
+  async reconcileInitialSession() {
+    if (this.unloading) return;
+    await this.restorePreviousSession(false);
+    if (this.unloading) return;
+    this.captureSessionCheckpoint();
+    this.app.workspace.requestSaveLayout();
+    await this.core.flush();
+  }
   pendingPreviousSessionLeaves() {
     const liveRepresentations = this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE).flatMap((leaf) => {
-      if (!(leaf.view instanceof BrowserView)) return [];
-      const state = leaf.view.getState();
+      const state = leaf.view instanceof BrowserView ? leaf.view.getState() : leaf.getViewState().state;
+      if (!state?.lifecycleId) return [];
       return [{
-        lifecycleId: state.lifecycleId || leaf.view.lifecycleIdentity(),
-        restoredFromLeafId: state.restoredFromLeafId
+        lifecycleId: state.lifecycleId,
+        restoredFromLeafId: state.sessionSourceLeafId ?? state.restoredFromLeafId
       }];
     });
     return pendingSessionLeaves(this.previousSessionCheckpoint, liveRepresentations);
@@ -11814,7 +12343,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
       isolatedContainers: true,
       siteContainerAssignments: true,
       graphHistory: true,
-      richRestore: "best-effort",
+      richRestore: RICH_NAVIGATION_RESTORE_ENABLED ? "best-effort" : "disabled",
       formRecovery: true,
       permissions: "best-effort",
       internalSurfaces: true,
