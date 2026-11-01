@@ -598,6 +598,9 @@
   color: var(--text-on-accent);
 }
 
+/* The unavailable Omnisearch mode must not occupy space or receive focus. */
+.ubc-home-search-modes button.is-hidden { display: none; }
+
 .ubc-home-search-results {
   width: min(100%, 760px);
 }

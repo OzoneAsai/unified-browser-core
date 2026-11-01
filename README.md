@@ -24,7 +24,10 @@ is not cleared by this change. Opt-in form recovery is a separate feature.
 Research prototypes are retained in `research/v8-heap-injection/` but are not
 loaded by the plugin.
 
-## Home Tab workflow restoration (0.3.2)
+## Home Tab workflow restoration (0.3.3)
+
+Version 0.3.3 also hides Omnisearch mode entirely when the Omnisearch plugin is
+unavailable, including in embedded search bars.
 
 `browser://home` provides filename/alias/path search across the Obsidian Vault,
 with optional unresolved-link suggestions, Markdown-only search, and an
