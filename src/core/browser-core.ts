@@ -72,6 +72,14 @@ export class BrowserCore {
         ? Math.round(legacyHistoryDayStartHour * 60)
         : DEFAULT_SETTINGS.historyDayStartMinutes);
     const showFavoritesBar = settingsPatch.showFavoritesBar ?? legacyShowBookmarkBar ?? DEFAULT_SETTINGS.showFavoritesBar;
+    const homeHiddenRecentPaths = Array.isArray(settingsPatch.homeHiddenRecentPaths)
+      ? settingsPatch.homeHiddenRecentPaths.filter((path): path is string => typeof path === "string")
+      : [];
+    const homeBookmarkIcons = settingsPatch.homeBookmarkIcons && typeof settingsPatch.homeBookmarkIcons === "object" &&
+      !Array.isArray(settingsPatch.homeBookmarkIcons)
+      ? Object.fromEntries(Object.entries(settingsPatch.homeBookmarkIcons).filter(([path, icon]) =>
+        Boolean(path) && typeof icon === "string"))
+      : {};
     const rawBookmarks = raw?.bookmarks?.bookmarks ?? { ...EMPTY_BOOKMARKS.bookmarks };
     const normalizedBookmarks = Object.fromEntries(
       Object.entries(rawBookmarks).map(([id, bookmark]) => [id, {
@@ -84,7 +92,10 @@ export class BrowserCore {
     const bookmarks = mergeDuplicateBookmarks(normalizedBookmarks);
     return {
       version: 6,
-      settings: { ...DEFAULT_SETTINGS, ...settingsPatch, startupBehavior, historyDayStartMinutes, showFavoritesBar },
+      settings: {
+        ...DEFAULT_SETTINGS, ...settingsPatch, startupBehavior, historyDayStartMinutes, showFavoritesBar,
+        homeHiddenRecentPaths, homeBookmarkIcons,
+      },
       siteZoom: raw?.siteZoom ?? {},
       containers: raw?.containers ?? {},
       siteContainerRules: raw?.siteContainerRules ?? [],

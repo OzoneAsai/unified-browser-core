@@ -3,7 +3,7 @@ import { renderPasswordPage, unlockVault, editPassword, passwordPopover, passwor
 import { readPasswordEvent, readCurrentPasswordSnapshot, fillPassword, type PasswordGuestEvent } from "../passwords/guest";
 import { passwordOrigin, generatePassword } from "../passwords/crypto";
 import { observeGuestInteraction } from "../adapters/guest-interaction";
-import { ItemView, Menu, Notice, setIcon, type ViewStateResult, type WorkspaceLeaf } from "obsidian";
+import { ItemView, Menu, Notice, TFile, getIcon, setIcon, type ViewStateResult, type WorkspaceLeaf } from "obsidian";
 import type UnifiedBrowserCorePlugin from "../main";
 import type { BrowserOpenRequest } from "../main";
 import { createId } from "../core/id";
@@ -44,6 +44,7 @@ import { gateLeafDetach } from "../adapters/leaf-close-gate";
 import { RICH_NAVIGATION_RESTORE_ENABLED } from "../core/experimental-features";
 import { normalizeBrowserAddress } from "../navigation/address-normalizer";
 import type { VaultHomeFile } from "../adapters/obsidian-home";
+import { mountHomeSearch, type HomeSearchWidget } from "./home-search-widget";
 import { buildWebContentMenuEntries } from "./web-content-menu-model";
 import { editBookmark } from "./bookmark-editor";
 import { pickBookmarkFolder } from "./folder-picker-modal";
@@ -137,6 +138,7 @@ export class BrowserView extends ItemView {
   private bookmarkSearchQuery = "";
   private bookmarkLayout: "type" | "folder" | "selected" = "type";
   private bookmarkPopoverClose?: () => void;
+  private homeSearchWidget?: HomeSearchWidget;
   private recoveryInteractionDisposer?: () => void;
   private popupInteractionDisposer?: () => void;
   private readonly navigationHistoryAdapter = new ElectronNavigationHistoryAdapter();
@@ -203,6 +205,8 @@ export class BrowserView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.homeSearchWidget?.dispose();
+    this.homeSearchWidget = undefined;
     this.releaseLeafDetachGate?.();
     this.releaseLeafDetachGate = undefined;
     this.passwordPageDispose?.(); this.passwordPopoverClose?.();
@@ -1173,6 +1177,8 @@ export class BrowserView extends ItemView {
     this.showLoadingShield();
     this.currentUrlValue = url;
     this.addressEl.value = url;
+    this.homeSearchWidget?.dispose();
+    this.homeSearchWidget = undefined;
     this.internalLayerEl.addClass("is-hidden");
     this.webLayerEl.removeClass("is-hidden");
     this.ensureWebview(url);
@@ -1200,6 +1206,8 @@ export class BrowserView extends ItemView {
     this.webLayerEl.addClass("is-hidden");
     this.hideLoadingShield();
     this.internalLayerEl.removeClass("is-hidden");
+    this.homeSearchWidget?.dispose();
+    this.homeSearchWidget = undefined;
     this.internalLayerEl.empty();
     if (resolvedSurface === "history") this.renderHistory();
     else if (resolvedSurface === "bookmarks") this.renderBookmarks();
@@ -2316,90 +2324,56 @@ export class BrowserView extends ItemView {
       menu.addItem((item) => item.setTitle(t("Show bookmarks")).setIcon("book-open").onClick(() => this.showInternal("bookmarks")));
       showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
     });
-    page.createEl("h1", { text: t("Home") });
+    const title = page.createEl("h1", { cls: "ubc-home-title" });
+    const titleIcon = title.createSpan({ cls: "ubc-home-title-icon" });
+    const logoName = this.plugin.core.settings().homeLogo.trim();
+    const localLogo = this.plugin.app.vault.getAbstractFileByPath(logoName);
+    if (logoName.startsWith("https://")) {
+      titleIcon.createEl("img", { attr: { alt: "", src: logoName } });
+    } else if (localLogo instanceof TFile && /^(png|jpe?g|gif|svg|webp|avif)$/i.test(localLogo.extension)) {
+      titleIcon.createEl("img", { attr: { alt: "", src: this.plugin.app.vault.getResourcePath(localLogo) } });
+    } else if (logoName && getIcon(logoName)) {
+      setIcon(titleIcon, logoName);
+    } else {
+      titleIcon.addClass("is-hidden");
+    }
+    title.createSpan({ text: this.plugin.core.settings().homeTitle || t("Home") });
+    const appearance = this.plugin.core.settings();
+    title.style.fontSize = appearance.homeTitleFontSize;
+    title.style.fontWeight = String(appearance.homeTitleFontWeight);
+    if (appearance.homeTitleFontFamily) title.style.fontFamily = appearance.homeTitleFontFamily;
+    if (appearance.homeTitleColor) title.style.color = appearance.homeTitleColor;
+    page.toggleClass("ubc-home-accent-selection", appearance.homeSelectionAccent);
     page.createEl("p", {
       cls: "ubc-surface-description",
       text: t("Search your vault, browse the web, or continue where you left off."),
     });
-    const searchMode = { value: this.plugin.core.settings().homeSearchMode };
-    const modePicker = page.createDiv({ cls: "ubc-home-search-modes", attr: { role: "group", "aria-label": t("Home search mode") } });
-    const vaultMode = modePicker.createEl("button", { text: t("Vault"), attr: { type: "button" } });
-    const webMode = modePicker.createEl("button", { text: t("Web"), attr: { type: "button" } });
-    const search = page.createEl("input", {
-      cls: "ubc-home-search",
-      attr: { "aria-label": t("Home search") },
-    });
-    const searchResults = page.createDiv({ cls: "ubc-home-search-results" });
     const homeSections = page.createDiv({ cls: "ubc-home-sections" });
-    let currentVaultResults: VaultHomeFile[] = [];
-
-    const renderVaultSearch = () => {
-      searchResults.empty();
-      const query = search.value.trim();
-      if (!query) {
-        currentVaultResults = [];
-        homeSections.removeClass("is-hidden");
-        return;
-      }
-      currentVaultResults = this.plugin.homeAdapter.searchFiles(query, 10);
-      homeSections.addClass("is-hidden");
-      const heading = searchResults.createDiv({ cls: "ubc-home-results-heading" });
-      heading.createEl("strong", {
-        text: currentVaultResults.length
-          ? String(currentVaultResults.length) + " vault result" + (currentVaultResults.length === 1 ? "" : "s")
-          : t("No vault files found"),
-      });
-      if (!currentVaultResults.length) {
-        heading.createSpan({ text: t("Try another name or switch to Web."), cls: "ubc-card-subtitle" });
-        return;
-      }
-      this.renderVaultFileCards(searchResults, currentVaultResults);
-    };
-
-    const setMode = (mode: "vault" | "web", persist = true) => {
-      searchMode.value = mode;
-      vaultMode.toggleClass("is-active", mode === "vault");
-      webMode.toggleClass("is-active", mode === "web");
-      vaultMode.setAttribute("aria-pressed", String(mode === "vault"));
-      webMode.setAttribute("aria-pressed", String(mode === "web"));
-      search.placeholder = mode === "vault" ? t("Search files in your vault") : t("Search the web or enter an address");
-      searchResults.empty();
-      homeSections.removeClass("is-hidden");
-      if (persist && this.plugin.core.settings().homeSearchMode !== mode) {
-        this.plugin.core.updateSettings({ homeSearchMode: mode });
-      }
-      if (mode === "vault") renderVaultSearch();
-      search.focus();
-    };
-
-    vaultMode.addEventListener("click", () => setMode("vault"));
-    webMode.addEventListener("click", () => setMode("web"));
-    search.addEventListener("input", () => {
-      if (searchMode.value === "vault") renderVaultSearch();
-    });
-    search.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter") return;
-      if (searchMode.value === "web") {
-        this.navigate(this.normalizeAddress(search.value));
-        return;
-      }
-      const first = currentVaultResults[0];
-      if (first) void this.openVaultHomeFile(first.path, event.metaKey || event.ctrlKey);
-    });
+    this.homeSearchWidget = mountHomeSearch(page, {
+      app: this.plugin.app,
+      core: this.plugin.core,
+      home: this.plugin.homeAdapter,
+      openFile: (path, newTab) => this.openVaultHomeFile(path, newTab),
+      webSearch: (query) => this.navigate(this.normalizeAddress(query)),
+    }, homeSections);
+    // Search precedes the sections visually, but the sections are retained in
+    // their original DOM location for a stable render and keyboard focus.
+    page.insertBefore(this.homeSearchWidget.input.closest(".ubc-home-search-widget")!, homeSections);
 
     if (this.plugin.core.settings().showVaultBookmarksOnHome) {
-      const bookmarked = this.plugin.homeAdapter.bookmarkedFiles(8);
+      const bookmarked = this.plugin.homeAdapter.bookmarkedFiles(this.plugin.core.settings().homeMaxBookmarkedFiles);
       if (bookmarked.length) {
         homeSections.createEl("h2", { text: t("Bookmarked files") });
-        this.renderVaultFileCards(homeSections, bookmarked);
+        this.renderVaultFileCards(homeSections, bookmarked, "bookmarked");
       }
     }
 
     if (this.plugin.core.settings().showRecentVaultFilesOnHome) {
-      const files = this.plugin.homeAdapter.recentFiles(8);
+      const files = this.plugin.homeAdapter.recentFiles(
+        this.plugin.core.settings().homeMaxRecentFiles, this.plugin.core.settings().homeHiddenRecentPaths);
       if (files.length) {
         homeSections.createEl("h2", { text: t("Recent files") });
-        this.renderVaultFileCards(homeSections, files);
+        this.renderVaultFileCards(homeSections, files, "recent");
       }
     }
 
@@ -2478,22 +2452,29 @@ export class BrowserView extends ItemView {
       }
     }
 
-    setMode(searchMode.value, false);
   }
 
-  private renderVaultFileCards(parent: HTMLElement, files: VaultHomeFile[]): void {
+  private renderVaultFileCards(parent: HTMLElement, files: VaultHomeFile[], kind: "bookmarked" | "recent" = "bookmarked"): void {
     const list = parent.createDiv({ cls: "ubc-card-list ubc-vault-file-list" });
     for (const file of files) {
       const button = list.createEl("button", {
         cls: "ubc-card ubc-vault-file-card",
-        text: file.name,
         attr: { "aria-label": "Open " + file.path },
       });
+      const iconName = kind === "bookmarked" ? this.plugin.core.settings().homeBookmarkIcons[file.path] : undefined;
+      if (iconName) {
+        const visual = button.createSpan({ cls: "ubc-home-bookmark-icon" });
+        setIcon(visual, iconName);
+      }
+      button.createSpan({ text: file.name });
       button.createSpan({
         cls: "ubc-card-subtitle",
         text: file.matchedAlias ? "Alias: " + file.matchedAlias + " · " + file.path : file.path,
       });
-      button.addEventListener("click", () => void this.openVaultHomeFile(file.path));
+      button.addEventListener("click", (event) => void this.openVaultHomeFile(file.path, event.metaKey || event.ctrlKey));
+      button.addEventListener("auxclick", (event) => {
+        if (event.button === 1) { event.preventDefault(); void this.openVaultHomeFile(file.path, true); }
+      });
       button.addEventListener("contextmenu", (event) => {
         event.preventDefault();
         const menu = new Menu();
@@ -2506,6 +2487,20 @@ export class BrowserView extends ItemView {
         menu.addItem((item) =>
           item.setTitle(t("Copy file path")).setIcon("copy").onClick(() => void navigator.clipboard.writeText(file.path)),
         );
+        if (kind === "recent") {
+          menu.addItem((item) => item.setTitle(t("Hide recent file")).setIcon("eye-off").onClick(() => {
+            const old = this.plugin.core.settings().homeHiddenRecentPaths;
+            this.plugin.core.updateSettings({ homeHiddenRecentPaths: [...new Set([...old, file.path])] });
+            this.showInternal("home", false);
+          }));
+        } else {
+          menu.addItem((item) => item.setTitle(t("Set custom icon")).setIcon("smile").onClick(() => {
+            void this.plugin.chooseHomeBookmarkIcon(file.path, () => this.showInternal("home", false));
+          }));
+          menu.addItem((item) => item.setTitle(t("Remove bookmark")).setIcon("bookmark-minus").onClick(() => {
+            if (this.plugin.homeAdapter.removeBookmark(file.path)) this.showInternal("home", false);
+          }));
+        }
         showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
       });
     }

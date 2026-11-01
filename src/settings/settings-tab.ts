@@ -143,15 +143,43 @@ export class BrowserSettingTab extends PluginSettingTab {
       .addDropdown((dropdown) =>
         dropdown
           .addOption("vault", t("Vault files"))
+          .addOption("omnisearch", "Omnisearch")
           .addOption("web", t("Web"))
           .setValue(this.plugin.core.settings().homeSearchMode)
           .onChange((value) => {
-            if (value === "vault" || value === "web") {
+            if (value === "vault" || value === "web" || value === "omnisearch") {
               this.plugin.core.updateSettings({ homeSearchMode: value });
               this.plugin.refreshBrowserViews();
             }
           }),
       );
+
+    const homeToggle = (title: string, description: string, key:
+      "homeMarkdownOnly" | "homeShowUnresolvedLinks" | "homeShowFilePaths" |
+      "homeShowShortcuts" | "homeShowOmnisearchExcerpts" | "homeSelectionAccent") => {
+      new Setting(containerEl).setName(t(title)).setDesc(t(description)).addToggle((toggle) =>
+        toggle.setValue(this.plugin.core.settings()[key]).onChange((value) => {
+          this.plugin.core.updateSettings({ [key]: value });
+          this.plugin.refreshBrowserViews();
+        }));
+    };
+    const homeCount = (title: string, key:
+      "homeMaxSearchResults" | "homeMaxRecentFiles" | "homeMaxBookmarkedFiles",
+      upper = 25) => {
+      new Setting(containerEl).setName(t(title)).addSlider((slider) =>
+        slider.setLimits(1, upper, 1).setDynamicTooltip().setValue(this.plugin.core.settings()[key])
+          .onChange((value) => { this.plugin.core.updateSettings({ [key]: value }); this.plugin.refreshBrowserViews(); }));
+    };
+    homeToggle("Search only Markdown files", "When enabled, Vault search excludes attachments.", "homeMarkdownOnly");
+    homeToggle("Show uncreated linked notes", "Include unresolved Markdown links in Vault search results.", "homeShowUnresolvedLinks");
+    homeToggle("Show file paths in search", "Show each result's path or matched alias.", "homeShowFilePaths");
+    homeToggle("Show search shortcuts", "Show keyboard guidance below Home search.", "homeShowShortcuts");
+    homeToggle("Show Omnisearch excerpts", "Display a text excerpt for Omnisearch results.", "homeShowOmnisearchExcerpts");
+    homeCount("Search result count", "homeMaxSearchResults");
+    new Setting(containerEl).setName(t("Search delay (ms)")).setDesc(t("Delay between typing and updating suggestions."))
+      .addSlider((slider) => slider.setLimits(0, 500, 10).setDynamicTooltip()
+        .setValue(this.plugin.core.settings().homeSearchDelayMs)
+        .onChange((value) => this.plugin.core.updateSettings({ homeSearchDelayMs: value })));
 
     new Setting(containerEl)
       .setName(t("Show bookmarked Vault files on Home"))
@@ -176,6 +204,65 @@ export class BrowserSettingTab extends PluginSettingTab {
             this.plugin.refreshBrowserViews();
           }),
       );
+
+    homeCount("Bookmarked file count", "homeMaxBookmarkedFiles");
+    homeCount("Recent file count", "homeMaxRecentFiles");
+    new Setting(containerEl).setName(t("Restore hidden recent files"))
+      .setDesc(t("Make files hidden from the Home recent list visible again."))
+      .addButton((button) => button.setButtonText(t("Restore")).onClick(() => {
+        this.plugin.core.updateSettings({ homeHiddenRecentPaths: [] });
+        this.plugin.refreshBrowserViews();
+      }));
+
+    new Setting(containerEl).setName(t("Home appearance")).setHeading();
+    new Setting(containerEl).setName(t("Home title")).addText((text) => text
+      .setValue(this.plugin.core.settings().homeTitle)
+      .onChange((value) => { this.plugin.core.updateSettings({ homeTitle: value }); this.plugin.refreshBrowserViews(); }));
+    new Setting(containerEl).setName(t("Home logo")).setDesc(t("Lucide icon name, Vault image path, HTTPS image URL, or blank."))
+      .addText((text) => text.setValue(this.plugin.core.settings().homeLogo)
+        .onChange((value) => { this.plugin.core.updateSettings({ homeLogo: value.trim() }); this.plugin.refreshBrowserViews(); }));
+    new Setting(containerEl).setName(t("Home title font size")).addText((text) => text
+      .setValue(this.plugin.core.settings().homeTitleFontSize)
+      .onChange((value) => {
+        if (CSS.supports("font-size", value)) {
+          this.plugin.core.updateSettings({ homeTitleFontSize: value });
+          this.plugin.refreshBrowserViews();
+        }
+      }));
+    new Setting(containerEl).setName(t("Home title weight")).addSlider((slider) => slider
+      .setLimits(100, 900, 100).setDynamicTooltip()
+      .setValue(this.plugin.core.settings().homeTitleFontWeight)
+      .onChange((value) => {
+        this.plugin.core.updateSettings({ homeTitleFontWeight: value });
+        this.plugin.refreshBrowserViews();
+      }));
+    new Setting(containerEl).setName(t("Home title font family")).addText((text) => text
+      .setPlaceholder(t("Default theme font"))
+      .setValue(this.plugin.core.settings().homeTitleFontFamily)
+      .onChange((value) => {
+        this.plugin.core.updateSettings({ homeTitleFontFamily: value });
+        this.plugin.refreshBrowserViews();
+      }));
+    new Setting(containerEl).setName(t("Home title color")).addText((text) => text
+      .setPlaceholder(t("Theme color (blank)"))
+      .setValue(this.plugin.core.settings().homeTitleColor)
+      .onChange((value) => {
+        if (!value || CSS.supports("color", value)) {
+          this.plugin.core.updateSettings({ homeTitleColor: value });
+          this.plugin.refreshBrowserViews();
+        }
+      }));
+    homeToggle("Accent selected search result", "Use the theme accent color for the active suggestion.", "homeSelectionAccent");
+    new Setting(containerEl).setName(t("Home on Obsidian startup"))
+      .setDesc(t("Choose whether to focus a Home tab on startup, optionally closing other workspace tabs."))
+      .addDropdown((dropdown) => dropdown.addOption("normal", t("Use browser startup behavior"))
+        .addOption("focus-or-open", t("Focus or open Home"))
+        .addOption("home-only", t("Home only (close other workspace tabs)"))
+        .setValue(this.plugin.core.settings().homeStartupMode)
+        .onChange((value) => {
+          if (value === "normal" || value === "focus-or-open" || value === "home-only")
+            this.plugin.core.updateSettings({ homeStartupMode: value });
+        }));
 
     new Setting(containerEl)
       .setName(t("Browser startup"))

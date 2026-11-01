@@ -17,9 +17,28 @@ export interface BrowserSettings {
   tabStyle: TabStyle;
   tabStripIntegrationEnabled: boolean;
   replaceEmptyTabsWithHome: boolean;
-  homeSearchMode: "vault" | "web";
+  homeSearchMode: "vault" | "web" | "omnisearch";
   showRecentVaultFilesOnHome: boolean;
   showVaultBookmarksOnHome: boolean;
+  homeMarkdownOnly: boolean;
+  homeShowUnresolvedLinks: boolean;
+  homeShowFilePaths: boolean;
+  homeShowShortcuts: boolean;
+  homeShowOmnisearchExcerpts: boolean;
+  homeMaxSearchResults: number;
+  homeMaxRecentFiles: number;
+  homeMaxBookmarkedFiles: number;
+  homeSearchDelayMs: number;
+  homeHiddenRecentPaths: string[];
+  homeBookmarkIcons: Record<string, string>;
+  homeTitle: string;
+  homeLogo: string;
+  homeTitleFontSize: string;
+  homeTitleFontWeight: number;
+  homeTitleFontFamily: string;
+  homeTitleColor: string;
+  homeSelectionAccent: boolean;
+  homeStartupMode: "normal" | "focus-or-open" | "home-only";
   searchUrlTemplate: string;
   historyDayStartMinutes: number;
   historyRetentionDays: number;
@@ -303,6 +322,25 @@ export const DEFAULT_SETTINGS: BrowserSettings = {
   homeSearchMode: "vault",
   showRecentVaultFilesOnHome: true,
   showVaultBookmarksOnHome: true,
+  homeMarkdownOnly: false,
+  homeShowUnresolvedLinks: false,
+  homeShowFilePaths: true,
+  homeShowShortcuts: true,
+  homeShowOmnisearchExcerpts: true,
+  homeMaxSearchResults: 10,
+  homeMaxRecentFiles: 8,
+  homeMaxBookmarkedFiles: 8,
+  homeSearchDelayMs: 0,
+  homeHiddenRecentPaths: [],
+  homeBookmarkIcons: {},
+  homeTitle: "Home",
+  homeLogo: "home",
+  homeTitleFontSize: "2rem",
+  homeTitleFontWeight: 650,
+  homeTitleFontFamily: "",
+  homeTitleColor: "",
+  homeSelectionAccent: true,
+  homeStartupMode: "normal",
   searchUrlTemplate: "https://www.google.com/search?q={query}",
   historyDayStartMinutes: 240,
   historyRetentionDays: 0,

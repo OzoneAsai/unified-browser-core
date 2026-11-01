@@ -24,6 +24,52 @@ is not cleared by this change. Opt-in form recovery is a separate feature.
 Research prototypes are retained in `research/v8-heap-injection/` but are not
 loaded by the plugin.
 
+## Home Tab workflow restoration (0.3.2)
+
+`browser://home` provides filename/alias/path search across the Obsidian Vault,
+with optional unresolved-link suggestions, Markdown-only search, and an
+Omnisearch mode when the Omnisearch community plugin is available. The default
+Home search remains Vault-first; Web search opens pages in UBC rather than
+delegating to Surfing.
+
+- Type a file type (`markdown`, `image`, `video`, `audio`, `pdf`, `canvas`)
+  or supported extension (`md`, `png`, `jpg`, `webp`, `mp4`, `pdf`, etc.)
+  and press **Tab** to filter. Press Backspace on an empty search to clear it.
+- `omni` + Tab switches to Omnisearch when available; `web` + Tab switches
+  to UBC web search. The mode buttons provide the same choices.
+- **↑/↓** select a suggestion, **Enter** opens it, **Ctrl/⌘+Enter** opens a
+  new tab, **Shift+Enter** creates a Markdown note, and **Esc** dismisses results.
+- Search results include existing Markdown notes and attachments; enabling
+  unresolved-link suggestions also offers creation of referenced notes.
+- Bookmarked Vault files support a searchable Lucide icon picker and removal
+  through their context menus; recent files can be hidden individually and
+  restored through Home settings.
+- Home settings control search count/delay, recent and bookmarked file counts,
+  visibility, title/logo/font and selected-result appearance. The logo accepts
+  a Lucide icon, Vault image path, or HTTPS image URL. Optional startup modes
+  can focus Home or close other workspace tabs to leave only Home.
+- The command palette has **Open new Home tab** and **Replace current tab with
+  Home**, in addition to the automatic empty-tab replacement.
+
+You can embed the same search widget inside a Markdown note:
+
+````markdown
+```search-bar
+only search bar
+show starred files
+show recent files
+```
+````
+
+Both `show starred files` and `show bookmarked files` are recognized. These
+are opt-in for embedded blocks, while Home's default file sections are set in
+UBC settings. Obsidian remains the source of recent file and Vault bookmark
+data; UBC does not copy an old Home Tab plugin's `data.json` automatically.
+
+Home Tab's mobile UI is not carried over because UBC is desktop-only. Existing
+browser history, cookies, containers, and password data remain owned by Browser
+Core and are not touched by Home search actions.
+
 ## Bookmark library and selected members
 
 The star in the browser toolbar saves a page and opens a lightweight editor. Choose a folder, change its type, or add it to **Selected members**. Changes are saved as you edit; **Done**, Escape, or a click outside closes the editor. Click the star on an existing bookmark to edit it; remove it with **Delete bookmark** in the editor.

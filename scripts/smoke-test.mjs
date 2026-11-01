@@ -29,6 +29,23 @@ try {
     } }],
   });
   await import(pathToFileURL(pickerOutfile).href);
+  const homeOutfile = join(dir, "home-adapter.mjs");
+  await esbuild.build({
+    entryPoints: ["tests/home-adapter-smoke.ts"], bundle: true, platform: "node", format: "esm", target: "node22", outfile: homeOutfile,
+    plugins: [{ name: "home-search-host", setup(build) {
+      build.onResolve({ filter: /^obsidian$/ }, () => ({ path: "obsidian", namespace: "home-host" }));
+      build.onLoad({ filter: /.*/, namespace: "home-host" }, () => ({
+        contents: `
+export class TFile {}
+export const parseFrontMatterAliases = (frontmatter) => frontmatter?.aliases || [];
+export const prepareFuzzySearch = (query) => (value) => value.toLowerCase().includes(query.toLowerCase()) ? { score: 0 } : null;
+export const sortSearchResults = (items) => items.sort((a, b) => a.file.basename.localeCompare(b.file.basename));
+export const normalizePath = (path) => path.replaceAll("//", "/");
+`, loader: "js",
+      }));
+    } }],
+  });
+  await import(pathToFileURL(homeOutfile).href);
 } finally {
   await rm(dir, { recursive: true, force: true });
 }

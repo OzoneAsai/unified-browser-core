@@ -31,8 +31,33 @@ import { resolveGuestWebContents } from "../src/adapters/electron-compat";
 import { cloneSessionCheckpoint, pendingSessionLeaves } from "../src/core/session-restore";
 import { normalizeObsidianBookmarkItems } from "../src/adapters/obsidian-bookmarks";
 import { WebViewerBookmarksAdapter, normalizeWebViewerBookmarks } from "../src/adapters/webviewer-bookmarks";
+import { parseHomeFilter, matchesHomeFilter, safeHomeNoteName } from "../src/home/search-model";
 
 (globalThis as typeof globalThis & { window?: typeof globalThis }).window = globalThis;
+assert.deepEqual(parseHomeFilter("IMAGE"), { kind: "type", value: "image" });
+assert.deepEqual(parseHomeFilter("png"), { kind: "extension", value: "png" });
+assert.deepEqual(parseHomeFilter("md"), { kind: "extension", value: "md" });
+assert.deepEqual(parseHomeFilter("omni"), { kind: "omnisearch", value: "omnisearch" });
+assert.deepEqual(parseHomeFilter("internet"), { kind: "web", value: "web" });
+assert.equal(parseHomeFilter("not a filter"), undefined);
+assert.equal(matchesHomeFilter("jpeg", parseHomeFilter("image")), true);
+assert.equal(matchesHomeFilter("md", parseHomeFilter("image")), false);
+assert.equal(matchesHomeFilter("PDF", parseHomeFilter("pdf")), true);
+assert.equal(matchesHomeFilter("mkv", parseHomeFilter("video")), true);
+assert.equal(matchesHomeFilter("mp3", parseHomeFilter("audio")), true);
+assert.equal(safeHomeNoteName(" My new note.md "), "My new note");
+assert.equal(safeHomeNoteName("../escape"), undefined);
+assert.equal(safeHomeNoteName("notes/secret"), undefined);
+assert.equal(safeHomeNoteName("bad:filename"), undefined);
+assert.equal(safeHomeNoteName(""), undefined);
+const normalizedHomeSettings = BrowserCore.normalize({ settings: {
+  homeHiddenRecentPaths: ["Keep.md", 4, "Other.md"] as unknown as string[],
+  homeBookmarkIcons: { "Keep.md": "book", "Bad.md": 8 } as unknown as Record<string, string>,
+} });
+assert.deepEqual(normalizedHomeSettings.settings.homeHiddenRecentPaths, ["Keep.md", "Other.md"]);
+assert.deepEqual(normalizedHomeSettings.settings.homeBookmarkIcons, { "Keep.md": "book" });
+assert.equal(normalizedHomeSettings.settings.homeMaxSearchResults, 10);
+assert.equal(normalizedHomeSettings.settings.homeStartupMode, "normal");
 assert.equal(RICH_NAVIGATION_RESTORE_ENABLED, false,
   "experimental navigation replay must remain disabled until explicitly reviewed");
 // Firefox-style host autofill uses browsing history only, ranked by

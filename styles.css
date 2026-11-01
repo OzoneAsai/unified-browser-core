@@ -1167,6 +1167,42 @@
 .ubc-home .ubc-card-subtitle { display: block; width: 100%; flex-shrink: 0; }
 .ubc-home-search-modes { display: flex; width: fit-content; }
 .ubc-home input.ubc-home-search { display: block; max-width: 100%; }
+.ubc-home-title { display: flex; align-items: center; gap: .35em; overflow-wrap: anywhere; }
+.ubc-home-title-icon { display: inline-flex; flex: none; align-items: center; }
+.ubc-home-title-icon svg, .ubc-home-title-icon img { width: 1em; height: 1em; object-fit: contain; }
+.ubc-home-bookmark-icon { display: inline-flex; margin-right: 8px; }
+.ubc-home-bookmark-icon svg { width: 1.15em; height: 1.15em; }
+.ubc-home-search-widget { width: min(100%, 760px); margin: 0 auto 16px; }
+.ubc-home-search-row { display: flex; align-items: center; gap: 6px; width: 100%; }
+.ubc-home-search-row input.ubc-home-search { margin: 10px 0 7px; flex: 1; min-width: 0; max-width: none; }
+.ubc-home-search-filter { flex: none; border-radius: 6px; font-size: var(--font-ui-smaller); }
+.ubc-home-search-filter.is-hidden { display: none; }
+.ubc-home-shortcuts { color: var(--text-muted); font-size: var(--font-ui-smaller); margin-bottom: 10px; }
+.ubc-home-shortcuts.is-hidden { display: none; }
+.ubc-home-result {
+  display: flex; align-items: flex-start; gap: 10px;
+  text-align: left; width: 100%; padding: 9px 12px; margin: 2px 0;
+  min-height: 45px; height: auto; border: 0; border-radius: 8px;
+  background: transparent; box-shadow: none; color: var(--text-normal);
+  white-space: normal; overflow-wrap: anywhere; cursor: pointer;
+}
+.ubc-home-result:hover, .ubc-home-result.is-selected { background: var(--background-modifier-hover); }
+.ubc-home-accent-selection .ubc-home-result.is-selected { background: var(--interactive-accent); color: var(--text-on-accent); }
+.ubc-home-accent-selection .ubc-home-result.is-selected .ubc-card-subtitle { color: var(--text-on-accent); opacity: .82; }
+.ubc-home-result:focus-visible, .ubc-home-create:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.ubc-home-result-icon { flex: none; display: inline-flex; padding-top: 2px; }
+.ubc-home-result-icon svg { width: 18px; height: 18px; }
+.ubc-home-result-info { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ubc-home-result-name { font-weight: 600; }
+.ubc-home-result-info .ubc-card-subtitle { overflow-wrap: anywhere; font-weight: 400; font-size: var(--font-ui-smaller); }
+.ubc-home-create { width: 100%; text-align: left; margin: 8px 0; }
+.ubc-home-icon-choice { display: flex; align-items: center; gap: 10px; }
+.ubc-home-icon-choice svg { width: 18px; height: 18px; }
+.ubc-home-embedded { margin: 20px 0; padding: 12px 10px; border-radius: 12px; background: var(--background-secondary); }
+.ubc-home-embedded .ubc-home-search-widget { margin: 0 auto; }
+.ubc-home-embedded .ubc-home-search-modes { margin-top: 0; }
+.ubc-home-embedded-files { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 18px; }
+.ubc-home-embedded-files > button { max-width: min(100%, 220px); overflow-wrap: anywhere; height: auto; min-height: 34px; white-space: normal; }
 .ubc-address-wrapper { position: relative; flex: 1; min-width: 80px; }
 .ubc-address-wrapper .ubc-address { width: 100%; }
 .ubc-address-suggestions {

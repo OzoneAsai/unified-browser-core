@@ -7,6 +7,8 @@ import { ManagedWebviewBackend } from "./adapters/managed-webview-backend";
 import { ObsidianTabStripAdapter } from "./adapters/obsidian-tab-strip";
 import { ObsidianSettingsAdapter } from "./adapters/obsidian-settings";
 import { ObsidianHomeAdapter } from "./adapters/obsidian-home";
+import { HomeIconPicker } from "./ui/home-icon-picker";
+import { EmbeddedHomeSearch } from "./ui/home-search-embed";
 import { ObsidianBookmarksAdapter } from "./adapters/obsidian-bookmarks";
 import { WebViewerBookmarksAdapter } from "./adapters/webviewer-bookmarks";
 import { SurfingMigrationAdapter, normalizeSurfingBookmarks, surfingFolderPaths, surfingSearchTemplate } from "./adapters/surfing-migration";
@@ -137,6 +139,9 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     this.addCommand({ id: "open-passwords", name: t("Open password vault"), callback: () => this.openBrowser({ url: "browser://passwords" }) });
     this.addCommand({ id: "lock-passwords", name: t("Lock password vault"), callback: () => this.passwords.lock() });
     this.homeAdapter = new ObsidianHomeAdapter(this.app);
+    this.registerMarkdownCodeBlockProcessor("search-bar", (source, el, ctx) => {
+      ctx.addChild(new EmbeddedHomeSearch(el, this, source));
+    });
     this.bookmarksAdapter = new ObsidianBookmarksAdapter(this.app);
     this.webViewerBookmarksAdapter = new WebViewerBookmarksAdapter(this.app);
     this.surfingMigrationAdapter = new SurfingMigrationAdapter(this.app);
@@ -227,6 +232,16 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       id: "open-browser",
       name: t("Open browser"),
       callback: () => this.openBrowser(),
+    });
+    this.addCommand({
+      id: "open-new-home-tab",
+      name: t("Open new Home tab"),
+      callback: () => void this.openBrowser({ url: "browser://home" }),
+    });
+    this.addCommand({
+      id: "replace-current-with-home",
+      name: t("Replace current tab with Home"),
+      callback: () => void this.replaceCurrentWithHome(),
     });
     this.addCommand({
       id: "open-history",
@@ -477,6 +492,19 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
         await this.openBrowser({ url: "browser://home" });
       }
       await this.replaceMostRecentEmptyLeafWithHome();
+      const homeStartupMode = this.core.settings().homeStartupMode;
+      if (homeStartupMode !== "normal") {
+        let homeLeaf = this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE)
+          .find((leaf) => leaf.view instanceof BrowserView && leaf.view.currentInternalSurface() === "home");
+        if (!homeLeaf) homeLeaf = await this.openBrowser({ url: "browser://home" });
+        await this.app.workspace.revealLeaf(homeLeaf);
+        if (homeStartupMode === "home-only") {
+          const keep = homeLeaf;
+          const others: WorkspaceLeaf[] = [];
+          this.app.workspace.iterateRootLeaves((leaf) => { if (leaf !== keep) others.push(leaf); });
+          for (const leaf of others) leaf.detach();
+        }
+      }
       this.sessionCheckpointArmed = true;
       this.captureSessionCheckpoint();
       void this.app.workspace.requestSaveLayout();
@@ -523,6 +551,33 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     if (!this.core.settings().replaceEmptyTabsWithHome || this.replacingEmptyLeaf) return false;
     const leaf = this.app.workspace.getMostRecentLeaf();
     return leaf ? this.replaceEmptyLeafWithHome(leaf) : false;
+  }
+
+  async replaceCurrentWithHome(): Promise<void> {
+    const leaf = this.app.workspace.getMostRecentLeaf();
+    if (!leaf) {
+      await this.openBrowser({ url: "browser://home" });
+      return;
+    }
+    if (leaf.view instanceof BrowserView) {
+      leaf.view.showInternal("home");
+      return;
+    }
+    await leaf.setViewState({
+      type: BROWSER_VIEW_TYPE, active: true,
+      state: { url: "browser://home", containerId: this.core.defaultContainerForNewTab() },
+    });
+    await this.app.workspace.revealLeaf(leaf);
+  }
+
+  chooseHomeBookmarkIcon(path: string, onSaved?: () => void): void {
+    new HomeIconPicker(this.app, (icon) => {
+      const icons = { ...this.core.settings().homeBookmarkIcons };
+      if (icon) icons[path] = icon;
+      else delete icons[path];
+      this.core.updateSettings({ homeBookmarkIcons: icons });
+      onSaved?.();
+    }).open();
   }
 
   private async replaceEmptyLeafWithHome(leaf: WorkspaceLeaf): Promise<boolean> {
