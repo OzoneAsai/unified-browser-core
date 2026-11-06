@@ -6,7 +6,7 @@ import type { VaultHomeFile } from "../adapters/obsidian-home";
 import { t } from "../i18n";
 
 /**
- * ```search-bar
+ * ```ubc-search-bar
  * only search bar
  * show starred files
  * show recent files

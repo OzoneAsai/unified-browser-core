@@ -29,7 +29,7 @@ const matchesNoteFilter = (filter: HomeSearchFilter) =>
   (filter.kind === "type" || filter.kind === "extension") && matchesHomeFilter("md", filter);
 
 /**
- * One search component for browser://home and the `search-bar` Markdown code block.
+ * One search component for browser://home and the `ubc-search-bar` Markdown code block.
  * Source selection, active filters, keyboard selection and creation are shared.
  */
 export function mountHomeSearch(parent: HTMLElement, host: HomeSearchHost, sections?: HTMLElement): HomeSearchWidget {

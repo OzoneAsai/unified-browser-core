@@ -1,3 +1,4 @@
+import "./check-home-block-namespace.mjs";
 import esbuild from "esbuild";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";

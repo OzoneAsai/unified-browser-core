@@ -57,12 +57,17 @@ delegating to Surfing.
 You can embed the same search widget inside a Markdown note:
 
 ````markdown
-```search-bar
+```ubc-search-bar
 only search bar
 show starred files
 show recent files
 ```
 ````
+
+The `ubc-search-bar` code fence is unique to UBC so the original Home tab
+plugin can still own `search-bar`. Existing UBC embeds should change their
+fence from `search-bar` to `ubc-search-bar` to use UBC’s widget; Home tab’s
+existing fenced blocks continue to work without modification.
 
 Both `show starred files` and `show bookmarked files` are recognized. These
 are opt-in for embedded blocks, while Home's default file sections are set in
