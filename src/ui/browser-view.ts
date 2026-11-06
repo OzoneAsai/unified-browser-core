@@ -50,7 +50,9 @@ import { editBookmark } from "./bookmark-editor";
 import { pickBookmarkFolder } from "./folder-picker-modal";
 import { showBookmarkPopover } from "./bookmark-popover";
 import { BOOKMARK_MEDIA, classifyBookmark } from "../bookmarks/bookmark-media";
+import { bookmarksForPresentation, partitionBookmarkChildren } from "../bookmarks/bookmark-presentation";
 import { t } from "../i18n";
+import { addHierarchicalMenuSection } from "./menu-groups";
 import { promptText } from "./text-prompt";
 import { permissionDecisionLabel, permissionLabel } from "./permission-label";
 import { fallbackFaviconUrl, renderBookmarkVisual } from "./bookmark-visual";
@@ -136,7 +138,7 @@ export class BrowserView extends ItemView {
   private readonly expandedResidualParents = new Set<string>();
   private readonly collapsedBookmarkFolders = new Set<string>();
   private bookmarkSearchQuery = "";
-  private bookmarkLayout: "type" | "folder" | "selected" = "type";
+  private bookmarkLayout: NonNullable<BrowserLeafViewState["bookmarkLayout"]> = "type";
   private bookmarkPopoverClose?: () => void;
   private homeSearchWidget?: HomeSearchWidget;
   private recoveryInteractionDisposer?: () => void;
@@ -772,46 +774,50 @@ export class BrowserView extends ItemView {
     super.onPaneMenu(menu, source);
     trackDismissibleMenu(menu, this.rootEl?.ownerDocument ?? document);
     menu.addSeparator();
+    // Frequent destinations and reversible actions remain one click away.
     menu.addItem((item) => item.setTitle(t("Home")).setIcon("home").onClick(() => this.showInternal("home")));
     menu.addItem((item) => item.setTitle(t("History")).setIcon("history").onClick(() => this.showInternal("history")));
     menu.addItem((item) => item.setTitle(t("Bookmarks")).setIcon("book-open").onClick(() => this.showInternal("bookmarks")));
     menu.addItem((item) => item.setTitle(t("Passwords")).setIcon("key-round").onClick(() => this.showInternal("passwords")));
-    if (!this.internalSurface) menu.addItem((item) => item.setTitle(t("Fill password")).setIcon("key-round").onClick(() => void this.openPasswordSuggestions()));
-    if (!this.internalSurface) menu.addItem((item) => item.setTitle(t("Save password for this site")).setIcon("save").onClick(() => void this.savePasswordForCurrentSite()));
-    if (this.plugin.passwords.unlocked) menu.addItem((item) => item.setTitle(t("Lock password vault")).setIcon("lock").onClick(() => this.plugin.passwords.lock()));
     const closed = this.plugin.core.history.recentlyClosed(1)[0];
     menu.addItem((item) => item.setTitle(t("Reopen closed tab")).setIcon("rotate-ccw").setDisabled(!closed)
       .onClick(() => { if (closed) void this.plugin.restoreLeaf(closed.id); }));
-    menu.addSeparator();
-    menu.addItem((item) => item.setTitle(t("Site permissions…")).setIcon("shield-check")
-      .onClick((event) => this.showPermissionMenu(event)));
-    menu.addItem((item) => item.setTitle(t("Zoom in")).setIcon("zoom-in").onClick(() => this.zoomIn()));
-    menu.addItem((item) => item.setTitle(t("Zoom out")).setIcon("zoom-out").onClick(() => this.zoomOut()));
-    menu.addItem((item) => item.setTitle(t("Reset site zoom")).onClick(() => this.resetZoom()));
-    menu.addItem((item) => item.setTitle(t("Settings")).setIcon("settings").onClick(() => this.plugin.openSettings()));
-    menu.addItem((item) => item.setTitle(t("Inspect page")).setIcon("code").onClick(() => this.inspectPage()));
-    menu.addSeparator();
-    menu.addItem((item) =>
-      item
-        .setTitle(t("Reload"))
-        .setIcon("rotate-cw")
-        .onClick(() => this.reload()),
-    );
+    menu.addItem((item) => item.setTitle(t("Reload")).setIcon("rotate-cw").onClick(() => this.reload()));
+    menu.addItem((item) => item.setTitle(t("Search browser tabs")).setIcon("search")
+      .onClick(() => this.plugin.openBrowserTabSearch()));
+    menu.addItem((item) => item.setTitle(t("Open Quick Switcher")).setIcon("file-search-2")
+      .onClick(() => this.plugin.openQuickSwitcher()));
 
-    const pinned = this.pinned;
-    menu.addItem((item) =>
-      item
+    // Categories are a presentation model for the same commands. Older Obsidian
+    // builds without submenus retain every command through a labeled fallback.
+    addHierarchicalMenuSection(menu, t("Page tools"), "sliders-horizontal", (tools) => {
+      if (!this.internalSurface) tools.addItem((item) => item.setTitle(t("Fill password")).setIcon("key-round").onClick(() => void this.openPasswordSuggestions()));
+      if (!this.internalSurface) tools.addItem((item) => item.setTitle(t("Save password for this site")).setIcon("save").onClick(() => void this.savePasswordForCurrentSite()));
+      if (this.plugin.passwords.unlocked) tools.addItem((item) => item.setTitle(t("Lock password vault")).setIcon("lock").onClick(() => this.plugin.passwords.lock()));
+      tools.addItem((item) => item.setTitle(t("Site permissions…")).setIcon("shield-check")
+        .onClick((event) => this.showPermissionMenu(event)));
+      tools.addItem((item) => item.setTitle(t("Zoom in")).setIcon("zoom-in").onClick(() => this.zoomIn()));
+      tools.addItem((item) => item.setTitle(t("Zoom out")).setIcon("zoom-out").onClick(() => this.zoomOut()));
+      tools.addItem((item) => item.setTitle(t("Reset site zoom")).onClick(() => this.resetZoom()));
+      tools.addItem((item) => item.setTitle(t("Inspect page")).setIcon("code").onClick(() => this.inspectPage()));
+      if (!this.currentUrlValue.startsWith("browser://")) {
+        tools.addItem((item) => item.setTitle(t("Bookmark current page")).setIcon("bookmark").onClick(() => this.bookmarkCurrentPage()));
+        tools.addItem((item) => item.setTitle(t("Copy page URL")).setIcon("copy")
+          .onClick(() => void navigator.clipboard.writeText(this.currentUrlValue)));
+      }
+    });
+
+    addHierarchicalMenuSection(menu, t("Tab tools"), "panels-top-left", (tools) => {
+      const pinned = this.pinned;
+      tools.addItem((item) => item
         .setTitle(pinned ? t("Unpin browser tab") : t("Pin browser tab"))
         .setIcon("pin")
         .onClick(() => {
           this.leaf.setPinned(!pinned);
           this.plugin.core.history.touchLeaf(this.leafId(), { pinned: !pinned });
           this.plugin.core.scheduleSave();
-        }),
-    );
-
-    menu.addItem((item) =>
-      item
+        }));
+      tools.addItem((item) => item
         .setTitle(this.manualRetention === "preserve" ? t("Use normal recovery retention") : t("Keep recovery data"))
         .setIcon("archive-restore")
         .onClick(() => {
@@ -819,113 +825,47 @@ export class BrowserView extends ItemView {
           this.plugin.core.history.touchLeaf(this.leafId(), { manualRetention: this.manualRetention });
           this.plugin.core.scheduleSave();
           this.plugin.scheduleSessionCheckpoint();
-        }),
-    );
-
-    menu.addItem((item) =>
-      item
-        .setTitle(t("Duplicate browser tab"))
-        .setIcon("copy")
-        .onClick(() => this.plugin.openBrowser({ url: this.currentUrlValue, containerId: this.containerId })),
-    );
-    menu.addItem((item) =>
-      item
-        .setTitle(t("Move browser tab to new window"))
-        .setIcon("picture-in-picture")
+        }));
+      tools.addItem((item) => item.setTitle(t("Duplicate browser tab")).setIcon("copy")
+        .onClick(() => this.plugin.openBrowser({ url: this.currentUrlValue, containerId: this.containerId })));
+      tools.addItem((item) => item.setTitle(t("Move browser tab to new window")).setIcon("picture-in-picture")
         .onClick(() => {
           try {
             this.plugin.app.workspace.moveLeafToPopout(this.leaf);
           } catch {
             new Notice(t("This Obsidian build cannot move the tab to a new window."));
           }
-        }),
-    );
+        }));
+      for (const container of this.plugin.core.containers.list()) {
+        if (container.id === this.containerId) continue;
+        tools.addItem((item) => item.setTitle(t("Reopen in {v0}", { v0: container.name })).setIcon("box")
+          .onClick(() => this.reopenInContainer(container.id)));
+      }
+    });
 
-    for (const container of this.plugin.core.containers.list()) {
-      if (container.id === this.containerId) continue;
-      menu.addItem((item) =>
-        item
-          .setTitle(t("Reopen in {v0}", { v0: container.name }))
-          .setIcon("box")
-          .onClick(() => this.reopenInContainer(container.id)),
-      );
-    }
-
-    if (!this.currentUrlValue.startsWith("browser://")) {
-      menu.addItem((item) =>
-        item
-          .setTitle(t("Bookmark current page"))
-          .setIcon("bookmark")
-          .onClick(() => this.bookmarkCurrentPage()),
-      );
-      menu.addItem((item) =>
-        item
-          .setTitle(t("Copy page URL"))
-          .setIcon("copy")
-          .onClick(() => void navigator.clipboard.writeText(this.currentUrlValue)),
-      );
-    }
-
-    menu.addSeparator();
-    menu.addItem((item) =>
-      item
-        .setTitle(t("Search browser tabs"))
-        .setIcon("search")
-        .onClick(() => this.plugin.openBrowserTabSearch()),
-    );
-    menu.addItem((item) =>
-      item
-        .setTitle(t("Open Quick Switcher"))
-        .setIcon("file-search-2")
-        .onClick(() => this.plugin.openQuickSwitcher()),
-    );
-    menu.addSeparator();
-    const siblings = this.plugin.tabStripAdapter
-      .leavesInSameGroup(this.leaf)
-      .filter((leaf) => leaf.view instanceof BrowserView);
-    const selfIndex = siblings.indexOf(this.leaf);
-    menu.addItem((item) =>
-      item
-        .setTitle(t("Close browser tabs to the left"))
-        .setIcon("panel-left-close")
+    addHierarchicalMenuSection(menu, t("Close tabs"), "panel-top-close", (tools) => {
+      const siblings = this.plugin.tabStripAdapter.leavesInSameGroup(this.leaf)
+        .filter((leaf) => leaf.view instanceof BrowserView);
+      const selfIndex = siblings.indexOf(this.leaf);
+      tools.addItem((item) => item.setTitle(t("Close browser tabs to the left")).setIcon("panel-left-close")
         .setDisabled(selfIndex <= 0)
-        .onClick(() => {
-          for (const leaf of siblings.slice(0, selfIndex)) leaf.detach();
-        }),
-    );
-    menu.addItem((item) =>
-      item
-        .setTitle(t("Close browser tabs to the right"))
-        .setIcon("panel-right-close")
+        .onClick(() => { for (const leaf of siblings.slice(0, selfIndex)) leaf.detach(); }));
+      tools.addItem((item) => item.setTitle(t("Close browser tabs to the right")).setIcon("panel-right-close")
         .setDisabled(selfIndex < 0 || selfIndex >= siblings.length - 1)
-        .onClick(() => {
-          for (const leaf of siblings.slice(selfIndex + 1)) leaf.detach();
-        }),
-    );
-    menu.addItem((item) =>
-      item
-        .setTitle(t("Close other browser tabs"))
-        .setIcon("x")
-        .onClick(() => {
-          for (const leaf of siblings) if (leaf !== this.leaf) leaf.detach();
-        }),
-    );
-    menu.addItem((item) =>
-      item
-        .setTitle(t("Close unpinned browser tabs"))
-        .setIcon("x-circle")
+        .onClick(() => { for (const leaf of siblings.slice(selfIndex + 1)) leaf.detach(); }));
+      tools.addItem((item) => item.setTitle(t("Close other browser tabs")).setIcon("x")
+        .onClick(() => { for (const leaf of siblings) if (leaf !== this.leaf) leaf.detach(); }));
+      tools.addItem((item) => item.setTitle(t("Close unpinned browser tabs")).setIcon("x-circle")
         .onClick(() => {
           for (const leaf of siblings) {
             if (leaf.view instanceof BrowserView && !leaf.view.getState().pinned) leaf.detach();
           }
-        }),
-    );
-    menu.addItem((item) =>
-      item
-        .setTitle(t("Close browser tab"))
-        .setIcon("x")
-        .onClick(() => this.leaf.detach()),
-    );
+        }));
+      tools.addItem((item) => item.setTitle(t("Close browser tab")).setIcon("x")
+        .onClick(() => this.leaf.detach()));
+    });
+    menu.addItem((item) => item.setTitle(t("Settings")).setIcon("settings")
+      .onClick(() => this.plugin.openSettings()));
   }
 
   private buildChrome(): void {
@@ -1101,7 +1041,7 @@ export class BrowserView extends ItemView {
     library.addEventListener("click", () => this.showInternal("bookmarks"));
     if (!favorites.length && this.plugin.core.settings().bookmarkBarMode === "selected") {
       const choose = this.favoritesBarEl.createEl("button", { cls: "ubc-favorite-item", text: t("Choose members") });
-      choose.addEventListener("click", () => { this.bookmarkLayout = "selected"; this.showInternal("bookmarks"); });
+      choose.addEventListener("click", () => { this.bookmarkLayout = "manage"; this.showInternal("bookmarks"); });
     }
     for (const item of favorites) {
       if (item.kind === "folder") {
@@ -2563,6 +2503,15 @@ export class BrowserView extends ItemView {
       button.toggleClass("is-active", this.bookmarkLayout === mode);
       button.addEventListener("click", () => { this.bookmarkLayout = mode; this.showInternal("bookmarks", false); });
     }
+    const manage = controls.createEl("button", {
+      cls: "ubc-bookmark-manage-toggle",
+      text: t(this.bookmarkLayout === "manage" ? "Done selecting" : "Manage selected members"),
+      attr: { type: "button", "aria-pressed": String(this.bookmarkLayout === "manage") },
+    });
+    manage.addEventListener("click", () => {
+      this.bookmarkLayout = this.bookmarkLayout === "manage" ? "selected" : "manage";
+      this.showInternal("bookmarks", false);
+    });
     const summary = page.createDiv({ cls: "ubc-bookmark-summary", attr: { "aria-live": "polite" } });
     const list = page.createDiv({ cls: "ubc-bookmark-manager" });
     const render = () => {
@@ -2571,20 +2520,26 @@ export class BrowserView extends ItemView {
       const all = this.plugin.core.bookmarks.allBookmarks();
       const matches = all.filter((bookmark) => [bookmark.title, bookmark.url, bookmark.description ?? "", ...(bookmark.tags ?? []), bookmark.parentId ? this.plugin.core.bookmarks.folderPath(bookmark.parentId) : ""]
         .some((value) => value.toLowerCase().includes(needle)));
-      summary.setText(needle ? t("{count} results", { count: matches.length }) : this.bookmarkLayout === "selected" ? t("Pick the pages you use every day from your bookmarks.") : "");
-      if (!matches.length && (needle || !this.plugin.core.bookmarks.folders().length || this.bookmarkLayout !== "folder")) {
+      const presented = bookmarksForPresentation(matches, this.bookmarkLayout);
+      summary.setText(needle ? t("{count} results", { count: presented.length })
+        : this.bookmarkLayout === "selected" ? t("{count} selected", { count: presented.length })
+        : this.bookmarkLayout === "manage" ? t("Pick the pages you use every day from your bookmarks.") : "");
+      if (!presented.length && (needle || !this.plugin.core.bookmarks.folders().length || this.bookmarkLayout !== "folder")) {
         const empty = list.createDiv({ cls: "ubc-empty-state ubc-bookmark-empty" });
         setIcon(empty.createDiv({ cls: "ubc-bookmark-empty-icon" }), needle ? "search" : "bookmark-plus");
-        empty.createEl("h2", { text: t(needle ? "No matching bookmarks" : "No bookmarks yet") });
-        empty.createEl("p", { text: t(needle ? "Try another title, URL, or folder name." : "Save a page with the star in the toolbar, or add your first bookmark here.") });
-        if (!needle) empty.createEl("button", { text: t("New bookmark"), cls: "mod-cta" }).addEventListener("click", () => add.click());
+        const noSelected = !needle && this.bookmarkLayout === "selected" && all.length > 0;
+        empty.createEl("h2", { text: t(needle ? "No matching bookmarks" : noSelected ? "No selected bookmarks" : "No bookmarks yet") });
+        empty.createEl("p", { text: t(needle ? "Try another title, URL, or folder name."
+          : noSelected ? "Select pages to show in your everyday bookmarks."
+          : "Save a page with the star in the toolbar, or add your first bookmark here.") });
+        if (noSelected) empty.createEl("button", { text: t("Manage selected members"), cls: "mod-cta" }).addEventListener("click", () => manage.click());
+        else if (!needle) empty.createEl("button", { text: t("New bookmark"), cls: "mod-cta" }).addEventListener("click", () => add.click());
         return;
       }
       if (this.bookmarkLayout === "folder" && !needle) { this.renderBookmarkFolder(list, null, 0, render); return; }
-      if (this.bookmarkLayout === "selected" || needle) {
+      if (this.bookmarkLayout === "selected" || this.bookmarkLayout === "manage" || needle) {
         const grid = list.createDiv({ cls: "ubc-bookmark-grid" });
-        const sorted = this.bookmarkLayout === "selected" ? [...matches].sort((a, b) => Number(b.favorite) - Number(a.favorite) || (a.favoriteOrder ?? a.order) - (b.favoriteOrder ?? b.order)) : matches;
-        for (const bookmark of sorted) this.renderBookmarkCard(grid, bookmark);
+        for (const bookmark of presented) this.renderBookmarkCard(grid, bookmark);
         return;
       }
       const categories = list.createDiv({ cls: "ubc-bookmark-category-index" });
@@ -2671,8 +2626,11 @@ export class BrowserView extends ItemView {
     depth: number,
     refresh: () => void,
   ): void {
-    for (const item of this.plugin.core.bookmarks.children(parentId)) {
-      const row = parent.createDiv({ cls: "ubc-bookmark-row" });
+    const children = this.plugin.core.bookmarks.children(parentId);
+    const groups = partitionBookmarkChildren(children, (id) => this.plugin.core.bookmarks.descendantBookmarks(id).length);
+    const renderItems = (items: typeof children, target: HTMLElement): void => {
+      for (const item of items) {
+      const row = target.createDiv({ cls: "ubc-bookmark-row" });
       row.style.setProperty("--ubc-depth", String(depth));
       if (item.kind === "folder") {
         const collapsed = this.collapsedBookmarkFolders.has(item.id);
@@ -2726,6 +2684,13 @@ export class BrowserView extends ItemView {
           showBookmarkMenu(this.plugin, this, item, event);
         });
       }
+      }
+    };
+    renderItems(groups.main, parent);
+    if (groups.empty.length) {
+      const details = parent.createEl("details", { cls: "ubc-bookmark-empty-folders" });
+      details.createEl("summary", { text: t("Empty folders ({count})", { count: groups.empty.length }) });
+      renderItems(groups.empty, details);
     }
   }
 
@@ -2829,9 +2794,9 @@ export class BrowserView extends ItemView {
       const filtersActive = Boolean(needle || selectedDay || selectedContainer);
       const countSummary =
         navigationCount
-          ? t("{v0} visit{v1} across {v2} day{v3}{v4}{v5}", { v0: navigationCount, v1: navigationCount === 1 ? "" : "s", v2: days.length, v3: days.length === 1 ? "" : "s", v4: tombstoneCount ? ` · ${tombstoneCount} deleted entr${tombstoneCount === 1 ? "y" : "ies"} retained` : "", v5: filtersActive ? " · filtered" : "" })
+          ? t("{v0} visit{v1} across {v2} day{v3}{v4}{v5}", { v0: navigationCount, v1: navigationCount === 1 ? "" : "s", v2: days.length, v3: days.length === 1 ? "" : "s", v4: tombstoneCount ? ` · ${tombstoneCount} deleted entr${tombstoneCount === 1 ? "y" : "ies"} retained` : "", v5: filtersActive ? " · " + t("Filtered") : "" })
           : tombstoneCount
-            ? t("{v0} deleted histor{v1} retained to preserve navigation paths{v2}", { v0: tombstoneCount, v1: tombstoneCount === 1 ? "y entry" : "y entries", v2: filtersActive ? " · filtered" : "" })
+            ? t("{v0} deleted histor{v1} retained to preserve navigation paths{v2}", { v0: tombstoneCount, v1: tombstoneCount === 1 ? "y entry" : "y entries", v2: filtersActive ? " · " + t("Filtered") : "" })
           : filtersActive
             ? t("No history matches these filters.")
             : t("No browser history yet.");

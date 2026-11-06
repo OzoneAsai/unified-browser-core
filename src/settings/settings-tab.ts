@@ -4,6 +4,7 @@ import type { TabStyle } from "../core/model";
 import { confirmAction } from "../ui/confirm-modal";
 import { permissionDecisionLabel, permissionLabel } from "../ui/permission-label";
 import { t, setLanguage } from "../i18n";
+import { renderSettingsSectionNavigation } from "./section-navigation";
 
 export class BrowserSettingTab extends PluginSettingTab {
   constructor(app: App, private readonly plugin: UnifiedBrowserCorePlugin) {
@@ -137,22 +138,24 @@ export class BrowserSettingTab extends PluginSettingTab {
           }),
       );
 
+    const hasOmnisearch = this.plugin.homeAdapter.hasOmnisearch();
     new Setting(containerEl)
       .setName(t("Default Home search"))
-      .setDesc(t("Vault searches files in this vault. Web searches the web or opens an address."))
-      .addDropdown((dropdown) =>
+      .setDesc(t("Vault searches files in this vault. Web searches the web or opens an address.")
+        + (hasOmnisearch ? "" : " " + t("Omnisearch is not enabled.")))
+      .addDropdown((dropdown) => {
+        dropdown.addOption("vault", t("Vault files")).addOption("web", t("Web"));
+        if (hasOmnisearch) dropdown.addOption("omnisearch", "Omnisearch");
         dropdown
-          .addOption("vault", t("Vault files"))
-          .addOption("omnisearch", "Omnisearch")
-          .addOption("web", t("Web"))
-          .setValue(this.plugin.core.settings().homeSearchMode)
+          .setValue(!hasOmnisearch && this.plugin.core.settings().homeSearchMode === "omnisearch"
+            ? "vault" : this.plugin.core.settings().homeSearchMode)
           .onChange((value) => {
-            if (value === "vault" || value === "web" || value === "omnisearch") {
+            if (value === "vault" || value === "web" || (value === "omnisearch" && hasOmnisearch)) {
               this.plugin.core.updateSettings({ homeSearchMode: value });
               this.plugin.refreshBrowserViews();
             }
-          }),
-      );
+          });
+      });
 
     const homeToggle = (title: string, description: string, key:
       "homeMarkdownOnly" | "homeShowUnresolvedLinks" | "homeShowFilePaths" |
@@ -174,7 +177,7 @@ export class BrowserSettingTab extends PluginSettingTab {
     homeToggle("Show uncreated linked notes", "Include unresolved Markdown links in Vault search results.", "homeShowUnresolvedLinks");
     homeToggle("Show file paths in search", "Show each result's path or matched alias.", "homeShowFilePaths");
     homeToggle("Show search shortcuts", "Show keyboard guidance below Home search.", "homeShowShortcuts");
-    homeToggle("Show Omnisearch excerpts", "Display a text excerpt for Omnisearch results.", "homeShowOmnisearchExcerpts");
+    if (hasOmnisearch) homeToggle("Show Omnisearch excerpts", "Display a text excerpt for Omnisearch results.", "homeShowOmnisearchExcerpts");
     homeCount("Search result count", "homeMaxSearchResults");
     new Setting(containerEl).setName(t("Search delay (ms)")).setDesc(t("Delay between typing and updating suggestions."))
       .addSlider((slider) => slider.setLimits(0, 500, 10).setDynamicTooltip()
@@ -602,7 +605,7 @@ export class BrowserSettingTab extends PluginSettingTab {
         .addOption("selected", t("Selected members"))
         .setValue(this.plugin.core.settings().bookmarkBarMode)
         .onChange((value) => { this.plugin.core.updateSettings({ bookmarkBarMode: value as "all" | "selected" }); this.plugin.refreshBrowserViews(); }))
-      .addButton((button) => button.setButtonText(t("Choose members")).onClick(() => void this.plugin.openBrowser({ url: "browser://bookmarks", state: { bookmarkLayout: "selected" } })));
+      .addButton((button) => button.setButtonText(t("Choose members")).onClick(() => void this.plugin.openBrowser({ url: "browser://bookmarks", state: { bookmarkLayout: "manage" } })));
 
     new Setting(containerEl).setName(t("Containers")).setHeading();
     new Setting(containerEl)
@@ -769,6 +772,7 @@ export class BrowserSettingTab extends PluginSettingTab {
           );
       }
     }
+    renderSettingsSectionNavigation(containerEl);
   }
 }
 

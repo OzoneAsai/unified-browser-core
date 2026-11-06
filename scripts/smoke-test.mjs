@@ -1,3 +1,4 @@
+import "./check-ux-ui-contract.mjs";
 import "./check-home-block-namespace.mjs";
 import esbuild from "esbuild";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -30,6 +31,12 @@ try {
     } }],
   });
   await import(pathToFileURL(pickerOutfile).href);
+  const uxOutfile = join(dir, "ux-model.mjs");
+  await esbuild.build({
+    entryPoints: ["tests/ux-model-smoke.ts"],
+    bundle: true, platform: "node", format: "esm", target: "node22", outfile: uxOutfile,
+  });
+  await import(pathToFileURL(uxOutfile).href);
   const homeOutfile = join(dir, "home-adapter.mjs");
   await esbuild.build({
     entryPoints: ["tests/home-adapter-smoke.ts"], bundle: true, platform: "node", format: "esm", target: "node22", outfile: homeOutfile,

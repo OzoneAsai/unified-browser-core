@@ -284,7 +284,7 @@ export interface SurfingMigrationRecord {
 export interface BrowserLeafViewState extends Record<string, unknown> {
   title?: string;
   faviconDataUrl?: string;
-  bookmarkLayout?: "type" | "folder" | "selected";
+  bookmarkLayout?: "type" | "folder" | "selected" | "manage";
   lifecycleId?: LeafId;
   url?: string;
   containerId?: ContainerId;

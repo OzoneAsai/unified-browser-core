@@ -561,6 +561,25 @@
   padding: 28px clamp(18px, 5vw, 54px) 80px;
 }
 
+/* The host theme owns colors, but Browser Core owns its internal reading hierarchy.
+   Scope these rules to internal surfaces; never change normal Markdown or web pages. */
+.ubc-browser-view .ubc-surface :is(h1, h2, h3, h4) {
+  text-transform: none;
+  letter-spacing: normal;
+  text-shadow: none;
+  overflow-wrap: anywhere;
+}
+.ubc-browser-view .ubc-surface :is(input:not([type="checkbox"]):not([type="radio"]), select, textarea) {
+  color: var(--text-normal);
+  background-color: var(--background-primary);
+  caret-color: var(--text-normal);
+}
+.ubc-browser-view .ubc-surface :is(input, textarea)::placeholder { color: var(--text-muted); opacity: 1; }
+.ubc-browser-view .ubc-surface :is(input, select, textarea):focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
+}
+
 .ubc-home {
   padding-top: 11vh;
 }
@@ -1183,8 +1202,8 @@
 .ubc-home-shortcuts { color: var(--text-muted); font-size: var(--font-ui-smaller); margin-bottom: 10px; }
 .ubc-home-shortcuts.is-hidden { display: none; }
 .ubc-home-result {
-  display: flex; align-items: flex-start; gap: 10px;
-  text-align: left; width: 100%; padding: 9px 12px; margin: 2px 0;
+  display: flex; align-items: center; justify-content: flex-start; gap: 10px;
+  text-align: left; width: 100%; padding: 7px 12px; margin: 2px 0;
   min-height: 45px; height: auto; border: 0; border-radius: 8px;
   background: transparent; box-shadow: none; color: var(--text-normal);
   white-space: normal; overflow-wrap: anywhere; cursor: pointer;
@@ -1195,9 +1214,16 @@
 .ubc-home-result:focus-visible, .ubc-home-create:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
 .ubc-home-result-icon { flex: none; display: inline-flex; padding-top: 2px; }
 .ubc-home-result-icon svg { width: 18px; height: 18px; }
-.ubc-home-result-info { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.ubc-home-result-name { font-weight: 600; }
-.ubc-home-result-info .ubc-card-subtitle { overflow-wrap: anywhere; font-weight: 400; font-size: var(--font-ui-smaller); }
+.ubc-home-result-info {
+  flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
+  align-items: stretch; gap: 2px; text-align: left;
+}
+.ubc-home-result-name { font-weight: 600; line-height: 1.3; text-align: left; }
+.ubc-home-result-info .ubc-card-subtitle {
+  display: block; max-width: 100%; margin-top: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted);
+  font-weight: 400; font-size: var(--font-ui-smaller); text-align: left;
+}
 .ubc-home-create { width: 100%; text-align: left; margin: 8px 0; }
 .ubc-home-icon-choice { display: flex; align-items: center; gap: 10px; }
 .ubc-home-icon-choice svg { width: 18px; height: 18px; }
@@ -1230,3 +1256,63 @@
 .ubc-password-card > div { margin-top: 6px; }
 .ubc-password-note { color: var(--text-muted); font-size: var(--font-ui-small); overflow-wrap: anywhere; }
 .ubc-password-popover { position: fixed; z-index: 10001; display: flex; flex-direction: column; gap: 10px; width: min(360px, calc(100vw - 24px)); max-height: min(500px, 70vh); overflow: auto; padding: 20px; border: 1px solid var(--background-modifier-border); border-radius: 14px; background: var(--background-primary); box-shadow: var(--shadow-l); }
+
+
+/* Structured bookmark hierarchy: populated items remain visible, empty folders
+   live in an accessible, optionally expanded management group. */
+.ubc-bookmark-empty-folders {
+  margin-top: 12px;
+  padding: 0 8px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.ubc-bookmark-empty-folders > summary {
+  cursor: pointer;
+  padding: 12px 4px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  text-align: left;
+}
+.ubc-bookmark-empty-folders > summary:focus-visible { outline: 2px solid var(--interactive-accent); }
+.ubc-browser-view button.ubc-bookmark-folder-title {
+  flex: 0 1 auto;
+  text-align: left;
+}
+.ubc-bookmark-row .ubc-bookmark-count { margin-right: auto; }
+.ubc-bookmark-manage-toggle {
+  flex: 0 0 auto;
+  min-height: 38px;
+}
+.ubc-bookmark-manage-toggle[aria-pressed="true"] {
+  background-color: var(--background-secondary);
+  border: 1px solid var(--interactive-accent);
+}
+
+/* Persistent section navigation is derived from actual Setting headings, not
+   from a second hardcoded list of settings categories. */
+.ubc-settings-section-nav {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 10px 2px 12px;
+  margin: 0 0 16px;
+  background: var(--background-primary);
+  border-bottom: 1px solid var(--background-modifier-border);
+  scrollbar-width: thin;
+}
+.ubc-settings-section-nav button {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 5px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  white-space: nowrap;
+}
+.ubc-settings-section-nav button:focus-visible { outline: 2px solid var(--interactive-accent); }
+.ubc-settings-section-target { scroll-margin-top: 78px; }
