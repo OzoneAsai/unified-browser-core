@@ -9,6 +9,12 @@ import { pathToFileURL } from "node:url";
 const dir = await mkdtemp(join(tmpdir(), "ubc-smoke-"));
 const outfile = join(dir, "test.mjs");
 try {
+  const linkPolicyBundle = join(dir, "obsidian-link-policy.mjs");
+  await esbuild.build({
+    entryPoints: ["tests/obsidian-link-policy-smoke.ts"],
+    bundle: true, platform: "node", format: "esm", target: "node22", outfile: linkPolicyBundle,
+  });
+  await import(pathToFileURL(linkPolicyBundle).href);
   await esbuild.build({
     entryPoints: ["tests/core-smoke.ts"],
     bundle: true,

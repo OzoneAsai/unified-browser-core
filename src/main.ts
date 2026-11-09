@@ -1,4 +1,4 @@
-import { Menu, Notice, Plugin, getLanguage, type App, type WorkspaceLeaf } from "obsidian";
+import { Menu, Notice, Plugin, TFile, getLanguage, type App, type WorkspaceLeaf } from "obsidian";
 import { ElectronPermissionAdapter } from "./adapters/electron-permissions";
 import { ElectronSessionDataAdapter } from "./adapters/electron-session-data";
 import { ElectronWindowOpenAdapter } from "./adapters/electron-window-open";
@@ -10,6 +10,9 @@ import { ObsidianSettingsAdapter } from "./adapters/obsidian-settings";
 import { ObsidianHomeAdapter } from "./adapters/obsidian-home";
 import { HomeIconPicker } from "./ui/home-icon-picker";
 import { EmbeddedHomeSearch } from "./ui/home-search-embed";
+import { addEmbeddedBrowser } from "./ui/embedded-browser";
+import { UbcHtmlFileView, UBC_HTML_FILE_VIEW } from "./ui/html-file-view";
+import { registerObsidianLinkBridge, type ObsidianBrowserLinkIntent } from "./integrations/obsidian-link-router";
 import { ObsidianBookmarksAdapter } from "./adapters/obsidian-bookmarks";
 import { WebViewerBookmarksAdapter } from "./adapters/webviewer-bookmarks";
 import { SurfingMigrationAdapter, normalizeSurfingBookmarks, surfingFolderPaths, surfingSearchTemplate } from "./adapters/surfing-migration";
@@ -49,6 +52,7 @@ import type { WebviewElement } from "./ui/webview-types";
 import { PasswordVault } from "./passwords/vault";
 import { FileSystemAdapter } from "obsidian";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { resolveElectronRemote } from "./adapters/electron-compat";
 
 export interface BrowserOpenRequest {
@@ -143,6 +147,14 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     this.registerMarkdownCodeBlockProcessor("ubc-search-bar", (source, el, ctx) => {
       ctx.addChild(new EmbeddedHomeSearch(el, this, source));
     });
+    this.registerMarkdownCodeBlockProcessor("surfing", (source, el, ctx) => {
+      const browser = addEmbeddedBrowser(el, this, source);
+      if (browser) ctx.addChild(browser);
+    });
+    this.registerMarkdownCodeBlockProcessor("ubc-browser", (source, el, ctx) => {
+      const browser = addEmbeddedBrowser(el, this, source);
+      if (browser) ctx.addChild(browser);
+    });
     this.bookmarksAdapter = new ObsidianBookmarksAdapter(this.app);
     this.webViewerBookmarksAdapter = new WebViewerBookmarksAdapter(this.app);
     this.surfingMigrationAdapter = new SurfingMigrationAdapter(this.app);
@@ -226,6 +238,27 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     }, 15_000));
 
     this.registerView(BROWSER_VIEW_TYPE, (leaf) => new BrowserView(leaf, this));
+    this.registerView(UBC_HTML_FILE_VIEW, leaf => new UbcHtmlFileView(leaf, this));
+    try {
+      this.registerExtensions(["html", "htm"], UBC_HTML_FILE_VIEW);
+    } catch {
+      // Another plugin may own HTML. The explicit file-menu action remains available.
+      console.info("Unified Browser Core: HTML extension is owned by another view; manual open remains available.");
+    }
+    registerObsidianLinkBridge({
+      app: this.app,
+      register: dispose => this.register(dispose),
+      registerEvent: ref => this.registerEvent(ref),
+      registerEditorExtension: extension => this.registerEditorExtension(extension),
+      registerObsidianProtocolHandler: (name, handler) => this.registerObsidianProtocolHandler(name, handler),
+      open: intent => this.openObsidianLink(intent),
+    });
+    this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
+      if (file instanceof TFile && ["html", "htm"].includes(file.extension)) {
+        menu.addItem(item => item.setTitle(t("Open HTML in UBC")).setIcon("globe")
+          .onClick(() => void this.openHtmlFileInBrowser(file)));
+      }
+    }));
     this.addSettingTab(new BrowserSettingTab(this.app, this));
     this.addRibbonIcon("globe", t("Open browser"), () => this.openBrowser());
 
@@ -697,6 +730,23 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       reveal: disposition !== "background",
       placement: "tab",
     });
+  }
+
+  private openObsidianLink(intent: ObsidianBrowserLinkIntent): void {
+    if (intent.external) {
+      window.open(intent.url, "_external");
+      return;
+    }
+    void this.openBrowser({ url: intent.url }).catch(error => {
+      console.warn("Unified Browser Core: failed to open Obsidian link", error);
+      new Notice(t("Could not open web link"));
+    });
+  }
+
+  private async openHtmlFileInBrowser(file: TFile): Promise<void> {
+    const adapter = this.app.vault.adapter;
+    if (!(adapter instanceof FileSystemAdapter)) return;
+    await this.openBrowser({ url: pathToFileURL(join(adapter.getBasePath(), file.path)).href });
   }
 
   async restoreLeaf(

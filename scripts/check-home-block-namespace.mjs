@@ -25,7 +25,7 @@ function visit(node) {
   ts.forEachChild(node, visit);
 }
 visit(file);
-assert.deepEqual(registered, ["ubc-search-bar"]);
+assert.deepEqual(registered, ["ubc-search-bar", "surfing", "ubc-browser"]);
 const registeredByHomeTab = new Set(["search-bar"]);
 for (const name of registered) {
   assert.ok(!registeredByHomeTab.has(name), `${name} already belongs to Home tab`);

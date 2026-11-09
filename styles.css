@@ -1368,3 +1368,32 @@
 }
 .ubc-settings-section-nav button:focus-visible { outline: 2px solid var(--interactive-accent); }
 .ubc-settings-section-target { scroll-margin-top: 78px; }
+/* Embedded web browsing in Markdown, hover previews, and Canvas shares a
+ * managed guest. No duplicate browser chrome or workspace leaf is created. */
+.ubc-embedded-browser {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  min-height: 280px;
+  height: clamp(300px, 48vh, 610px);
+  overflow: hidden;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 8px);
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+.ubc-embedded-browser-bar {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 9px;
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.ubc-embedded-browser-address { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-ui-smaller); }
+.ubc-embedded-browser-status { color: var(--text-muted); white-space: nowrap; font-size: var(--font-ui-smaller); }
+.ubc-embedded-browser-bar button { color: var(--text-normal); border: none; background: transparent; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 28px; height: 26px; cursor: pointer; border-radius: 5px; }
+.ubc-embedded-browser-bar button:hover { background: var(--background-modifier-hover); }
+.ubc-embedded-browser > webview { flex: 1; min-height: 0; width: 100%; }
+.ubc-embed-error { padding: 12px; border: 1px solid var(--background-modifier-error); border-radius: 8px; color: var(--text-error); }
