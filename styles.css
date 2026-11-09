@@ -420,6 +420,58 @@
   display: none;
 }
 
+/* Surfing-parity find controls remain above Chromium's native surface. */
+.ubc-find-bar {
+  position: absolute;
+  z-index: 40;
+  inset: 12px 12px auto auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  box-shadow: var(--shadow-l, 0 6px 24px #0004);
+  max-width: calc(100% - 20px);
+  font-size: var(--font-ui-small);
+}
+.ubc-find-bar.is-hidden { display: none; }
+.ubc-find-input {
+  min-width: 90px;
+  width: min(240px, 32vw);
+  max-width: 100%;
+  padding: 5px 8px;
+  color: var(--text-normal);
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+}
+.ubc-find-results { min-width: 46px; white-space: nowrap; text-align: center; color: var(--text-muted); }
+.ubc-find-button { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 26px; height: 28px; }
+.ubc-find-button:disabled { opacity: .4; }
+
+.ubc-link-hover-status {
+  position: absolute;
+  z-index: 24;
+  left: 0;
+  bottom: 0;
+  max-width: min(650px, 90%);
+  padding: 4px 9px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 0 6px 0 0;
+  color: var(--text-normal);
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s, 0 3px 12px #0003);
+  font-size: var(--font-ui-smaller);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.ubc-link-hover-status.is-hidden { display: none; }
+
 .ubc-internal-layer {
   overflow: auto;
 }

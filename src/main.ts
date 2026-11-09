@@ -4,6 +4,7 @@ import { ElectronSessionDataAdapter } from "./adapters/electron-session-data";
 import { ElectronWindowOpenAdapter } from "./adapters/electron-window-open";
 import { ElectronContextMenuAdapter } from "./adapters/electron-context-menu";
 import { ManagedWebviewBackend } from "./adapters/managed-webview-backend";
+import { isExternalAppLink } from "./navigation/external-app-link";
 import { ObsidianTabStripAdapter } from "./adapters/obsidian-tab-strip";
 import { ObsidianSettingsAdapter } from "./adapters/obsidian-settings";
 import { ObsidianHomeAdapter } from "./adapters/obsidian-home";
@@ -351,6 +352,16 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       },
     });
     this.addCommand({
+      id: "browser-find-in-page",
+      name: t("Find in page"),
+      checkCallback: (checking) => {
+        const view = this.activeBrowserView();
+        if (!view || view.currentUrl().startsWith("browser://")) return false;
+        if (!checking) view.openFindInPage();
+        return true;
+      },
+    });
+    this.addCommand({
       id: "browser-back",
       name: t("Browser back"),
       checkCallback: (checking) => {
@@ -675,12 +686,16 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     containerId: ContainerId,
     disposition: BrowserOpenDisposition,
   ): Promise<void> {
+    if (isExternalAppLink(url)) {
+      window.open(url, "_external");
+      return;
+    }
     await this.openBrowser({
       url,
       containerId,
       state: { siteAssignmentBypassReason: "opener" },
       reveal: disposition !== "background",
-      placement: disposition === "new-window" ? "window" : "tab",
+      placement: "tab",
     });
   }
 

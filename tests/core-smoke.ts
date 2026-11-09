@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { runInNewContext } from "node:vm";
 import { HistoryGraph } from "../src/history/history-graph";
 import { historyDayKey } from "../src/history/day-key";
 import { ContainerStore } from "../src/containers/container-store";
@@ -15,7 +17,9 @@ import { gateLeafDetach } from "../src/adapters/leaf-close-gate";
 import { permissionDecisionLabel, permissionLabel } from "../src/ui/permission-label";
 import { FormRecoveryStore } from "../src/core/form-recovery-store";
 import { SiteZoomStore } from "../src/core/site-zoom-store";
-import { classifyWindowOpen } from "../src/adapters/electron-window-open";
+import { MAIN_RUNTIME_SOURCE, normalizePopupDisposition } from "../src/adapters/electron-window-open";
+import { isExternalAppLink } from "../src/navigation/external-app-link";
+import { guestBrowserShortcut } from "../src/adapters/guest-keyboard";
 import { HybridBrowserPersistence } from "../src/persistence/hybrid-persistence";
 import { classifyInPageNavigation } from "../src/history/navigation-classifier";
 import { ElectronNavigationHistoryAdapter } from "../src/adapters/electron-navigation-history";
@@ -721,43 +725,82 @@ assert.deepEqual(eventLog, ["nav:https://event.example", "bookmark:added"]);
 stopNav();
 stopBookmark();
 assert.match(eventCore.searchUrl("a b"), /a%20b/, "search URL templates must receive an encoded query");
-assert.equal(classifyWindowOpen({ disposition: "foreground-tab", frameName: "_blank" }), "core-tab");
-assert.equal(classifyWindowOpen({ disposition: "background-tab", frameName: "_blank" }), "core-tab");
-assert.equal(
-  classifyWindowOpen({ disposition: "new-window" }),
-  "core-tab",
-  "plain new-window intents should stay under Browser Core ownership",
-);
-assert.equal(
-  classifyWindowOpen({ disposition: "foreground-tab", frameName: "oauth", features: "width=480,height=640" }),
-  "auxiliary",
-  "named/sized popup flows must preserve window.opener semantics",
-);
-assert.equal(
-  classifyWindowOpen({ disposition: "foreground-tab", frameName: "_blank", features: "external" }),
-  "core-tab",
-  "non-presentation window features must stay under Browser Core ownership",
-);
-assert.equal(
-  classifyWindowOpen({ disposition: "foreground-tab", frameName: "_blank", features: "noopener" }),
-  "core-tab",
-  "noopener requests do not require native opener semantics",
-);
-assert.equal(
-  classifyWindowOpen({ disposition: "foreground-tab", frameName: "oauth", features: "noopener,width=480,height=640" }),
-  "core-tab",
-  "noopener must override named/sized auxiliary classification",
-);
-assert.equal(
-  classifyWindowOpen({ disposition: "foreground-tab", frameName: "_blank", features: "popup=yes" }),
-  "auxiliary",
-  "explicit popup presentation should retain auxiliary-window semantics",
-);
-assert.equal(
-  classifyWindowOpen({ disposition: "foreground-tab", frameName: "_blank", features: "popup=no" }),
-  "core-tab",
-  "disabled popup presentation must not escape Browser Core ownership",
-);
+for (const disposition of ["foreground-tab", "background-tab", "new-window", undefined]) {
+  assert.equal(normalizePopupDisposition(disposition),
+    disposition === "background-tab" ? "background" : "new-tab");
+}
+for (const [input, findOpen, expected] of [
+  [{ type: "keyDown", key: "f", meta: true }, false, "find"],
+  [{ type: "keyDown", key: "F", control: true }, false, "find"],
+  [{ type: "keyDown", key: "l", control: true }, false, "address"],
+  [{ type: "keyDown", key: "g", meta: true }, false, null],
+  [{ type: "keyDown", key: "g", meta: true }, true, "find-next"],
+  [{ type: "keyDown", key: "g", meta: true, shift: true }, true, "find-previous"],
+  [{ type: "keyDown", key: "F3" }, true, "find-next"],
+  [{ type: "keyDown", key: "F3", shift: true }, true, "find-previous"],
+  [{ type: "keyUp", key: "f", meta: true }, false, null],
+  [{ type: "keyDown", key: "f", alt: true, meta: true }, false, null],
+  [{ type: "keyDown", key: "a" }, false, null],
+  [{ type: "keyDown", key: "/" }, false, null],
+] as const) assert.equal(guestBrowserShortcut(input, findOpen), expected,
+  "guest shortcut mapping must not intercept ordinary text input or IME");
+for (const [url, expected] of [
+  ["https://docs.google.com/presentation/d/test/edit", false],
+  ["https://manaba.example.ac.jp/", false],
+  ["about:blank", false],
+  ["obsidian://open?vault=test", true],
+  ["mailto:user@example.com", true],
+  ["zotero://select/items/123", true],
+  ["localhost:3000", false],
+  ["javascript:alert(1)", false],
+] as const) assert.equal(isExternalAppLink(url), expected, url);
+{
+  type Popup = { url: string; disposition?: string; frameName?: string; features?: string };
+  type Result = { action: string };
+  let handler: ((details: Popup) => Result) | undefined;
+  const guest = Object.assign(new EventEmitter(), {
+    isDestroyed: () => false,
+    setWindowOpenHandler: (next: (details: Popup) => Result) => { handler = next; },
+  });
+  const messages: Array<{ bindingId: string; url: string; disposition: string }> = [];
+  const host = {
+    isDestroyed: () => false,
+    send: (_channel: string, payload: typeof messages[number]) => messages.push(payload),
+  };
+  const scope = {
+    require: (id: string) => {
+      assert.equal(id, "electron");
+      return { webContents: { fromId: (id: number) => id === 10 ? guest : id === 20 ? host : undefined } };
+    },
+    module: { exports: {} as Record<string, unknown> },
+    setImmediate,
+  };
+  runInNewContext(MAIN_RUNTIME_SOURCE, scope);
+  const runtime = scope.module.exports as {
+    bind: (params: { bindingId: string; guestId: number; hostId: number; channel: string }) => boolean;
+    unbind: (id: string) => void;
+    diagnostics: () => { activeAuxiliaryWindows: number };
+  };
+  assert.equal(runtime.bind({ bindingId: "test:manaba", guestId: 10, hostId: 20, channel: "test" }), true);
+  const fixture: Popup[] = [
+    { url: "https://docs.google.com/presentation/d/test/edit", frameName: "_blank", disposition: "new-window" },
+    { url: "https://example.com/background", frameName: "_blank", disposition: "background-tab" },
+    { url: "https://example.com/oauth", frameName: "oauth", features: "width=480,height=640,popup=yes" },
+    { url: "https://example.com/popup", frameName: "_blank", features: "popup=yes" },
+    { url: "https://example.com/noopener", features: "noopener" },
+  ];
+  for (const popup of fixture) {
+    assert.equal(handler?.(popup).action, "deny", "no popup may escape to a native window");
+  }
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.deepEqual(messages.map(m => [m.url, m.disposition]), fixture.map(p => [p.url,
+    p.disposition === "background-tab" ? "background" : "new-tab"]));
+  assert.equal(runtime.diagnostics().activeAuxiliaryWindows, 0);
+  handler?.({ url: "https://example.com/cancelled" });
+  runtime.unbind("test:manaba");
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(messages.length, fixture.length, "delayed IPC must not reopen a closed browser tab");
+}
 assert.equal(classifyInPageNavigation(3, 3, "in-page"), "residual");
 assert.equal(classifyInPageNavigation(3, 4, "in-page"), "navigation");
 assert.equal(classifyInPageNavigation(3, 2, "back"), "navigation");

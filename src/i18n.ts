@@ -12,6 +12,12 @@ export function t(source: string, values: Record<string, string | number> = {}):
 }
 
 const ja: Record<string, string> = {
+  "Find in page": "ページ内を検索", "Previous match": "前の一致", "Next match": "次の一致",
+  "Close find": "検索を閉じる", "Searching…": "検索中…", "Find unavailable": "ページ内検索を利用できません",
+  "Copy viewport as image": "表示範囲を画像としてコピー", "Viewport copied as image": "表示範囲を画像としてコピーしました",
+  "Could not copy viewport": "表示範囲をコピーできませんでした", "Open page in external browser": "外部ブラウザでページを開く",
+  "Save page as Markdown": "ページをMarkdownとして保存", "Page saved as Markdown": "ページをMarkdownとして保存しました",
+  "Could not save page as Markdown": "ページをMarkdownとして保存できませんでした", "No readable page content": "保存できる本文がありません",
   "Passwords": "パスワード", "Password manager": "パスワードマネージャー",
   "Open password vault": "パスワード金庫を開く", "Lock password vault": "パスワード金庫をロック",
   "Fill password": "パスワードを入力", "Lock": "ロック", "Continue": "続ける",

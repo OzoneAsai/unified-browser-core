@@ -127,6 +127,10 @@ export function buildWebContentMenuEntries(
       icon: currentPageBookmarked ? "bookmark-check" : "bookmark",
     });
     add("Copy page URL", () => void navigator.clipboard.writeText(view.currentUrl()), { icon: "copy" });
+    add("Find in page", () => view.openFindInPage(), { icon: "search" });
+    add("Copy viewport as image", () => void view.copyViewportImage(), { icon: "image" });
+    add("Save page as Markdown", () => void view.savePageAsMarkdown(), { icon: "file-text" });
+    add("Open page in external browser", () => view.openInExternalBrowser(), { icon: "globe" });
     add("View page in history", () => view.showHistoryQuery(view.currentUrl()), { icon: "history" });
     if (containerMode !== "off") {
       add("Reopen in container…", () => view.openContainerPicker(), { icon: "boxes" });
