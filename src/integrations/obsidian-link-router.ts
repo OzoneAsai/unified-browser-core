@@ -1,5 +1,4 @@
-import { EditorView } from "@codemirror/view";
-import { editorInfoField, type Editor, type Menu, type Plugin, type Workspace } from "obsidian";
+import { type Editor, type EditorPosition, type MarkdownView, type Menu, type Plugin, type Workspace } from "obsidian";
 import { parseObsidianWebLink } from "./obsidian-link-policy";
 export { parseObsidianWebLink } from "./obsidian-link-policy";
 
@@ -15,24 +14,42 @@ export interface ObsidianLinkHost {
   app: { workspace: Workspace };
   register: Plugin["register"];
   registerEvent: Plugin["registerEvent"];
-  registerEditorExtension: Plugin["registerEditorExtension"];
   registerObsidianProtocolHandler: Plugin["registerObsidianProtocolHandler"];
+  claimSurfingProtocol: boolean;
   open: (intent: ObsidianBrowserLinkIntent) => void;
+  preview: (anchor: Element, intent: ObsidianBrowserLinkIntent) => void;
+  leavePreview: (anchor: Element) => void;
+  closePreview: () => void;
 }
 
 type ClickableEditor = Editor & {
-  getClickableTokenAt?: (position: { line: number; ch: number }) => { type?: string; text?: string } | null;
+  getClickableTokenAt?: (position: EditorPosition) => { type?: string; text?: string } | null;
+  posAtCoords?: (x: number, y: number) => EditorPosition | null;
 };
+
+/** Window popouts have their own DOM prototypes, so instanceof Element from
+ * the main Obsidian window does not identify elements belonging to a popout. */
+function isElement(target: EventTarget | null): target is Element {
+  return target !== null && typeof (target as Element).closest === "function"
+    && (target as Node).nodeType === 1;
+}
+
+function isWithin(anchor: Element, target: EventTarget | null): boolean {
+  return !!target && typeof (target as Node).nodeType === "number"
+    && anchor.contains(target as Node);
+}
 
 /** A single UI policy shared by Reading View, Properties, Canvas, and Live Preview. */
 export function linkIntentFromDom(target: EventTarget | null, modifiers: { metaKey?: boolean; ctrlKey?: boolean }): ObsidianBrowserLinkIntent | null {
-  if (!(target instanceof Element)) return null;
+  if (!isElement(target)) return null;
   if (target.closest(".ubc-browser-view, .ubc-embedded-browser, .ubc-hover-preview")) return null;
-  const anchor = target.closest<HTMLAnchorElement>("a[href]");
+  // Reading View uses <a href>, whereas Obsidian Properties renders URL
+  // values as .metadata-link-inner[data-href] without an anchor element.
+  const anchor = target.closest<HTMLElement>("a[href], .metadata-link-inner[data-href]");
   if (!anchor) return null;
   const context = anchor.closest(".metadata-container, .metadata-property, .markdown-rendered, .markdown-preview-view, .markdown-reading-view, .canvas-node");
   if (!context) return null;
-  const url = parseObsidianWebLink(anchor.getAttribute("href"));
+  const url = parseObsidianWebLink(anchor.getAttribute("href") ?? anchor.getAttribute("data-href"));
   if (!url) return null;
   const source: ObsidianBrowserLinkSource = context.closest(".metadata-container, .metadata-property") ? "properties"
     : context.closest(".canvas-node") ? "canvas" : "reading";
@@ -41,14 +58,27 @@ export function linkIntentFromDom(target: EventTarget | null, modifiers: { metaK
 
 export function linkIntentFromClickableToken(
   editor: ClickableEditor | null | undefined,
-  offset: number | null,
+  position: EditorPosition | null,
   external: boolean,
 ): ObsidianBrowserLinkIntent | null {
-  if (!editor?.getClickableTokenAt || offset === null || offset < 0) return null;
-  const token = editor.getClickableTokenAt(editor.offsetToPos(offset));
+  if (!editor?.getClickableTokenAt || !position) return null;
+  const token = editor.getClickableTokenAt(position);
   if (token?.type !== "external-link") return null;
   const url = parseObsidianWebLink(token.text);
   return url ? { url, source: "live-preview", external } : null;
+}
+
+export function linkIntentFromEditorDom(workspace: Workspace, target: Element, x: number, y: number, external: boolean): ObsidianBrowserLinkIntent | null {
+  // Resolve a *rendered hyperlink*, never arbitrary source text.  A markdown
+  // editor is still a text editor: a click on raw markup must place a caret,
+  // whereas a click on its rendered .cm-underline label activates the link.
+  // Both normal click and Mod-click share this semantic token path.
+  if (!target.closest(".cm-link .cm-underline") ||
+      !target.closest(".markdown-source-view") ||
+      target.closest(".ubc-browser-view")) return null;
+  const leaf = workspace.getLeavesOfType("markdown").find(candidate => candidate.view.containerEl?.contains(target));
+  const editor = (leaf?.view as MarkdownView | undefined)?.editor as ClickableEditor | undefined;
+  return linkIntentFromClickableToken(editor, editor?.posAtCoords?.(x, y) ?? null, external);
 }
 
 /** Explicit ownership and cleanup; no global window.open or Obsidian prototype patches. */
@@ -58,16 +88,58 @@ export function registerObsidianLinkBridge(plugin: ObsidianLinkHost): void {
     if (documents.has(doc)) return;
     const onClick = (event: MouseEvent) => {
       if (event.defaultPrevented || event.button !== 0) return;
-      const intent = linkIntentFromDom(event.target, event);
+      let intent = linkIntentFromDom(event.target, event);
+      if (!intent && isElement(event.target)) {
+        intent = linkIntentFromEditorDom(
+          plugin.app.workspace, event.target, event.clientX, event.clientY,
+          Boolean(event.metaKey || event.ctrlKey),
+        );
+      }
       if (!intent) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       plugin.open(intent);
     };
+    const onPointerOver = (event: PointerEvent) => {
+      if (!isElement(event.target)) return;
+      const anchor = event.target.closest("a[href], .metadata-link-inner[data-href], .cm-underline");
+      if (!anchor || isWithin(anchor, event.relatedTarget)) return;
+      const intent = linkIntentFromDom(anchor, event) ??
+        linkIntentFromEditorDom(plugin.app.workspace, anchor, event.clientX, event.clientY, false);
+      if (intent) plugin.preview(anchor, intent);
+    };
+    const onPointerOut = (event: PointerEvent) => {
+      if (!isElement(event.target)) return;
+      const anchor = event.target.closest("a[href], .metadata-link-inner[data-href], .cm-underline");
+      if (anchor && !isWithin(anchor, event.relatedTarget)) plugin.leavePreview(anchor);
+    };
+    const onScroll = () => plugin.closePreview();
+    const onVisibilityChange = () => {
+      if (doc.hidden) plugin.closePreview();
+    };
     doc.addEventListener("click", onClick, true);
-    documents.set(doc, () => doc.removeEventListener("click", onClick, true));
+    doc.addEventListener("pointerover", onPointerOver, true);
+    doc.addEventListener("pointerout", onPointerOut, true);
+    doc.addEventListener("scroll", onScroll, true);
+    doc.addEventListener("visibilitychange", onVisibilityChange);
+    documents.set(doc, () => {
+      doc.removeEventListener("click", onClick, true);
+      doc.removeEventListener("pointerover", onPointerOver, true);
+      doc.removeEventListener("pointerout", onPointerOut, true);
+      doc.removeEventListener("scroll", onScroll, true);
+      doc.removeEventListener("visibilitychange", onVisibilityChange);
+    });
   };
   bindDocument(document);
+  // Reloading the plugin while a popout is already open does not emit a new
+  // `window-open` event. Discover those documents from actual workspace leaves
+  // instead of relying on the window creation event as the only entry point.
+  const bindExistingDocuments = () => plugin.app.workspace.iterateAllLeaves(leaf => {
+    const doc = leaf.view.containerEl?.ownerDocument;
+    if (doc) bindDocument(doc);
+  });
+  bindExistingDocuments();
+  plugin.registerEvent(plugin.app.workspace.on("layout-change", bindExistingDocuments));
   plugin.registerEvent(plugin.app.workspace.on("window-open", (_workspaceWindow, win) => bindDocument(win.document)));
   plugin.registerEvent(plugin.app.workspace.on("window-close", (_workspaceWindow, win) => {
     documents.get(win.document)?.();
@@ -77,22 +149,6 @@ export function registerObsidianLinkBridge(plugin: ObsidianLinkHost): void {
     for (const dispose of documents.values()) dispose();
     documents.clear();
   });
-
-  plugin.registerEditorExtension(EditorView.domEventHandlers({
-    click(event, view) {
-      // The default editing click stays untouched; only Ctrl/Command+click
-      // invokes the editor's semantic external-link token resolver.
-      if (!event.ctrlKey && !event.metaKey || event.button !== 0 || event.defaultPrevented) return false;
-      const fileInfo = view.state.field(editorInfoField, false);
-      const offset = view.posAtCoords({ x: event.clientX, y: event.clientY });
-      const intent = linkIntentFromClickableToken(fileInfo?.editor as ClickableEditor | undefined, offset, true);
-      if (!intent) return false;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      plugin.open(intent);
-      return true;
-    },
-  }));
 
   plugin.registerEvent(plugin.app.workspace.on("url-menu", (menu: Menu, url: string) => {
     const parsed = parseObsidianWebLink(url);
@@ -107,8 +163,10 @@ export function registerObsidianLinkBridge(plugin: ObsidianLinkHost): void {
     menu.addItem(item => item.setTitle("Open link in Unified Browser Core").setIcon("globe")
       .onClick(() => plugin.open({ url, source: "editor-menu", external: false })));
   }));
-  plugin.registerObsidianProtocolHandler("web-open", params => {
-    const url = parseObsidianWebLink(params.url);
-    if (url) plugin.open({ url, source: "protocol", external: false });
-  });
+  if (plugin.claimSurfingProtocol) {
+    plugin.registerObsidianProtocolHandler("web-open", params => {
+      const url = parseObsidianWebLink(params.url);
+      if (url) plugin.open({ url, source: "protocol", external: false });
+    });
+  }
 }

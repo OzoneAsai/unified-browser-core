@@ -11,8 +11,10 @@ import { ObsidianHomeAdapter } from "./adapters/obsidian-home";
 import { HomeIconPicker } from "./ui/home-icon-picker";
 import { EmbeddedHomeSearch } from "./ui/home-search-embed";
 import { addEmbeddedBrowser } from "./ui/embedded-browser";
+import { ObsidianHoverPreview } from "./ui/obsidian-hover-preview";
 import { UbcHtmlFileView, UBC_HTML_FILE_VIEW } from "./ui/html-file-view";
 import { registerObsidianLinkBridge, type ObsidianBrowserLinkIntent } from "./integrations/obsidian-link-router";
+import { registerObsidianCanvasBrowserActions } from "./integrations/obsidian-canvas";
 import { ObsidianBookmarksAdapter } from "./adapters/obsidian-bookmarks";
 import { WebViewerBookmarksAdapter } from "./adapters/webviewer-bookmarks";
 import { SurfingMigrationAdapter, normalizeSurfingBookmarks, surfingFolderPaths, surfingSearchTemplate } from "./adapters/surfing-migration";
@@ -81,6 +83,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
   surfingMigrationAdapter!: SurfingMigrationAdapter;
   webViewerBookmarksAdapter!: WebViewerBookmarksAdapter;
   private persistence!: HybridBrowserPersistence;
+  private linkHoverPreview!: ObsidianHoverPreview;
   private unloading = false;
   private sessionCheckpointTimer: number | undefined;
   private initialSessionReconcileTimer: number | undefined;
@@ -147,10 +150,18 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     this.registerMarkdownCodeBlockProcessor("ubc-search-bar", (source, el, ctx) => {
       ctx.addChild(new EmbeddedHomeSearch(el, this, source));
     });
-    this.registerMarkdownCodeBlockProcessor("surfing", (source, el, ctx) => {
-      const browser = addEmbeddedBrowser(el, this, source);
-      if (browser) ctx.addChild(browser);
-    });
+    // Legacy Surfing names are a shared namespace. Claim them only when
+    // Surfing itself is not loaded, rather than overriding a second plugin's
+    // fenced-code renderer and obsidian://web-open handler on startup.
+    const surfingLoaded = Boolean((this.app as App & {
+      plugins?: { plugins?: Record<string, unknown> };
+    }).plugins?.plugins?.surfing);
+    if (!surfingLoaded) {
+      this.registerMarkdownCodeBlockProcessor("surfing", (source, el, ctx) => {
+        const browser = addEmbeddedBrowser(el, this, source);
+        if (browser) ctx.addChild(browser);
+      });
+    }
     this.registerMarkdownCodeBlockProcessor("ubc-browser", (source, el, ctx) => {
       const browser = addEmbeddedBrowser(el, this, source);
       if (browser) ctx.addChild(browser);
@@ -239,6 +250,8 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
 
     this.registerView(BROWSER_VIEW_TYPE, (leaf) => new BrowserView(leaf, this));
     this.registerView(UBC_HTML_FILE_VIEW, leaf => new UbcHtmlFileView(leaf, this));
+    this.linkHoverPreview = new ObsidianHoverPreview(this);
+    this.register(() => this.linkHoverPreview.close());
     try {
       this.registerExtensions(["html", "htm"], UBC_HTML_FILE_VIEW);
     } catch {
@@ -249,9 +262,18 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       app: this.app,
       register: dispose => this.register(dispose),
       registerEvent: ref => this.registerEvent(ref),
-      registerEditorExtension: extension => this.registerEditorExtension(extension),
       registerObsidianProtocolHandler: (name, handler) => this.registerObsidianProtocolHandler(name, handler),
+      claimSurfingProtocol: !surfingLoaded,
       open: intent => this.openObsidianLink(intent),
+      preview: (anchor, intent) => this.linkHoverPreview.enter(anchor, intent.url),
+      leavePreview: anchor => this.linkHoverPreview.leave(anchor),
+      closePreview: () => this.linkHoverPreview.close(),
+    });
+    registerObsidianCanvasBrowserActions({
+      app: this.app,
+      register: dispose => this.register(dispose),
+      registerEvent: ref => this.registerEvent(ref),
+      openUrl: url => this.openObsidianLink({ url, source: "canvas", external: false }),
     });
     this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
       if (file instanceof TFile && ["html", "htm"].includes(file.extension)) {

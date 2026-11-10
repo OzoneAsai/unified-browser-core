@@ -15,6 +15,12 @@ try {
     bundle: true, platform: "node", format: "esm", target: "node22", outfile: linkPolicyBundle,
   });
   await import(pathToFileURL(linkPolicyBundle).href);
+  const linkRouterBundle = join(dir, "obsidian-link-router.mjs");
+  await esbuild.build({
+    entryPoints: ["tests/obsidian-link-router-smoke.ts"],
+    bundle: true, platform: "node", format: "esm", target: "node22", outfile: linkRouterBundle,
+  });
+  await import(pathToFileURL(linkRouterBundle).href);
   await esbuild.build({
     entryPoints: ["tests/core-smoke.ts"],
     bundle: true,
