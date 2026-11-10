@@ -61,6 +61,7 @@ import { promptText } from "./text-prompt";
 import { permissionDecisionLabel, permissionLabel } from "./permission-label";
 import { fallbackFaviconUrl, renderBookmarkVisual } from "./bookmark-visual";
 import { resolveBookmarkUrl } from "../bookmarks/bookmark-url";
+import { selectionNoteContent, webTextFragmentUrl } from "../integrations/obsidian-web-transfer";
 import { dismissOpenMenus, showDismissibleMenu, trackDismissibleMenu } from "./popup-dismissal";
 import type { HistoryVersionSummary } from "../persistence/hybrid-persistence";
 
@@ -494,6 +495,46 @@ export class BrowserView extends ItemView {
     } catch (error) {
       console.warn("Unified Browser Core: page clipping failed", error);
       new Notice(t("Could not save page as Markdown"));
+    }
+  }
+
+  async copySelectionHighlightUrl(selected?: string): Promise<boolean> {
+    const url = this.currentUrlValue;
+    let text = selected?.trim();
+    if (!text) text = (await this.readyWebview()?.executeJavaScript?.<string>(
+      "window.getSelection()?.toString() || ''",
+    ))?.trim();
+    const link = webTextFragmentUrl(url, text ?? "");
+    if (!link) { new Notice(t("Select text on an HTTP(S) page to copy its highlight link.")); return false; }
+    await navigator.clipboard.writeText(link);
+    new Notice(t("Highlight link copied"));
+    return true;
+  }
+
+  async saveSelectionAsMarkdown(selected?: string): Promise<boolean> {
+    const url = this.currentUrlValue;
+    let text = selected?.trim();
+    if (!text) text = (await this.readyWebview()?.executeJavaScript?.<string>(
+      "window.getSelection()?.toString() || ''",
+    ))?.trim();
+    if (!text) { new Notice(t("Select web page text to create a note.")); return false; }
+    try {
+      const { baseName, markdown } = selectionNoteContent({
+        text, title: this.currentTitle || url, url,
+      });
+      const vault = this.plugin.app.vault;
+      const folder = "Web Clippings";
+      if (!vault.getAbstractFileByPath(folder)) await vault.createFolder(folder);
+      let path = `${folder}/${baseName}.md`;
+      for (let count = 2; vault.getAbstractFileByPath(path); count++) path = `${folder}/${baseName} (${count}).md`;
+      const file = await vault.create(path, markdown);
+      await this.plugin.app.workspace.openLinkText(file.path, "", true);
+      new Notice(t("Selected text saved as a Markdown note"));
+      return true;
+    } catch (error) {
+      console.warn("Unified Browser Core: selection clipping failed", error);
+      new Notice(t("Could not save selected text"));
+      return false;
     }
   }
 

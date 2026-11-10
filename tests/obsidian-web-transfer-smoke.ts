@@ -1,0 +1,13 @@
+import assert from "node:assert/strict";
+import { webTextFragmentUrl, formatBrowserTabsMarkdown, selectionNoteContent } from "../src/integrations/obsidian-web-transfer";
+assert.equal(webTextFragmentUrl("https://example.org/hello#section", "hello world"), "https://example.org/hello#section:~:text=hello%20world");
+assert.equal(webTextFragmentUrl("https://example.org/", "日本語 検証"), "https://example.org/#:~:text=%E6%97%A5%E6%9C%AC%E8%AA%9E%20%E6%A4%9C%E8%A8%BC");
+assert.equal(webTextFragmentUrl("javascript:alert(1)", "test"), null);
+assert.equal(webTextFragmentUrl("https://example.org", "  "), null);
+assert.deepEqual(formatBrowserTabsMarkdown([{ title: "Title [1]", url: "https://example.org" }, { title: "Home", url: "browser://home" }]), "- [Title \\[1\\]](<https://example.org>)");
+const note = selectionNoteContent({ text: "one\ntwo", title: "Clip: <live>", url: "https://example.org" });
+assert.match(note.markdown, /source: "https:\/\/example.org"/);
+assert.match(note.markdown, /> one\n> two/);
+assert.equal(note.baseName, "Clip- -live-");
+assert.throws(() => selectionNoteContent({ text: "", title: "x", url: "https://example.org" }));
+console.log("Web to Vault selection/fragment/tab Markdown transfer passed");

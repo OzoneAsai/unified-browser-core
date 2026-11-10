@@ -1,4 +1,4 @@
-import { Menu, Notice, Plugin, TFile, getLanguage, type App, type WorkspaceLeaf } from "obsidian";
+import { Menu, Notice, Plugin, TFile, MarkdownView, getLanguage, type App, type WorkspaceLeaf } from "obsidian";
 import { ElectronPermissionAdapter } from "./adapters/electron-permissions";
 import { ElectronSessionDataAdapter } from "./adapters/electron-session-data";
 import { ElectronWindowOpenAdapter } from "./adapters/electron-window-open";
@@ -15,6 +15,8 @@ import { ObsidianHoverPreview } from "./ui/obsidian-hover-preview";
 import { UbcHtmlFileView, UBC_HTML_FILE_VIEW } from "./ui/html-file-view";
 import { registerObsidianLinkBridge, type ObsidianBrowserLinkIntent } from "./integrations/obsidian-link-router";
 import { registerObsidianCanvasBrowserActions } from "./integrations/obsidian-canvas";
+import { formatBrowserTabsMarkdown } from "./integrations/obsidian-web-transfer";
+import { ObsidianVaultBookmarkMirror } from "./integrations/obsidian-vault-bookmark-mirror";
 import { ObsidianBookmarksAdapter } from "./adapters/obsidian-bookmarks";
 import { WebViewerBookmarksAdapter } from "./adapters/webviewer-bookmarks";
 import { SurfingMigrationAdapter, normalizeSurfingBookmarks, surfingFolderPaths, surfingSearchTemplate } from "./adapters/surfing-migration";
@@ -80,6 +82,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
   readonly commandAdapter = new ObsidianCommandAdapter();
   homeAdapter!: ObsidianHomeAdapter;
   bookmarksAdapter!: ObsidianBookmarksAdapter;
+  vaultBookmarkMirror!: ObsidianVaultBookmarkMirror;
   surfingMigrationAdapter!: SurfingMigrationAdapter;
   webViewerBookmarksAdapter!: WebViewerBookmarksAdapter;
   private persistence!: HybridBrowserPersistence;
@@ -191,6 +194,10 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       { save: async (next) => this.persistence.save(next) },
       persistenceScope,
     );
+    this.vaultBookmarkMirror = new ObsidianVaultBookmarkMirror(this.app, this.core,
+      () => this.refreshBrowserViews(), this);
+    void this.vaultBookmarkMirror.initialize().catch(error =>
+      console.warn("Unified Browser Core: Vault bookmark sync initialization failed", error));
     if ((raw?.version ?? 0) !== state.version) this.core.scheduleSave();
     this.previousSessionCheckpoint = cloneSessionCheckpoint(this.core.state.sessionCheckpoint);
     this.api = new BrowserPublicApi(
@@ -315,6 +322,15 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       callback: () => void this.importObsidianBookmarks(),
     });
     this.addCommand({
+      id: "toggle-vault-bookmark-sync",
+      name: t("Toggle two-way Vault bookmark sync"),
+      callback: () => void this.vaultBookmarkMirror.setEnabled(!this.vaultBookmarkMirror.enabled)
+        .then(() => new Notice(this.vaultBookmarkMirror.enabled
+          ? t("Vault bookmark sync enabled · UBC Bookmarks")
+          : t("Vault bookmark sync disabled")))
+        .catch(error => { console.warn("Unified Browser Core: failed to toggle Vault sync", error); new Notice(t("Could not change Vault bookmark sync")); }),
+    });
+    this.addCommand({
       id: "import-webviewer-bookmarks",
       name: t("Import bookmarks from Web viewer Bookmarks"),
       callback: () => void this.importWebViewerBookmarks(),
@@ -337,6 +353,55 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       id: "search-browser-tabs",
       name: t("Search browser tabs"),
       callback: () => this.openBrowserTabSearch(),
+    });
+    this.addCommand({
+      id: "copy-browser-tabs-as-markdown",
+      name: t("Copy browser tabs as Markdown links"),
+      callback: () => {
+        const text = formatBrowserTabsMarkdown(this.api.tabs());
+        if (!text) { new Notice(t("No web tabs to copy")); return; }
+        void navigator.clipboard.writeText(text).then(() => new Notice(t("Browser tab links copied")));
+      },
+    });
+    for (const engine of [
+      { id: "default", name: "default engine", template: "" },
+      { id: "google", name: "Google", template: "https://www.google.com/search?q=" },
+      { id: "duckduckgo", name: "DuckDuckGo", template: "https://duckduckgo.com/?q=" },
+      { id: "bing", name: "Bing", template: "https://www.bing.com/search?q=" },
+    ]) {
+      this.addCommand({
+        id: `search-editor-selection-${engine.id}`,
+        name: t(`Search selected note text with ${engine.name}`),
+        editorCheckCallback: (checking, editor) => {
+          const selection = editor.getSelection().trim();
+          if (!selection) return false;
+          if (!checking) {
+            const url = engine.template ? engine.template + encodeURIComponent(selection) : this.core.searchUrl(selection);
+            void this.openBrowser({ url });
+          }
+          return true;
+        },
+      });
+    }
+    this.addCommand({
+      id: "save-web-selection-as-note",
+      name: t("Save browser selection as Markdown note"),
+      checkCallback: checking => {
+        const view = this.activeBrowserView();
+        if (!view || !/^https?:\/\//i.test(view.currentUrl())) return false;
+        if (!checking) void view.saveSelectionAsMarkdown();
+        return true;
+      },
+    });
+    this.addCommand({
+      id: "copy-web-highlight-link",
+      name: t("Copy browser selection as highlight link"),
+      checkCallback: checking => {
+        const view = this.activeBrowserView();
+        if (!view || !/^https?:\/\//i.test(view.currentUrl())) return false;
+        if (!checking) void view.copySelectionHighlightUrl();
+        return true;
+      },
     });
     this.addCommand({
       id: "next-browser-tab",

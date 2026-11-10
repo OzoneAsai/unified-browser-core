@@ -10,6 +10,8 @@ import type {
 } from "../core/model";
 
 export interface BookmarkInput {
+  /** Stable ID for a bookmark restored from an owned Vault mirror record. */
+  id?: string;
   title: string;
   url: string;
   parentId?: BookmarkFolderId | null;
@@ -73,7 +75,7 @@ export class BookmarkStore {
     }
     const siblings = this.children(input.parentId ?? null);
     const bookmark: BookmarkEntry = {
-      id: createId("bookmark"),
+      id: input.id && !this.state.bookmarks[input.id] ? input.id : createId("bookmark"),
       kind: "bookmark",
       parentId: input.parentId ?? null,
       title: input.title || input.url,

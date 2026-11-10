@@ -115,6 +115,12 @@ export class BrowserCore {
       formRecoveryPolicies: raw?.formRecoveryPolicies ?? {},
       sessionCheckpoint: raw?.sessionCheckpoint ?? { capturedAt: 0, leaves: [] },
       surfingMigration: raw?.surfingMigration,
+      vaultBookmarkMirror: {
+        enabled: raw?.vaultBookmarkMirror?.enabled === true,
+        publishedIds: Array.isArray(raw?.vaultBookmarkMirror?.publishedIds)
+          ? raw.vaultBookmarkMirror.publishedIds.filter((id): id is string => typeof id === "string")
+          : [],
+      },
     };
   }
 

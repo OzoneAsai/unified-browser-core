@@ -255,6 +255,10 @@ export interface BrowserCoreState {
   formRecoveryPolicies: Record<string, FormRecoveryPolicy>;
   sessionCheckpoint: BrowserSessionCheckpoint;
   surfingMigration?: SurfingMigrationRecord;
+  vaultBookmarkMirror: {
+    enabled: boolean;
+    publishedIds: string[];
+  };
 }
 
 export interface SurfingMigrationRecord {

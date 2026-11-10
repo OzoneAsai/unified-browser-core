@@ -363,7 +363,7 @@ const selectedTextMenuEntries = buildWebContentMenuEntries(
   },
 );
 const selectedTextTitles = selectedTextMenuEntries.flatMap((entry) => entry.kind === "item" ? [entry.title] : []);
-assert.deepEqual(selectedTextTitles, ["Search “selected prose”", "Copy selected text"]);
+assert.deepEqual(selectedTextTitles, ["Search “selected prose”", "Copy selected text", "Save selection as Markdown note", "Copy link to highlighted text"]);
 
 const editableSelectionMenuEntries = buildWebContentMenuEntries(
   {

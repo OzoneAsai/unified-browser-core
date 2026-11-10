@@ -39,6 +39,8 @@ export function showPageMenu(plugin: UnifiedBrowserCorePlugin, view: BrowserView
   menu.addItem((item) => item.setTitle(t("Find in page")).setIcon("search").onClick(() => view.openFindInPage()));
   menu.addItem((item) => item.setTitle(t("Copy viewport as image")).setIcon("image").onClick(() => void view.copyViewportImage()));
   menu.addItem((item) => item.setTitle(t("Save page as Markdown")).setIcon("file-text").onClick(() => void view.savePageAsMarkdown()));
+  menu.addItem((item) => item.setTitle(t("Save selection as Markdown note")).setIcon("file-plus").onClick(() => void view.saveSelectionAsMarkdown()));
+  menu.addItem((item) => item.setTitle(t("Copy link to highlighted text")).setIcon("link").onClick(() => void view.copySelectionHighlightUrl()));
   menu.addItem((item) => item.setTitle(t("Open page in external browser")).setIcon("globe").onClick(() => view.openInExternalBrowser()));
   menu.addItem((item) =>
     item

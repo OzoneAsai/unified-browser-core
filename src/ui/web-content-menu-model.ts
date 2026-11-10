@@ -75,6 +75,8 @@ export function buildWebContentMenuEntries(
     const shown = selection.slice(0, 40) + (selection.length > 40 ? "…" : "");
     add(t("Search “{query}”", { query: shown }), () => void plugin.openBrowser({ url: plugin.core.searchUrl(selection) }), { icon: "search" });
     add("Copy selected text", () => void navigator.clipboard.writeText(selection), { icon: "copy" });
+    add("Save selection as Markdown note", () => void view.saveSelectionAsMarkdown(selection), { icon: "file-plus" });
+    add("Copy link to highlighted text", () => void view.copySelectionHighlightUrl(selection), { icon: "link" });
     separator();
   }
 
