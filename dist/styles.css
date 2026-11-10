@@ -420,6 +420,58 @@
   display: none;
 }
 
+/* Surfing-parity find controls remain above Chromium's native surface. */
+.ubc-find-bar {
+  position: absolute;
+  z-index: 40;
+  inset: 12px 12px auto auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  box-shadow: var(--shadow-l, 0 6px 24px #0004);
+  max-width: calc(100% - 20px);
+  font-size: var(--font-ui-small);
+}
+.ubc-find-bar.is-hidden { display: none; }
+.ubc-find-input {
+  min-width: 90px;
+  width: min(240px, 32vw);
+  max-width: 100%;
+  padding: 5px 8px;
+  color: var(--text-normal);
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+}
+.ubc-find-results { min-width: 46px; white-space: nowrap; text-align: center; color: var(--text-muted); }
+.ubc-find-button { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 26px; height: 28px; }
+.ubc-find-button:disabled { opacity: .4; }
+
+.ubc-link-hover-status {
+  position: absolute;
+  z-index: 24;
+  left: 0;
+  bottom: 0;
+  max-width: min(650px, 90%);
+  padding: 4px 9px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 0 6px 0 0;
+  color: var(--text-normal);
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s, 0 3px 12px #0003);
+  font-size: var(--font-ui-smaller);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.ubc-link-hover-status.is-hidden { display: none; }
+
 .ubc-internal-layer {
   overflow: auto;
 }
@@ -561,6 +613,25 @@
   padding: 28px clamp(18px, 5vw, 54px) 80px;
 }
 
+/* The host theme owns colors, but Browser Core owns its internal reading hierarchy.
+   Scope these rules to internal surfaces; never change normal Markdown or web pages. */
+.ubc-browser-view .ubc-surface :is(h1, h2, h3, h4) {
+  text-transform: none;
+  letter-spacing: normal;
+  text-shadow: none;
+  overflow-wrap: anywhere;
+}
+.ubc-browser-view .ubc-surface :is(input:not([type="checkbox"]):not([type="radio"]), select, textarea) {
+  color: var(--text-normal);
+  background-color: var(--background-primary);
+  caret-color: var(--text-normal);
+}
+.ubc-browser-view .ubc-surface :is(input, textarea)::placeholder { color: var(--text-muted); opacity: 1; }
+.ubc-browser-view .ubc-surface :is(input, select, textarea):focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
+}
+
 .ubc-home {
   padding-top: 11vh;
 }
@@ -597,6 +668,9 @@
   background: var(--interactive-accent);
   color: var(--text-on-accent);
 }
+
+/* The unavailable Omnisearch mode must not occupy space or receive focus. */
+.ubc-home-search-modes button.is-hidden { display: none; }
 
 .ubc-home-search-results {
   width: min(100%, 760px);
@@ -1167,6 +1241,49 @@
 .ubc-home .ubc-card-subtitle { display: block; width: 100%; flex-shrink: 0; }
 .ubc-home-search-modes { display: flex; width: fit-content; }
 .ubc-home input.ubc-home-search { display: block; max-width: 100%; }
+.ubc-home-title { display: flex; align-items: center; gap: .35em; overflow-wrap: anywhere; }
+.ubc-home-title-icon { display: inline-flex; flex: none; align-items: center; }
+.ubc-home-title-icon svg, .ubc-home-title-icon img { width: 1em; height: 1em; object-fit: contain; }
+.ubc-home-bookmark-icon { display: inline-flex; margin-right: 8px; }
+.ubc-home-bookmark-icon svg { width: 1.15em; height: 1.15em; }
+.ubc-home-search-widget { width: min(100%, 760px); margin: 0 auto 16px; }
+.ubc-home-search-row { display: flex; align-items: center; gap: 6px; width: 100%; }
+.ubc-home-search-row input.ubc-home-search { margin: 10px 0 7px; flex: 1; min-width: 0; max-width: none; }
+.ubc-home-search-filter { flex: none; border-radius: 6px; font-size: var(--font-ui-smaller); }
+.ubc-home-search-filter.is-hidden { display: none; }
+.ubc-home-shortcuts { color: var(--text-muted); font-size: var(--font-ui-smaller); margin-bottom: 10px; }
+.ubc-home-shortcuts.is-hidden { display: none; }
+.ubc-home-result {
+  display: flex; align-items: center; justify-content: flex-start; gap: 10px;
+  text-align: left; width: 100%; padding: 7px 12px; margin: 2px 0;
+  min-height: 45px; height: auto; border: 0; border-radius: 8px;
+  background: transparent; box-shadow: none; color: var(--text-normal);
+  white-space: normal; overflow-wrap: anywhere; cursor: pointer;
+}
+.ubc-home-result:hover, .ubc-home-result.is-selected { background: var(--background-modifier-hover); }
+.ubc-home-accent-selection .ubc-home-result.is-selected { background: var(--interactive-accent); color: var(--text-on-accent); }
+.ubc-home-accent-selection .ubc-home-result.is-selected .ubc-card-subtitle { color: var(--text-on-accent); opacity: .82; }
+.ubc-home-result:focus-visible, .ubc-home-create:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.ubc-home-result-icon { flex: none; display: inline-flex; padding-top: 2px; }
+.ubc-home-result-icon svg { width: 18px; height: 18px; }
+.ubc-home-result-info {
+  flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
+  align-items: stretch; gap: 2px; text-align: left;
+}
+.ubc-home-result-name { font-weight: 600; line-height: 1.3; text-align: left; }
+.ubc-home-result-info .ubc-card-subtitle {
+  display: block; max-width: 100%; margin-top: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted);
+  font-weight: 400; font-size: var(--font-ui-smaller); text-align: left;
+}
+.ubc-home-create { width: 100%; text-align: left; margin: 8px 0; }
+.ubc-home-icon-choice { display: flex; align-items: center; gap: 10px; }
+.ubc-home-icon-choice svg { width: 18px; height: 18px; }
+.ubc-home-embedded { margin: 20px 0; padding: 12px 10px; border-radius: 12px; background: var(--background-secondary); }
+.ubc-home-embedded .ubc-home-search-widget { margin: 0 auto; }
+.ubc-home-embedded .ubc-home-search-modes { margin-top: 0; }
+.ubc-home-embedded-files { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 18px; }
+.ubc-home-embedded-files > button { max-width: min(100%, 220px); overflow-wrap: anywhere; height: auto; min-height: 34px; white-space: normal; }
 .ubc-address-wrapper { position: relative; flex: 1; min-width: 80px; }
 .ubc-address-wrapper .ubc-address { width: 100%; }
 .ubc-address-suggestions {
@@ -1191,3 +1308,120 @@
 .ubc-password-card > div { margin-top: 6px; }
 .ubc-password-note { color: var(--text-muted); font-size: var(--font-ui-small); overflow-wrap: anywhere; }
 .ubc-password-popover { position: fixed; z-index: 10001; display: flex; flex-direction: column; gap: 10px; width: min(360px, calc(100vw - 24px)); max-height: min(500px, 70vh); overflow: auto; padding: 20px; border: 1px solid var(--background-modifier-border); border-radius: 14px; background: var(--background-primary); box-shadow: var(--shadow-l); }
+
+
+/* Structured bookmark hierarchy: populated items remain visible, empty folders
+   live in an accessible, optionally expanded management group. */
+.ubc-bookmark-empty-folders {
+  margin-top: 12px;
+  padding: 0 8px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+.ubc-bookmark-empty-folders > summary {
+  cursor: pointer;
+  padding: 12px 4px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  text-align: left;
+}
+.ubc-bookmark-empty-folders > summary:focus-visible { outline: 2px solid var(--interactive-accent); }
+.ubc-browser-view button.ubc-bookmark-folder-title {
+  flex: 0 1 auto;
+  text-align: left;
+}
+.ubc-bookmark-row .ubc-bookmark-count { margin-right: auto; }
+.ubc-bookmark-manage-toggle {
+  flex: 0 0 auto;
+  min-height: 38px;
+}
+.ubc-bookmark-manage-toggle[aria-pressed="true"] {
+  background-color: var(--background-secondary);
+  border: 1px solid var(--interactive-accent);
+}
+
+/* Persistent section navigation is derived from actual Setting headings, not
+   from a second hardcoded list of settings categories. */
+.ubc-settings-section-nav {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 10px 2px 12px;
+  margin: 0 0 16px;
+  background: var(--background-primary);
+  border-bottom: 1px solid var(--background-modifier-border);
+  scrollbar-width: thin;
+}
+.ubc-settings-section-nav button {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 5px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  white-space: nowrap;
+}
+.ubc-settings-section-nav button:focus-visible { outline: 2px solid var(--interactive-accent); }
+.ubc-settings-section-target { scroll-margin-top: 78px; }
+/* Embedded web browsing in Markdown, hover previews, and Canvas shares a
+ * managed guest. No duplicate browser chrome or workspace leaf is created. */
+.ubc-embedded-browser {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  min-height: 280px;
+  height: clamp(300px, 48vh, 610px);
+  overflow: hidden;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 8px);
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+.ubc-embedded-browser-bar {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 9px;
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.ubc-embedded-browser-address { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-ui-smaller); }
+.ubc-embedded-browser-status { color: var(--text-muted); white-space: nowrap; font-size: var(--font-ui-smaller); }
+.ubc-embedded-browser-bar button { color: var(--text-normal); border: none; background: transparent; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 28px; height: 26px; cursor: pointer; border-radius: 5px; }
+.ubc-embedded-browser-bar button:hover { background: var(--background-modifier-hover); }
+.ubc-embedded-browser > webview { flex: 1; min-height: 0; width: 100%; }
+.ubc-embed-error { padding: 12px; border: 1px solid var(--background-modifier-error); border-radius: 8px; color: var(--text-error); }
+.ubc-hover-preview { position: fixed; z-index: var(--layer-popover, 130); background: var(--background-primary); border: 1px solid var(--background-modifier-border); box-shadow: 0 12px 35px #0005; border-radius: 10px; overflow: hidden; }
+.ubc-hover-preview .ubc-embedded-browser { height: 100%; min-height: 0; border: 0; }
+
+/* Obsidian Workspace-owned tab tree. BrowserCore remains the tab registry. */
+.ubc-tab-tree { padding: 12px 8px; display: grid; align-content: start; gap: 6px; }
+.ubc-tab-tree-header { display: flex; align-items: center; gap: 5px; padding: 0 6px 6px; }
+.ubc-tab-tree-header h3 { font-size: var(--font-ui-medium); font-weight: var(--font-semibold); margin: 0 auto 0 0; }
+.ubc-tab-tree-header button { min-width: 26px; min-height: 26px; }
+.ubc-tab-tree-group, .ubc-tab-tree-ungrouped { display: grid; align-content: start; min-width: 0; }
+.ubc-tab-tree-group-header { display: flex; gap: 6px; align-items: center; min-width: 0; text-align: left; padding: 6px 8px; border-radius: var(--radius-s); color: var(--text-muted); font-size: var(--font-ui-small); }
+.ubc-tab-tree-group-header:hover { background: var(--background-modifier-hover); }
+.ubc-tab-tree-count { margin-left: auto; font-variant-numeric: tabular-nums; }
+.ubc-tab-tree-entry { display: flex; align-items: center; min-width: 0; gap: 8px; padding: 4px 8px 4px 20px; border-radius: var(--radius-s); }
+.ubc-tab-tree-entry:hover, .ubc-tab-tree-entry.is-active { background: var(--background-modifier-hover); }
+.ubc-tab-tree-icon { color: var(--text-muted); flex-shrink: 0; }
+.ubc-tab-tree-label { display: flex; flex: 1; flex-direction: column; gap: 2px; align-items: start; min-width: 0; padding: 2px 0; background: transparent; border: none; box-shadow: none; text-align: left; font-size: var(--font-ui-small); }
+.ubc-tab-tree-label span { display: block; max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.ubc-tab-tree-url { font-size: var(--font-smallest); color: var(--text-faint); }
+.ubc-tab-tree-empty { padding: 16px 8px; color: var(--text-muted); font-size: var(--font-ui-small); }
+.ubc-obsidian-empty-search { display: flex; align-items: center; gap: 8px; width: min(100%, 460px); margin: 18px auto 4px; padding: 6px 12px; background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); }
+.ubc-obsidian-empty-search:focus-within { border-color: var(--interactive-accent); }
+.ubc-obsidian-empty-search-icon { color: var(--text-muted); }
+.ubc-obsidian-empty-search input { min-width: 0; flex: 1; border: 0; box-shadow: none; background: transparent; }
+.ubc-markdown-header-search { width: min(280px, 46vw); flex-shrink: 1; min-width: 100px; margin: 0 8px; padding: 4px 8px; }
+.ubc-drag-markdown-link { cursor: grab; flex: 0 0 auto; }
+.ubc-drag-markdown-link:active { cursor: grabbing; }
+.canvas-node .ubc-canvas-browser-action { position: absolute; z-index: 6; top: 7px; right: 7px; width: 30px; height: 28px; border: 1px solid var(--background-modifier-border); border-radius: 6px; color: var(--text-normal); background: var(--background-primary); opacity: .7; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.canvas-node:hover .ubc-canvas-browser-action, .canvas-node:focus-within .ubc-canvas-browser-action { opacity: 1; }

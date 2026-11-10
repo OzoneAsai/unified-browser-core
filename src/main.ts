@@ -1,14 +1,25 @@
-import { Menu, Notice, Plugin, getLanguage, type App, type WorkspaceLeaf } from "obsidian";
+import { Menu, Notice, Plugin, TFile, MarkdownView, getLanguage, type App, type WorkspaceLeaf } from "obsidian";
 import { ElectronPermissionAdapter } from "./adapters/electron-permissions";
 import { ElectronSessionDataAdapter } from "./adapters/electron-session-data";
 import { ElectronWindowOpenAdapter } from "./adapters/electron-window-open";
 import { ElectronContextMenuAdapter } from "./adapters/electron-context-menu";
 import { ManagedWebviewBackend } from "./adapters/managed-webview-backend";
+import { isExternalAppLink } from "./navigation/external-app-link";
 import { ObsidianTabStripAdapter } from "./adapters/obsidian-tab-strip";
 import { ObsidianSettingsAdapter } from "./adapters/obsidian-settings";
 import { ObsidianHomeAdapter } from "./adapters/obsidian-home";
 import { HomeIconPicker } from "./ui/home-icon-picker";
 import { EmbeddedHomeSearch } from "./ui/home-search-embed";
+import { addEmbeddedBrowser } from "./ui/embedded-browser";
+import { ObsidianHoverPreview } from "./ui/obsidian-hover-preview";
+import { UbcHtmlFileView, UBC_HTML_FILE_VIEW } from "./ui/html-file-view";
+import { registerObsidianLinkBridge, type ObsidianBrowserLinkIntent } from "./integrations/obsidian-link-router";
+import { registerObsidianCanvasBrowserActions } from "./integrations/obsidian-canvas";
+import { formatBrowserTabsMarkdown } from "./integrations/obsidian-web-transfer";
+import { ObsidianVaultBookmarkMirror } from "./integrations/obsidian-vault-bookmark-mirror";
+import { ObsidianBrowserTreeView, BROWSER_TREE_VIEW_TYPE } from "./ui/obsidian-browser-tree-view";
+import { registerObsidianSearchSurfaces } from "./integrations/obsidian-search-surfaces";
+import { normalizeBrowserAddress } from "./navigation/address-normalizer";
 import { ObsidianBookmarksAdapter } from "./adapters/obsidian-bookmarks";
 import { WebViewerBookmarksAdapter } from "./adapters/webviewer-bookmarks";
 import { SurfingMigrationAdapter, normalizeSurfingBookmarks, surfingFolderPaths, surfingSearchTemplate } from "./adapters/surfing-migration";
@@ -48,6 +59,7 @@ import type { WebviewElement } from "./ui/webview-types";
 import { PasswordVault } from "./passwords/vault";
 import { FileSystemAdapter } from "obsidian";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { resolveElectronRemote } from "./adapters/electron-compat";
 
 export interface BrowserOpenRequest {
@@ -73,9 +85,11 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
   readonly commandAdapter = new ObsidianCommandAdapter();
   homeAdapter!: ObsidianHomeAdapter;
   bookmarksAdapter!: ObsidianBookmarksAdapter;
+  vaultBookmarkMirror!: ObsidianVaultBookmarkMirror;
   surfingMigrationAdapter!: SurfingMigrationAdapter;
   webViewerBookmarksAdapter!: WebViewerBookmarksAdapter;
   private persistence!: HybridBrowserPersistence;
+  private linkHoverPreview!: ObsidianHoverPreview;
   private unloading = false;
   private sessionCheckpointTimer: number | undefined;
   private initialSessionReconcileTimer: number | undefined;
@@ -142,6 +156,22 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     this.registerMarkdownCodeBlockProcessor("ubc-search-bar", (source, el, ctx) => {
       ctx.addChild(new EmbeddedHomeSearch(el, this, source));
     });
+    // Legacy Surfing names are a shared namespace. Claim them only when
+    // Surfing itself is not loaded, rather than overriding a second plugin's
+    // fenced-code renderer and obsidian://web-open handler on startup.
+    const surfingLoaded = Boolean((this.app as App & {
+      plugins?: { plugins?: Record<string, unknown> };
+    }).plugins?.plugins?.surfing);
+    if (!surfingLoaded) {
+      this.registerMarkdownCodeBlockProcessor("surfing", (source, el, ctx) => {
+        const browser = addEmbeddedBrowser(el, this, source);
+        if (browser) ctx.addChild(browser);
+      });
+    }
+    this.registerMarkdownCodeBlockProcessor("ubc-browser", (source, el, ctx) => {
+      const browser = addEmbeddedBrowser(el, this, source);
+      if (browser) ctx.addChild(browser);
+    });
     this.bookmarksAdapter = new ObsidianBookmarksAdapter(this.app);
     this.webViewerBookmarksAdapter = new WebViewerBookmarksAdapter(this.app);
     this.surfingMigrationAdapter = new SurfingMigrationAdapter(this.app);
@@ -167,6 +197,10 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       { save: async (next) => this.persistence.save(next) },
       persistenceScope,
     );
+    this.vaultBookmarkMirror = new ObsidianVaultBookmarkMirror(this.app, this.core,
+      () => this.refreshBrowserViews(), this);
+    void this.vaultBookmarkMirror.initialize().catch(error =>
+      console.warn("Unified Browser Core: Vault bookmark sync initialization failed", error));
     if ((raw?.version ?? 0) !== state.version) this.core.scheduleSave();
     this.previousSessionCheckpoint = cloneSessionCheckpoint(this.core.state.sessionCheckpoint);
     this.api = new BrowserPublicApi(
@@ -225,6 +259,45 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     }, 15_000));
 
     this.registerView(BROWSER_VIEW_TYPE, (leaf) => new BrowserView(leaf, this));
+    this.registerView(BROWSER_TREE_VIEW_TYPE, (leaf) => new ObsidianBrowserTreeView(leaf, this));
+    this.registerView(UBC_HTML_FILE_VIEW, leaf => new UbcHtmlFileView(leaf, this));
+    this.linkHoverPreview = new ObsidianHoverPreview(this);
+    this.register(() => this.linkHoverPreview.close());
+    try {
+      this.registerExtensions(["html", "htm"], UBC_HTML_FILE_VIEW);
+    } catch {
+      // Another plugin may own HTML. The explicit file-menu action remains available.
+      console.info("Unified Browser Core: HTML extension is owned by another view; manual open remains available.");
+    }
+    registerObsidianLinkBridge({
+      app: this.app,
+      register: dispose => this.register(dispose),
+      registerEvent: ref => this.registerEvent(ref),
+      registerObsidianProtocolHandler: (name, handler) => this.registerObsidianProtocolHandler(name, handler),
+      claimSurfingProtocol: !surfingLoaded,
+      open: intent => this.openObsidianLink(intent),
+      preview: (anchor, intent) => this.linkHoverPreview.enter(anchor, intent.url),
+      leavePreview: anchor => this.linkHoverPreview.leave(anchor),
+      closePreview: () => this.linkHoverPreview.close(),
+    });
+    registerObsidianCanvasBrowserActions({
+      app: this.app,
+      register: dispose => this.register(dispose),
+      registerEvent: ref => this.registerEvent(ref),
+      openUrl: url => this.openObsidianLink({ url, source: "canvas", external: false }),
+    });
+    registerObsidianSearchSurfaces({
+      app: this.app, core: this.core,
+      openBrowser: request => this.openBrowser(request),
+      registerEvent: ref => this.registerEvent(ref),
+      register: callback => this.register(callback),
+    });
+    this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
+      if (file instanceof TFile && ["html", "htm"].includes(file.extension)) {
+        menu.addItem(item => item.setTitle(t("Open HTML in UBC")).setIcon("globe")
+          .onClick(() => void this.openHtmlFileInBrowser(file)));
+      }
+    }));
     this.addSettingTab(new BrowserSettingTab(this.app, this));
     this.addRibbonIcon("globe", t("Open browser"), () => this.openBrowser());
 
@@ -259,6 +332,15 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       callback: () => void this.importObsidianBookmarks(),
     });
     this.addCommand({
+      id: "toggle-vault-bookmark-sync",
+      name: t("Toggle two-way Vault bookmark sync"),
+      callback: () => void this.vaultBookmarkMirror.setEnabled(!this.vaultBookmarkMirror.enabled)
+        .then(() => new Notice(this.vaultBookmarkMirror.enabled
+          ? t("Vault bookmark sync enabled · UBC Bookmarks")
+          : t("Vault bookmark sync disabled")))
+        .catch(error => { console.warn("Unified Browser Core: failed to toggle Vault sync", error); new Notice(t("Could not change Vault bookmark sync")); }),
+    });
+    this.addCommand({
       id: "import-webviewer-bookmarks",
       name: t("Import bookmarks from Web viewer Bookmarks"),
       callback: () => void this.importWebViewerBookmarks(),
@@ -281,6 +363,86 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       id: "search-browser-tabs",
       name: t("Search browser tabs"),
       callback: () => this.openBrowserTabSearch(),
+    });
+    this.addCommand({
+      id: "open-browser-tab-tree",
+      name: t("Open browser tab tree sidebar"),
+      callback: () => void this.openBrowserTabTree(),
+    });
+    this.addCommand({
+      id: "search-in-markdown-header",
+      name: t("Search web from current note header"),
+      checkCallback: checking => {
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view) return false;
+        if (!checking) this.showMarkdownHeaderSearch(view);
+        return true;
+      },
+    });
+    this.addCommand({
+      id: "copy-browser-tabs-as-markdown",
+      name: t("Copy browser tabs as Markdown links"),
+      callback: () => {
+        const text = formatBrowserTabsMarkdown(this.api.tabs());
+        if (!text) { new Notice(t("No web tabs to copy")); return; }
+        void navigator.clipboard.writeText(text).then(() => new Notice(t("Browser tab links copied")));
+      },
+    });
+    for (const engine of [
+      { id: "default", name: "default engine", template: "" },
+      { id: "google", name: "Google", template: "https://www.google.com/search?q=" },
+      { id: "duckduckgo", name: "DuckDuckGo", template: "https://duckduckgo.com/?q=" },
+      { id: "bing", name: "Bing", template: "https://www.bing.com/search?q=" },
+    ]) {
+      this.addCommand({
+        id: `search-editor-selection-${engine.id}`,
+        name: t(`Search selected note text with ${engine.name}`),
+        editorCheckCallback: (checking, editor) => {
+          const selection = editor.getSelection().trim();
+          if (!selection) return false;
+          if (!checking) {
+            const url = engine.template ? engine.template + encodeURIComponent(selection) : this.core.searchUrl(selection);
+            void this.openBrowser({ url });
+          }
+          return true;
+        },
+      });
+    }
+    this.addCommand({
+      id: "save-web-selection-as-note",
+      name: t("Save browser selection as Markdown note"),
+      checkCallback: checking => {
+        const view = this.activeBrowserView();
+        if (!view || !/^https?:\/\//i.test(view.currentUrl())) return false;
+        if (!checking) void view.saveSelectionAsMarkdown();
+        return true;
+      },
+    });
+    this.addCommand({
+      id: "copy-web-highlight-link",
+      name: t("Copy browser selection as highlight link"),
+      checkCallback: checking => {
+        const view = this.activeBrowserView();
+        if (!view || !/^https?:\/\//i.test(view.currentUrl())) return false;
+        if (!checking) void view.copySelectionHighlightUrl();
+        return true;
+      },
+    });
+    this.addCommand({
+      id: "insert-browser-video-timestamp",
+      name: t("Insert browser video timestamp into note"),
+      editorCallback: async editor => {
+        const view = this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE)
+          .sort((a, b) => {
+            const touched = (leaf: WorkspaceLeaf) => leaf.view instanceof BrowserView
+              ? this.core.state.history.leaves[leaf.view.lifecycleIdentity()]?.lastActiveAt ?? 0 : 0;
+            return touched(b) - touched(a);
+          })
+          .find(leaf => leaf.view instanceof BrowserView)?.view as BrowserView | undefined;
+        const timestamp = await view?.currentVideoTimestampLink();
+        if (!timestamp) { new Notice(t("No playable video position found in an open browser tab.")); return; }
+        editor.replaceSelection(`[${timestamp.label}](<${timestamp.url}>)`);
+      },
     });
     this.addCommand({
       id: "next-browser-tab",
@@ -347,6 +509,16 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
         const view = this.activeBrowserView();
         if (!view) return false;
         if (!checking) view.focusAddressBar();
+        return true;
+      },
+    });
+    this.addCommand({
+      id: "browser-find-in-page",
+      name: t("Find in page"),
+      checkCallback: (checking) => {
+        const view = this.activeBrowserView();
+        if (!view || view.currentUrl().startsWith("browser://")) return false;
+        if (!checking) view.openFindInPage();
         return true;
       },
     });
@@ -670,18 +842,69 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     return leaf;
   }
 
+  async openBrowserTabTree(): Promise<void> {
+    const present = this.app.workspace.getLeavesOfType(BROWSER_TREE_VIEW_TYPE)[0];
+    if (present) { await this.app.workspace.revealLeaf(present); return; }
+    const leaf = this.app.workspace.getRightLeaf(true) ?? this.app.workspace.getLeaf("split");
+    await leaf.setViewState({ type: BROWSER_TREE_VIEW_TYPE, active: true });
+    await this.app.workspace.revealLeaf(leaf);
+  }
+
+  private showMarkdownHeaderSearch(view: MarkdownView): void {
+    const header = view.containerEl.querySelector<HTMLElement>(".view-header");
+    if (!header) { new Notice(t("Could not find the note header"));return; }
+    const previous = header.querySelector<HTMLInputElement>(".ubc-markdown-header-search");
+    if (previous) { previous.focus();previous.select();return; }
+    const input = header.createEl("input", { cls: "ubc-markdown-header-search", attr: {
+      type: "search", "aria-label": "Search web from note", placeholder: "Search web or URL",
+    } });
+    const remove = () => input.remove();
+    input.addEventListener("keydown", event => {
+      if (event.key === "Escape") { event.preventDefault();remove();return; }
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      const value = input.value.trim();
+      if (!value) { remove();return; }
+      const url = normalizeBrowserAddress(value, query => this.core.searchUrl(query));
+      remove();void this.openBrowser({ url });
+    });
+    input.addEventListener("blur", remove, { once: true });
+    input.focus();
+  }
+
   async openFromOpener(
     url: string,
     containerId: ContainerId,
     disposition: BrowserOpenDisposition,
   ): Promise<void> {
+    if (isExternalAppLink(url)) {
+      window.open(url, "_external");
+      return;
+    }
     await this.openBrowser({
       url,
       containerId,
       state: { siteAssignmentBypassReason: "opener" },
       reveal: disposition !== "background",
-      placement: disposition === "new-window" ? "window" : "tab",
+      placement: "tab",
     });
+  }
+
+  private openObsidianLink(intent: ObsidianBrowserLinkIntent): void {
+    if (intent.external) {
+      window.open(intent.url, "_external");
+      return;
+    }
+    void this.openBrowser({ url: intent.url }).catch(error => {
+      console.warn("Unified Browser Core: failed to open Obsidian link", error);
+      new Notice(t("Could not open web link"));
+    });
+  }
+
+  private async openHtmlFileInBrowser(file: TFile): Promise<void> {
+    const adapter = this.app.vault.adapter;
+    if (!(adapter instanceof FileSystemAdapter)) return;
+    await this.openBrowser({ url: pathToFileURL(join(adapter.getBasePath(), file.path)).href });
   }
 
   async restoreLeaf(

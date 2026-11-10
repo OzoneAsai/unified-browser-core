@@ -23,7 +23,7 @@ __export(main_exports, {
   default: () => UnifiedBrowserCorePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian17 = require("obsidian");
+var import_obsidian27 = require("obsidian");
 
 // src/adapters/electron-compat.ts
 function resolveElectronRemote() {
@@ -177,102 +177,42 @@ var ElectronSessionDataAdapter = class {
 };
 
 // src/adapters/electron-window-open.ts
-var WINDOW_OPEN_CHANNEL = "unified-browser-core:window-open:v1";
-var MAIN_RUNTIME_FILENAME = "/tmp/unified-browser-core-window-open-runtime.cjs";
+var WINDOW_OPEN_CHANNEL = "unified-browser-core:window-open:v2";
+var MAIN_RUNTIME_FILENAME = "/tmp/unified-browser-core-window-open-runtime-v2.cjs";
 var MAIN_RUNTIME_SOURCE = String.raw`
 "use strict";
 const { webContents } = require("electron");
-const singletonKey = Symbol.for("unified-browser-core.window-open-runtime.v1");
+const singletonKey = Symbol.for("unified-browser-core.window-open-runtime.v2");
 
 if (!globalThis[singletonKey]) {
   const bindings = new Map();
 
   const normalizeDisposition = (value) => {
     if (value === "background-tab") return "background";
-    if (value === "new-window") return "new-window";
     return "new-tab";
-  };
-  const parseFeatures = (value) => {
-    const features = new Map();
-    for (const rawPart of (value || "").split(",")) {
-      const part = rawPart.trim();
-      if (!part) continue;
-      const equals = part.indexOf("=");
-      const key = (equals >= 0 ? part.slice(0, equals) : part).trim().toLowerCase();
-      if (!key) continue;
-      const featureValue = equals >= 0 ? part.slice(equals + 1).trim().toLowerCase() : "";
-      features.set(key, featureValue);
-    }
-    return features;
-  };
-  const featureEnabled = (features, key) => {
-    if (!features.has(key)) return false;
-    return !["0", "no", "false", "off"].includes(features.get(key));
-  };
-  const classify = (details) => {
-    const features = parseFeatures(details.features);
-    if (featureEnabled(features, "noopener") || featureEnabled(features, "noreferrer")) {
-      return "core-tab";
-    }
-    const frameName = details.frameName && details.frameName.trim();
-    if (frameName && !["_blank", "_self", "_top", "_parent"].includes(frameName.toLowerCase())) {
-      return "auxiliary";
-    }
-    if (featureEnabled(features, "popup")) return "auxiliary";
-    if (["width", "height", "left", "top", "screenx", "screeny"].some((key) => features.has(key))) {
-      return "auxiliary";
-    }
-    return "core-tab";
-  };
-  const closeChild = (child) => {
-    try {
-      if (child && !child.isDestroyed()) child.close();
-    } catch {}
   };
   const unbind = (bindingId) => {
     const state = bindings.get(bindingId);
     if (!state) return;
     bindings.delete(bindingId);
-    try { state.guest.removeListener("did-create-window", state.onCreated); } catch {}
     try { state.guest.removeListener("destroyed", state.onDestroyed); } catch {}
     try { state.guest.setWindowOpenHandler(() => ({ action: "deny" })); } catch {}
-    for (const child of state.children) closeChild(child);
-    state.children.clear();
   };
   const bind = ({ bindingId, guestId, hostId, channel }) => {
     unbind(bindingId);
     const guest = webContents.fromId(guestId);
     const host = webContents.fromId(hostId);
     if (!guest || !host || guest.isDestroyed() || host.isDestroyed()) return false;
-    const children = new Set();
-    const onCreated = (child, details) => {
-      children.add(child);
-      child.once("closed", () => children.delete(child));
-      if (details && details.url && details.url !== "about:blank" && !details.postBody) {
-        setTimeout(() => {
-          try {
-            if (child.isDestroyed()) return;
-            const current = child.webContents && child.webContents.getURL();
-            if (!current || current === "about:blank") {
-              child.webContents.loadURL(details.url);
-            }
-          } catch {}
-        }, 100);
-      }
-    };
     const onDestroyed = () => unbind(bindingId);
-    const state = { guest, host, children, onCreated, onDestroyed };
+    const state = { guest, host, onDestroyed };
     bindings.set(bindingId, state);
-    guest.on("did-create-window", onCreated);
     guest.once("destroyed", onDestroyed);
     guest.setWindowOpenHandler((details) => {
-      const classification = classify(details);
-      if (classification === "auxiliary") {
-        return { action: "allow", outlivesOpener: false };
-      }
+      // Surfing-like policy: every web popup becomes an Obsidian tab,
+      // including named windows and requests with popup/size features.
       setImmediate(() => {
         try {
-          if (!host.isDestroyed()) {
+          if (bindings.get(bindingId) === state && !host.isDestroyed()) {
             host.send(channel, {
               bindingId,
               url: details.url,
@@ -288,20 +228,13 @@ if (!globalThis[singletonKey]) {
   globalThis[singletonKey] = {
     bind,
     unbind,
-    diagnostics: () => {
-      let activeAuxiliaryWindows = 0;
-      for (const state of bindings.values()) {
-        activeAuxiliaryWindows += state.children.size;
-      }
-      return { activeAuxiliaryWindows };
-    },
+    diagnostics: () => ({ activeAuxiliaryWindows: 0 }),
   };
 }
 
 module.exports = globalThis[singletonKey];
 `;
 var ElectronWindowOpenAdapter = class {
-  auxiliaryWindows = /* @__PURE__ */ new Set();
   rendererBindings = /* @__PURE__ */ new Map();
   mainRuntime;
   ipcRenderer;
@@ -317,18 +250,18 @@ var ElectronWindowOpenAdapter = class {
       const bindingId = `${hostId}:${guestId}`;
       this.ensureIpcListener(ipcRenderer);
       this.rendererBindings.set(bindingId, open);
-      let bound = false;
+      let bound2 = false;
       try {
-        bound = Boolean(mainRuntime.bind({
+        bound2 = Boolean(mainRuntime.bind({
           bindingId,
           guestId,
           hostId,
           channel: WINDOW_OPEN_CHANNEL
         }));
       } catch {
-        bound = false;
+        bound2 = false;
       }
-      if (bound) {
+      if (bound2) {
         return () => {
           this.rendererBindings.delete(bindingId);
           try {
@@ -339,40 +272,17 @@ var ElectronWindowOpenAdapter = class {
       }
       this.rendererBindings.delete(bindingId);
     }
-    const ownedChildren = /* @__PURE__ */ new Set();
-    const trackChild = (window2) => {
-      this.auxiliaryWindows.add(window2);
-      ownedChildren.add(window2);
-      window2.once?.("closed", () => {
-        ownedChildren.delete(window2);
-        this.auxiliaryWindows.delete(window2);
-      });
-    };
-    const onCreated = (window2) => {
-      trackChild(window2);
-    };
-    contents.on?.("did-create-window", onCreated);
+    let bound = true;
     contents.setWindowOpenHandler((details) => {
-      const classification = classifyWindowOpen(details);
-      if (classification === "auxiliary") {
-        window.setTimeout(() => open(details.url, "new-tab"), 0);
-        return { action: "deny" };
-      }
-      const disposition = normalizeDisposition(details.disposition);
-      window.setTimeout(() => open(details.url, disposition), 0);
+      const disposition = normalizePopupDisposition(details.disposition);
+      window.setTimeout(() => {
+        if (bound) open(details.url, disposition);
+      }, 0);
       return { action: "deny" };
     });
     return () => {
-      contents.removeListener?.("did-create-window", onCreated);
+      bound = false;
       contents.setWindowOpenHandler?.(() => ({ action: "deny" }));
-      for (const child of [...ownedChildren]) {
-        try {
-          if (!child.isDestroyed?.()) child.close?.();
-        } catch {
-        }
-        ownedChildren.delete(child);
-        this.auxiliaryWindows.delete(child);
-      }
     };
   }
   dispose() {
@@ -387,20 +297,9 @@ var ElectronWindowOpenAdapter = class {
       this.ipcRenderer.removeListener(WINDOW_OPEN_CHANNEL, this.ipcListener);
     }
     this.ipcListener = void 0;
-    for (const child of [...this.auxiliaryWindows]) {
-      try {
-        if (!child.isDestroyed?.()) child.close?.();
-      } catch {
-      }
-      this.auxiliaryWindows.delete(child);
-    }
   }
   activeAuxiliaryWindowCount() {
-    try {
-      return this.mainRuntime?.diagnostics?.().activeAuxiliaryWindows ?? this.auxiliaryWindows.size;
-    } catch {
-      return this.auxiliaryWindows.size;
-    }
+    return 0;
   }
   resolveMainRuntime() {
     if (this.mainRuntime) return this.mainRuntime;
@@ -438,42 +337,14 @@ var ElectronWindowOpenAdapter = class {
       if (typeof value.bindingId !== "string" || typeof value.url !== "string") return;
       const callback = this.rendererBindings.get(value.bindingId);
       if (!callback) return;
-      const disposition = value.disposition === "background" || value.disposition === "new-window" || value.disposition === "current" ? value.disposition : "new-tab";
+      const disposition = value.disposition === "background" ? "background" : "new-tab";
       callback(value.url, disposition);
     };
     ipcRenderer.on?.(WINDOW_OPEN_CHANNEL, this.ipcListener);
   }
 };
-function normalizeDisposition(value) {
-  if (value === "background-tab") return "background";
-  if (value === "new-window") return "new-window";
-  return "new-tab";
-}
-function classifyWindowOpen(details) {
-  const features = parseWindowFeatures(details.features);
-  if (featureEnabled(features, "noopener") || featureEnabled(features, "noreferrer")) return "core-tab";
-  const frameName = details.frameName?.trim();
-  if (frameName && !["_blank", "_self", "_top", "_parent"].includes(frameName.toLowerCase())) return "auxiliary";
-  if (featureEnabled(features, "popup")) return "auxiliary";
-  if (["width", "height", "left", "top", "screenx", "screeny"].some((key) => features.has(key))) return "auxiliary";
-  return "core-tab";
-}
-function parseWindowFeatures(value) {
-  const features = /* @__PURE__ */ new Map();
-  for (const rawPart of (value ?? "").split(",")) {
-    const part = rawPart.trim();
-    if (!part) continue;
-    const equals = part.indexOf("=");
-    const key = (equals >= 0 ? part.slice(0, equals) : part).trim().toLowerCase();
-    if (!key) continue;
-    const featureValue = equals >= 0 ? part.slice(equals + 1).trim().toLowerCase() : "";
-    features.set(key, featureValue);
-  }
-  return features;
-}
-function featureEnabled(features, key) {
-  if (!features.has(key)) return false;
-  return !["0", "no", "false", "off"].includes(features.get(key) ?? "");
+function normalizePopupDisposition(value) {
+  return value === "background-tab" ? "background" : "new-tab";
 }
 
 // src/adapters/electron-context-menu.ts
@@ -1043,6 +914,29 @@ var ManagedWebviewBackend = class {
   }
 };
 
+// src/navigation/external-app-link.ts
+var BROWSER_SCHEMES = /* @__PURE__ */ new Set([
+  "http",
+  "https",
+  "file",
+  "about",
+  "data",
+  "blob",
+  "javascript",
+  "vbscript",
+  "chrome",
+  "chrome-extension",
+  "chrome-error",
+  "view-source",
+  "devtools"
+]);
+function isExternalAppLink(url) {
+  const value = url.trim();
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(value)?.[1];
+  if (!scheme || /^\d/.test(value.slice(scheme.length + 1))) return false;
+  return !BROWSER_SCHEMES.has(scheme.toLowerCase());
+}
+
 // src/adapters/obsidian-tab-strip.ts
 var ObsidianTabStripAdapter = class {
   dragging = false;
@@ -1310,11 +1204,44 @@ var ObsidianSettingsAdapter = class {
 
 // src/adapters/obsidian-home.ts
 var import_obsidian = require("obsidian");
+
+// src/home/search-model.ts
+var HOME_TYPE_EXTENSIONS = {
+  markdown: ["md"],
+  image: ["png", "jpg", "jpeg", "svg", "gif", "bmp", "webp", "avif"],
+  video: ["mp4", "webm", "ogv", "mov", "mkv"],
+  audio: ["mp3", "wav", "m4a", "ogg", "3gp", "flac"],
+  pdf: ["pdf"],
+  canvas: ["canvas"]
+};
+var extensionSet = new Set(Object.values(HOME_TYPE_EXTENSIONS).flat());
+var aliases = { md: "md", jpg: "jpg", jpeg: "jpeg", omni: "omnisearch", omnisearch: "omnisearch", surfing: "web", web: "web", internet: "web" };
+function parseHomeFilter(text) {
+  const key = text.trim().toLocaleLowerCase();
+  const normalized = aliases[key] || key;
+  if (normalized === "omnisearch") return { kind: "omnisearch", value: "omnisearch" };
+  if (normalized === "web") return { kind: "web", value: "web" };
+  if (Object.hasOwn(HOME_TYPE_EXTENSIONS, normalized)) return { kind: "type", value: normalized };
+  if (extensionSet.has(normalized)) return { kind: "extension", value: normalized };
+  return void 0;
+}
+function matchesHomeFilter(extension, filter) {
+  if (!filter || filter.kind === "omnisearch" || filter.kind === "web") return true;
+  const value = extension.toLocaleLowerCase();
+  return filter.kind === "extension" ? value === filter.value : HOME_TYPE_EXTENSIONS[filter.value]?.includes(value) ?? false;
+}
+function safeHomeNoteName(text) {
+  const name = text.trim().replace(/\.md$/i, "");
+  if (!name || name === "." || name === ".." || /[\\/\u0000-\u001f:*?"<>|]/u.test(name)) return void 0;
+  return name;
+}
+
+// src/adapters/obsidian-home.ts
 var ObsidianHomeAdapter = class {
   constructor(app) {
     this.app = app;
   }
-  searchFiles(query, limit = 8) {
+  searchFiles(query, limit = 8, filter, markdownOnly = false, includeUnresolved = false) {
     const needle = query.trim();
     if (!needle) return [];
     const normalizedNeedle = needle.toLocaleLowerCase();
@@ -1322,12 +1249,14 @@ var ObsidianHomeAdapter = class {
     const nameMatches = [];
     const pathMatches = [];
     for (const file of this.app.vault.getFiles()) {
+      if (markdownOnly && !filter && file.extension !== "md") continue;
+      if (!matchesHomeFilter(file.extension, filter)) continue;
       const fileNameMatches = [];
       const basenameMatch = fuzzy(file.basename);
       if (basenameMatch) fileNameMatches.push({ file, match: basenameMatch });
       if (file.extension === "md") {
-        const aliases = (0, import_obsidian.parseFrontMatterAliases)(this.app.metadataCache.getFileCache(file)?.frontmatter ?? null) ?? [];
-        for (const alias of aliases) {
+        const aliases2 = (0, import_obsidian.parseFrontMatterAliases)(this.app.metadataCache.getFileCache(file)?.frontmatter ?? null) ?? [];
+        for (const alias of aliases2) {
           const aliasMatch = fuzzy(alias);
           if (aliasMatch) fileNameMatches.push({ file, match: aliasMatch, matchedAlias: alias });
         }
@@ -1343,13 +1272,22 @@ var ObsidianHomeAdapter = class {
     }
     (0, import_obsidian.sortSearchResults)(nameMatches);
     (0, import_obsidian.sortSearchResults)(pathMatches);
-    return [...nameMatches, ...pathMatches].slice(0, limit).map(({ file, matchedAlias }) => ({
+    const found = [...nameMatches, ...pathMatches].map(({ file, matchedAlias }) => ({
       ...toHomeFile(file),
       matchedAlias
     }));
+    if (includeUnresolved && (!filter || matchesHomeFilter("md", filter))) {
+      const unresolved = this.unresolvedFiles();
+      for (const item of unresolved) {
+        if (!item.name.toLocaleLowerCase().includes(normalizedNeedle)) continue;
+        if (found.some((existing) => existing.path === item.path)) continue;
+        found.push(item);
+      }
+    }
+    return found.slice(0, limit);
   }
-  recentFiles(limit = 6) {
-    return this.app.workspace.getLastOpenFiles().flatMap((path) => {
+  recentFiles(limit = 6, hiddenPaths = []) {
+    return this.app.workspace.getLastOpenFiles().filter((path) => !hiddenPaths.includes(path)).flatMap((path) => {
       const file = this.app.vault.getAbstractFileByPath(path);
       return file instanceof import_obsidian.TFile ? [toHomeFile(file)] : [];
     }).slice(0, limit);
@@ -1363,6 +1301,70 @@ var ObsidianHomeAdapter = class {
       const file = this.app.vault.getAbstractFileByPath(item.path);
       return file instanceof import_obsidian.TFile ? [toHomeFile(file)] : [];
     }).slice(0, limit);
+  }
+  removeBookmark(path) {
+    const internal = this.app.internalPlugins;
+    const instance = internal?.getPluginById?.("bookmarks")?.instance;
+    const item = flattenBookmarkItems(instance?.getBookmarks?.() ?? instance?.items ?? []).find((entry) => entry.type === "file" && entry.path === path);
+    if (!item || !instance?.removeItem) return false;
+    instance.removeItem(item);
+    return true;
+  }
+  hasOmnisearch() {
+    return Boolean(this.omnisearchAPI());
+  }
+  async searchOmnisearch(query, limit = 8) {
+    const api = this.omnisearchAPI();
+    if (!api || !query.trim()) return [];
+    const result = await api.search(query);
+    return result.slice(0, limit).flatMap((item) => {
+      const file = this.app.vault.getAbstractFileByPath(item.path);
+      return file instanceof import_obsidian.TFile ? [{ ...toHomeFile(file), excerpt: item.excerpt }] : [];
+    });
+  }
+  omnisearchAPI() {
+    const host = this.app;
+    const plugin = host.plugins?.getPlugin?.("omnisearch");
+    const legacy = globalThis.omnisearch;
+    return plugin?.api?.search ? plugin.api : legacy?.search ? legacy : void 0;
+  }
+  unresolvedFiles() {
+    const paths = /* @__PURE__ */ new Set();
+    const references = this.app.metadataCache.unresolvedLinks;
+    for (const [source3, unresolved] of Object.entries(references)) {
+      for (const text of Object.keys(unresolved)) {
+        const name = text.split("#")[0]?.split("|")[0]?.trim();
+        if (!name) continue;
+        const destination = this.app.metadataCache.getFirstLinkpathDest(name, source3);
+        if (destination) continue;
+        const safe = safeHomeNoteName(name.split("/").pop() || "");
+        if (!safe) continue;
+        const path = (0, import_obsidian.normalizePath)(name.endsWith(".md") ? name : name + ".md");
+        if (path.startsWith("../") || path === ".." || paths.has(path)) continue;
+        if (this.app.vault.getAbstractFileByPath(path)) continue;
+        paths.add(path);
+      }
+    }
+    return [...paths].map((path) => ({ path, name: path.split("/").pop().replace(/\.md$/i, ""), extension: "md", unresolved: true }));
+  }
+  async createNote(name, unresolvedPath) {
+    const safeName = safeHomeNoteName(name);
+    if (!safeName) throw new Error("Invalid note name");
+    const baseFolder = this.app.fileManager.getNewFileParent("");
+    const desired = unresolvedPath || (0, import_obsidian.normalizePath)((baseFolder.path === "/" ? "" : baseFolder.path + "/") + safeName + ".md");
+    const segments = desired.split("/");
+    if (segments.some((segment) => segment === "." || segment === ".." || !segment)) throw new Error("Invalid note path");
+    const existing = this.app.vault.getAbstractFileByPath(desired);
+    if (existing instanceof import_obsidian.TFile) return existing;
+    if (existing) throw new Error("A folder exists at that path");
+    if (unresolvedPath) {
+      let folder = "";
+      for (const segment of segments.slice(0, -1)) {
+        folder = folder ? folder + "/" + segment : segment;
+        if (!this.app.vault.getAbstractFileByPath(folder)) await this.app.vault.createFolder(folder);
+      }
+    }
+    return this.app.vault.create(desired, "");
   }
   async openFile(leaf, path, newTab = false) {
     const file = this.app.vault.getAbstractFileByPath(path);
@@ -1388,6 +1390,2257 @@ function toHomeFile(file) {
     name: file.basename || file.name,
     extension: file.extension
   };
+}
+
+// src/ui/home-icon-picker.ts
+var import_obsidian2 = require("obsidian");
+
+// src/i18n.ts
+var language = "auto";
+var resolveLocale = () => typeof navigator === "undefined" ? "en" : navigator.language;
+function setLocaleResolver(resolver) {
+  resolveLocale = resolver;
+}
+function setLanguage(value) {
+  language = value;
+}
+function t(source3, values = {}) {
+  let locale = language;
+  if (locale === "auto") {
+    try {
+      locale = resolveLocale();
+    } catch {
+      locale = "en";
+    }
+  }
+  const result = locale.toLowerCase().startsWith("ja") ? ja[source3] ?? source3 : source3;
+  return result.replace(/\{(\w+)\}/g, (match, key) => String(values[key] ?? match));
+}
+var ja = {
+  "Find in page": "\u30DA\u30FC\u30B8\u5185\u3092\u691C\u7D22",
+  "Previous match": "\u524D\u306E\u4E00\u81F4",
+  "Next match": "\u6B21\u306E\u4E00\u81F4",
+  "Close find": "\u691C\u7D22\u3092\u9589\u3058\u308B",
+  "Searching\u2026": "\u691C\u7D22\u4E2D\u2026",
+  "Find unavailable": "\u30DA\u30FC\u30B8\u5185\u691C\u7D22\u3092\u5229\u7528\u3067\u304D\u307E\u305B\u3093",
+  "Copy viewport as image": "\u8868\u793A\u7BC4\u56F2\u3092\u753B\u50CF\u3068\u3057\u3066\u30B3\u30D4\u30FC",
+  "Viewport copied as image": "\u8868\u793A\u7BC4\u56F2\u3092\u753B\u50CF\u3068\u3057\u3066\u30B3\u30D4\u30FC\u3057\u307E\u3057\u305F",
+  "Could not copy viewport": "\u8868\u793A\u7BC4\u56F2\u3092\u30B3\u30D4\u30FC\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F",
+  "Open page in external browser": "\u5916\u90E8\u30D6\u30E9\u30A6\u30B6\u3067\u30DA\u30FC\u30B8\u3092\u958B\u304F",
+  "Save page as Markdown": "\u30DA\u30FC\u30B8\u3092Markdown\u3068\u3057\u3066\u4FDD\u5B58",
+  "Page saved as Markdown": "\u30DA\u30FC\u30B8\u3092Markdown\u3068\u3057\u3066\u4FDD\u5B58\u3057\u307E\u3057\u305F",
+  "Could not save page as Markdown": "\u30DA\u30FC\u30B8\u3092Markdown\u3068\u3057\u3066\u4FDD\u5B58\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F",
+  "No readable page content": "\u4FDD\u5B58\u3067\u304D\u308B\u672C\u6587\u304C\u3042\u308A\u307E\u305B\u3093",
+  "Passwords": "\u30D1\u30B9\u30EF\u30FC\u30C9",
+  "Password manager": "\u30D1\u30B9\u30EF\u30FC\u30C9\u30DE\u30CD\u30FC\u30B8\u30E3\u30FC",
+  "Open password vault": "\u30D1\u30B9\u30EF\u30FC\u30C9\u91D1\u5EAB\u3092\u958B\u304F",
+  "Lock password vault": "\u30D1\u30B9\u30EF\u30FC\u30C9\u91D1\u5EAB\u3092\u30ED\u30C3\u30AF",
+  "Fill password": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u5165\u529B",
+  "Lock": "\u30ED\u30C3\u30AF",
+  "Continue": "\u7D9A\u3051\u308B",
+  "Unlock password vault": "\u30D1\u30B9\u30EF\u30FC\u30C9\u91D1\u5EAB\u3092\u89E3\u9664",
+  "Unlock with Windows Hello": "Windows Hello\u3067\u89E3\u9664",
+  "Unlock with recovery key": "\u56DE\u5FA9\u30AD\u30FC\u3067\u89E3\u9664",
+  "Recovery key": "\u56DE\u5FA9\u30AD\u30FC",
+  "Save your recovery key": "\u56DE\u5FA9\u30AD\u30FC\u3092\u4FDD\u7BA1\u3057\u3066\u304F\u3060\u3055\u3044",
+  "Store this key outside your vault. It unlocks encrypted backups when Windows Hello or this PC is unavailable.": "\u3053\u306E\u30AD\u30FC\u306FVault\u306E\u5916\u306B\u5B89\u5168\u306B\u4FDD\u7BA1\u3057\u3066\u304F\u3060\u3055\u3044\u3002Windows Hello\u3084\u3053\u306EPC\u304C\u4F7F\u3048\u306A\u304F\u306A\u3063\u305F\u3068\u304D\u3001\u6697\u53F7\u5316\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u3092\u89E3\u9664\u3067\u304D\u307E\u3059\u3002",
+  "I saved the recovery key securely": "\u56DE\u5FA9\u30AD\u30FC\u3092\u5B89\u5168\u306A\u5834\u6240\u306B\u4FDD\u7BA1\u3057\u307E\u3057\u305F",
+  "Choose Windows Hello or enter your recovery key. Failed authentication never falls back automatically.": "Windows Hello\u3067\u8A8D\u8A3C\u3059\u308B\u304B\u3001\u56DE\u5FA9\u30AD\u30FC\u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\u3002\u8A8D\u8A3C\u306B\u5931\u6557\u3057\u3066\u3082\u81EA\u52D5\u3067\u5225\u306E\u65B9\u5F0F\u306B\u5207\u308A\u66FF\u308F\u308A\u307E\u305B\u3093\u3002",
+  "Save password": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u4FDD\u5B58",
+  "Edit password": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u7DE8\u96C6",
+  "Update password": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u66F4\u65B0",
+  "Save password?": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u4FDD\u5B58\u3057\u307E\u3059\u304B\uFF1F",
+  "Update password?": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u66F4\u65B0\u3057\u307E\u3059\u304B\uFF1F",
+  "Site origin": "\u30B5\u30A4\u30C8\u306E\u30AA\u30EA\u30B8\u30F3",
+  "Name": "\u540D\u524D",
+  "Username": "\u30E6\u30FC\u30B6\u30FC\u540D",
+  "Password": "\u30D1\u30B9\u30EF\u30FC\u30C9",
+  "Generate password": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u751F\u6210",
+  "Show / hide": "\u8868\u793A\uFF0F\u975E\u8868\u793A",
+  "Container ID (empty for all)": "Container ID\uFF08\u7A7A\u6B04\u306A\u3089\u3059\u3079\u3066\uFF09",
+  "An encrypted vault inside Browser Core. Fill only after choosing an account; forms are never submitted automatically.": "Browser Core\u5185\u306E\u6697\u53F7\u5316\u91D1\u5EAB\u3067\u3059\u3002\u30A2\u30AB\u30A6\u30F3\u30C8\u3092\u9078\u3093\u3060\u3068\u304D\u3060\u3051\u5165\u529B\u3057\u3001\u30D5\u30A9\u30FC\u30E0\u306F\u81EA\u52D5\u9001\u4FE1\u3057\u307E\u305B\u3093\u3002",
+  "Create your password vault": "\u30D1\u30B9\u30EF\u30FC\u30C9\u91D1\u5EAB\u3092\u4F5C\u6210",
+  "Windows Hello setup asks for authentication twice to verify that the key can be used again. A recovery key is issued for backups and other devices.": "Windows Hello\u306E\u8A2D\u5B9A\u3067\u306F\u3001\u9375\u3092\u518D\u5229\u7528\u3067\u304D\u308B\u3053\u3068\u3092\u78BA\u304B\u3081\u308B\u305F\u3081\u306B2\u56DE\u8A8D\u8A3C\u3057\u307E\u3059\u3002\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u3084\u5225\u306E\u7AEF\u672B\u3067\u4F7F\u3046\u56DE\u5FA9\u30AD\u30FC\u3082\u767A\u884C\u3057\u307E\u3059\u3002",
+  "Set up with Windows Hello": "Windows Hello\u3067\u8A2D\u5B9A",
+  "Set up with recovery key": "\u56DE\u5FA9\u30AD\u30FC\u3067\u8A2D\u5B9A",
+  "Password vault is locked": "\u30D1\u30B9\u30EF\u30FC\u30C9\u91D1\u5EAB\u306F\u30ED\u30C3\u30AF\u3055\u308C\u3066\u3044\u307E\u3059",
+  "New password": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u8FFD\u52A0",
+  "The password vault file could not be read. It has not been overwritten. Restore an encrypted backup.": "\u30D1\u30B9\u30EF\u30FC\u30C9\u91D1\u5EAB\u306E\u30D5\u30A1\u30A4\u30EB\u3092\u8AAD\u307F\u53D6\u308C\u307E\u305B\u3093\u3067\u3057\u305F\u3002\u30D5\u30A1\u30A4\u30EB\u306F\u4E0A\u66F8\u304D\u3057\u3066\u3044\u307E\u305B\u3093\u3002\u6697\u53F7\u5316\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u304B\u3089\u5FA9\u5143\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
+  "Export encrypted backup": "\u6697\u53F7\u5316\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u3092\u66F8\u304D\u51FA\u3059",
+  "Import encrypted backup": "\u6697\u53F7\u5316\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u3092\u53D6\u308A\u8FBC\u3080",
+  "New recovery key": "\u56DE\u5FA9\u30AD\u30FC\u3092\u518D\u767A\u884C",
+  "Keep old recovery keys for old backups. The new key applies to the current vault and future backups.": "\u53E4\u3044\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u7528\u306B\u53E4\u3044\u56DE\u5FA9\u30AD\u30FC\u3082\u4FDD\u7BA1\u3057\u3066\u304F\u3060\u3055\u3044\u3002\u65B0\u3057\u3044\u30AD\u30FC\u306F\u73FE\u5728\u306E\u91D1\u5EAB\u3068\u4ECA\u5F8C\u306E\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u306B\u9069\u7528\u3055\u308C\u307E\u3059\u3002",
+  "Replace Windows Hello key": "Windows Hello\u306E\u9375\u3092\u518D\u767B\u9332",
+  "Enable Windows Hello": "Windows Hello\u3092\u6709\u52B9\u306B\u3059\u308B",
+  "Disable Windows Hello": "Windows Hello\u3092\u7121\u52B9\u306B\u3059\u308B",
+  "Make sure you have your recovery key. Future unlocks will require it.": "\u56DE\u5FA9\u30AD\u30FC\u3092\u4FDD\u7BA1\u3057\u3066\u3044\u308B\u3053\u3068\u3092\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002\u4ECA\u5F8C\u306E\u89E3\u9664\u306B\u306F\u56DE\u5FA9\u30AD\u30FC\u304C\u5FC5\u8981\u3067\u3059\u3002",
+  "Allow save suggestions on all sites": "\u5168\u30B5\u30A4\u30C8\u306E\u4FDD\u5B58\u63D0\u6848\u3092\u518D\u3073\u8A31\u53EF",
+  "Lock after inactivity (minutes)": "\u91D1\u5EAB\u3092\u64CD\u4F5C\u3057\u306A\u3044\u3068\u304D\u306E\u81EA\u52D5\u30ED\u30C3\u30AF\uFF08\u5206\uFF09",
+  "Enter a value from 1 to 60.": "1\uFF5E60\u306E\u5024\u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
+  "Search passwords": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u691C\u7D22",
+  "No saved passwords": "\u4FDD\u5B58\u3055\u308C\u305F\u30D1\u30B9\u30EF\u30FC\u30C9\u306F\u3042\u308A\u307E\u305B\u3093",
+  "No username": "\u30E6\u30FC\u30B6\u30FC\u540D\u306A\u3057",
+  "Delete password": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u524A\u9664",
+  "Windows Hello protects local unlock. Recovery keys unlock backups. Other Obsidian plugins share this process; unlocked credentials cannot be isolated from a compromised host.": "Windows Hello\u3067\u3053\u306E\u7AEF\u672B\u306E\u91D1\u5EAB\u3092\u89E3\u9664\u3057\u3001\u56DE\u5FA9\u30AD\u30FC\u3067\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u3092\u89E3\u9664\u3067\u304D\u307E\u3059\u3002\u4ED6\u306EObsidian\u30D7\u30E9\u30B0\u30A4\u30F3\u3068\u306F\u30D7\u30ED\u30BB\u30B9\u3092\u5171\u6709\u3057\u3066\u3044\u308B\u305F\u3081\u3001\u4FB5\u5BB3\u3055\u308C\u305F\u30DB\u30B9\u30C8\u304B\u3089\u89E3\u9664\u4E2D\u306E\u8A8D\u8A3C\u60C5\u5831\u3092\u9694\u96E2\u3059\u308B\u3053\u3068\u306F\u3067\u304D\u307E\u305B\u3093\u3002",
+  "Import replaces the current password vault. Export a backup first. Enter the recovery key belonging to the imported backup.": "\u53D6\u308A\u8FBC\u307F\u306F\u73FE\u5728\u306E\u30D1\u30B9\u30EF\u30FC\u30C9\u91D1\u5EAB\u3092\u7F6E\u304D\u63DB\u3048\u307E\u3059\u3002\u5148\u306B\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u3092\u66F8\u304D\u51FA\u3057\u3066\u304F\u3060\u3055\u3044\u3002\u53D6\u308A\u8FBC\u3080\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u306E\u56DE\u5FA9\u30AD\u30FC\u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
+  "Replace password vault": "\u30D1\u30B9\u30EF\u30FC\u30C9\u91D1\u5EAB\u3092\u7F6E\u304D\u63DB\u3048\u308B",
+  "Replace the current password vault with this backup?": "\u73FE\u5728\u306E\u30D1\u30B9\u30EF\u30FC\u30C9\u91D1\u5EAB\u3092\u3053\u306E\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u3067\u7F6E\u304D\u63DB\u3048\u307E\u3059\u304B\uFF1F",
+  "Choose an account": "\u30A2\u30AB\u30A6\u30F3\u30C8\u3092\u9078\u629E",
+  "Generate and fill password": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u751F\u6210\u3057\u3066\u5165\u529B",
+  "Manage passwords": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u7BA1\u7406",
+  "Never for this site": "\u3053\u306E\u30B5\u30A4\u30C8\u3067\u306F\u63D0\u6848\u3057\u306A\u3044",
+  "Manage the encrypted vault, Windows Hello, recovery keys, backups, and automatic locking.": "\u6697\u53F7\u5316\u91D1\u5EAB\u30FBWindows Hello\u30FB\u56DE\u5FA9\u30AD\u30FC\u30FB\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u30FB\u81EA\u52D5\u30ED\u30C3\u30AF\u3092\u7BA1\u7406\u3057\u307E\u3059\u3002",
+  "Password operation failed. Check your key, Windows Hello, and file access.": "\u30D1\u30B9\u30EF\u30FC\u30C9\u306E\u64CD\u4F5C\u306B\u5931\u6557\u3057\u307E\u3057\u305F\u3002\u56DE\u5FA9\u30AD\u30FC\u3001Windows Hello\u3001\u30D5\u30A1\u30A4\u30EB\u3078\u306E\u30A2\u30AF\u30BB\u30B9\u3092\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
+  "Password input is unavailable on this page. Use an HTTPS page with a visible login form.": "\u3053\u306E\u30DA\u30FC\u30B8\u3067\u306F\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u5165\u529B\u3067\u304D\u307E\u305B\u3093\u3002HTTPS\u306E\u30DA\u30FC\u30B8\u3067\u3001\u8868\u793A\u3055\u308C\u3066\u3044\u308B\u30ED\u30B0\u30A4\u30F3\u30D5\u30A9\u30FC\u30E0\u3092\u4F7F\u7528\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
+  "Search files in your vault": "Vault\u5185\u306E\u30D5\u30A1\u30A4\u30EB\u3092\u691C\u7D22",
+  "Search the web or enter an address": "\u30A6\u30A7\u30D6\u3092\u691C\u7D22\u3001\u307E\u305F\u306F\u30A2\u30C9\u30EC\u30B9\u3092\u5165\u529B",
+  "Never show again": "\u4ECA\u5F8C\u8868\u793A\u3057\u306A\u3044",
+  "Show recovery notifications": "\u5FA9\u5143\u901A\u77E5\u3092\u8868\u793A",
+  "Recovery notifications disappear when you interact with the page. Turn this on to show them again after choosing Never show again.": "\u30DA\u30FC\u30B8\u3092\u64CD\u4F5C\u3059\u308B\u3068\u5FA9\u5143\u901A\u77E5\u304C\u6D88\u3048\u307E\u3059\u3002\u300C\u4ECA\u5F8C\u8868\u793A\u3057\u306A\u3044\u300D\u3092\u9078\u629E\u3057\u305F\u5F8C\u306F\u3001\u3053\u3053\u3067\u518D\u8868\u793A\u3092\u6709\u52B9\u306B\u3067\u304D\u307E\u3059\u3002",
+  "Detailed tab recovery is no longer available. Browser Core is reopening the saved URL from browsing history.": "\u8A73\u7D30\u306A\u30BF\u30D6\u5FA9\u5143\u30C7\u30FC\u30BF\u304C\u306A\u3044\u305F\u3081\u3001\u5C65\u6B74\u306B\u4FDD\u5B58\u3057\u305FURL\u3092\u958B\u304D\u76F4\u3057\u307E\u3057\u305F\u3002",
+  "Detailed tab recovery could not be applied. Browser Core is reopening the saved URL and can still use form recovery or the website's own saved state.": "\u8A73\u7D30\u306A\u30BF\u30D6\u5FA9\u5143\u3092\u9069\u7528\u3067\u304D\u306A\u304B\u3063\u305F\u305F\u3081\u3001\u4FDD\u5B58\u3057\u305FURL\u3092\u958B\u304D\u76F4\u3057\u307E\u3057\u305F\u3002\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u3084\u30B5\u30A4\u30C8\u81EA\u8EAB\u306E\u4FDD\u5B58\u72B6\u614B\u3092\u5229\u7528\u3067\u304D\u307E\u3059\u3002",
+  "Navigation state restored from the closed tab. Some live page state may still need to reload.": "\u9589\u3058\u305F\u30BF\u30D6\u306E\u79FB\u52D5\u5C65\u6B74\u3092\u5FA9\u5143\u3057\u307E\u3057\u305F\u3002\u30DA\u30FC\u30B8\u306E\u4E00\u90E8\u306F\u518D\u8AAD\u307F\u8FBC\u307F\u304C\u5FC5\u8981\u306A\u5834\u5408\u304C\u3042\u308A\u307E\u3059\u3002",
+  "Detailed tab state restored. Some page state may still depend on the website.": "\u8A73\u7D30\u306A\u30BF\u30D6\u72B6\u614B\u3092\u5FA9\u5143\u3057\u307E\u3057\u305F\u3002\u4E00\u90E8\u306E\u72B6\u614B\u306F\u30B5\u30A4\u30C8\u81EA\u8EAB\u306E\u51E6\u7406\u306B\u4F9D\u5B58\u3057\u307E\u3059\u3002",
+  "Relative to this Obsidian window. Used by sites without a site-specific zoom override.": "\u3053\u306EObsidian\u30A6\u30A3\u30F3\u30C9\u30A6\u306E\u500D\u7387\u3092\u57FA\u6E96\u306B\u3057\u307E\u3059\u3002\u30B5\u30A4\u30C8\u56FA\u6709\u306E\u500D\u7387\u304C\u306A\u3044\u5834\u5408\u306B\u9069\u7528\u3055\u308C\u307E\u3059\u3002",
+  "No override": "\u4E0A\u66F8\u304D\u306A\u3057",
+  "Follow theme": "\u30C6\u30FC\u30DE\u306B\u5408\u308F\u305B\u308B",
+  "Custom color": "\u4EFB\u610F\u306E\u8272",
+  "Initial background color": "\u521D\u671F\u80CC\u666F\u8272",
+  "Choose the background before the site paints. The site's own colors remain in control once painted.": "\u30B5\u30A4\u30C8\u304C\u63CF\u753B\u3055\u308C\u308B\u524D\u306E\u80CC\u666F\u8272\u3092\u9078\u629E\u3057\u307E\u3059\u3002\u63CF\u753B\u5F8C\u306F\u30B5\u30A4\u30C8\u81EA\u8EAB\u306E\u8272\u304C\u512A\u5148\u3055\u308C\u307E\u3059\u3002",
+  "Playback and authentication": "\u518D\u751F\u3068\u8A8D\u8A3C",
+  "Autoplay": "\u81EA\u52D5\u518D\u751F",
+  "Block audible autoplay": "\u97F3\u58F0\u4ED8\u304D\u306E\u81EA\u52D5\u518D\u751F\u3092\u6291\u5236",
+  "Allow autoplay": "\u81EA\u52D5\u518D\u751F\u3092\u8A31\u53EF",
+  "Block audible autoplay until you interact with the page. Muted videos may still play. Reopen tabs after changing this setting.": "\u30DA\u30FC\u30B8\u3092\u64CD\u4F5C\u3059\u308B\u307E\u3067\u97F3\u58F0\u4ED8\u304D\u306E\u81EA\u52D5\u518D\u751F\u3092\u6291\u5236\u3057\u307E\u3059\u3002\u7121\u97F3\u306E\u52D5\u753B\u306F\u518D\u751F\u3055\u308C\u308B\u5834\u5408\u304C\u3042\u308A\u307E\u3059\u3002\u5909\u66F4\u5F8C\u306F\u30BF\u30D6\u3092\u958B\u304D\u76F4\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
+  "Block passkey requests": "\u30D1\u30B9\u30AD\u30FC\u8981\u6C42\u3092\u6291\u5236",
+  "Prevent sites from requesting or creating passkeys, including requests you start yourself. Turn off to sign in with a passkey. Reload pages after changing this setting.": "\u30B5\u30A4\u30C8\u306E\u30D1\u30B9\u30AD\u30FC\u8981\u6C42\u30FB\u767B\u9332\u3092\u6291\u5236\u3057\u307E\u3059\u3002\u624B\u52D5\u3067\u958B\u59CB\u3057\u305F\u8981\u6C42\u3082\u5BFE\u8C61\u3067\u3059\u3002\u30D1\u30B9\u30AD\u30FC\u3067\u30ED\u30B0\u30A4\u30F3\u3059\u308B\u969B\u306F\u30AA\u30D5\u306B\u3057\u3066\u304F\u3060\u3055\u3044\u3002\u5909\u66F4\u5F8C\u306F\u30DA\u30FC\u30B8\u3092\u518D\u8AAD\u307F\u8FBC\u307F\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
+  "Clear browser history": "\u30D6\u30E9\u30A6\u30B6\u5C65\u6B74\u3092\u6D88\u53BB",
+  "Copy link": "\u30EA\u30F3\u30AF\u3092\u30B3\u30D4\u30FC",
+  "Show link in history": "\u30EA\u30F3\u30AF\u306E\u5C65\u6B74\u3092\u898B\u308B",
+  "Copy image URL": "\u753B\u50CF\u306EURL\u3092\u30B3\u30D4\u30FC",
+  "Download image": "\u753B\u50CF\u3092\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9",
+  "Undo": "\u5143\u306B\u623B\u3059",
+  "Redo": "\u3084\u308A\u76F4\u3059",
+  "Copy selected text": "\u9078\u629E\u3057\u305F\u6587\u5B57\u3092\u30B3\u30D4\u30FC",
+  "Restore previous value": "\u524D\u56DE\u306E\u5165\u529B\u5185\u5BB9\u3092\u5FA9\u5143",
+  "Restore all saved form values": "\u4FDD\u5B58\u3057\u305F\u5165\u529B\u5185\u5BB9\u3092\u3059\u3079\u3066\u5FA9\u5143",
+  "Show saved form values": "\u4FDD\u5B58\u3057\u305F\u5165\u529B\u5185\u5BB9\u3092\u8868\u793A",
+  "Disable recovery for this field": "\u3053\u306E\u5165\u529B\u6B04\u3092\u5FA9\u5143\u5BFE\u8C61\u304B\u3089\u5916\u3059",
+  "Disable form recovery for this site": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u3092\u7121\u52B9\u306B\u3059\u308B",
+  "Enable form recovery for this site": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u3092\u6709\u52B9\u306B\u3059\u308B",
+  "Reopen in container\u2026": "\u5225\u306EContainer\u3067\u958B\u304D\u76F4\u3059\u2026",
+  "Open link in {name}": "{name}\u3067\u30EA\u30F3\u30AF\u3092\u958B\u304F",
+  "Search \u201C{query}\u201D": "\u300C{query}\u300D\u3092\u691C\u7D22",
+  "Adopt Surfing's persistent login session, import bookmarks and compatible settings, and copy open tabs. Existing Browser Core data and Surfing source files are kept.": "Surfing\u306E\u30ED\u30B0\u30A4\u30F3\u72B6\u614B\u3001\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3001\u5BFE\u5FDC\u3059\u308B\u8A2D\u5B9A\u3001\u958B\u3044\u3066\u3044\u308B\u30BF\u30D6\u3092\u79FB\u884C\u3057\u307E\u3059\u3002\u65E2\u5B58\u306EUBC\u30C7\u30FC\u30BF\u3068Surfing\u306E\u5143\u30C7\u30FC\u30BF\u306F\u4FDD\u6301\u3057\u307E\u3059\u3002",
+  "Completed. Original Surfing data was kept. Backup: {v0}": "\u79FB\u884C\u6E08\u307F\u3067\u3059\u3002\u5143\u30C7\u30FC\u30BF\u306F\u4FDD\u6301\u3057\u3066\u3044\u307E\u3059\u3002\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\uFF1A{v0}",
+  "Surfing migration already completed. Backup: {v0}": "Surfing\u306E\u79FB\u884C\u306F\u5B8C\u4E86\u3057\u3066\u3044\u307E\u3059\u3002\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\uFF1A{v0}",
+  "Applied automatically when an independent navigation opens a matching site.": "\u4E00\u81F4\u3059\u308B\u30B5\u30A4\u30C8\u3092\u958B\u3044\u305F\u3068\u304D\u306B\u81EA\u52D5\u3067\u9069\u7528\u3057\u307E\u3059\u3002",
+  "Saved for later, but currently paused because automatic container routing is off.": "\u6307\u5B9A\u306F\u4FDD\u5B58\u3055\u308C\u3066\u3044\u307E\u3059\u304C\u3001Container\u306E\u81EA\u52D5\u5207\u308A\u66FF\u3048\u304C\u7121\u52B9\u306E\u305F\u3081\u505C\u6B62\u3057\u3066\u3044\u307E\u3059\u3002",
+  "Open in {v0}": "{v0}\u3067\u958B\u304F",
+  "Reopen in {v0}": "{v0}\u3067\u958B\u304D\u76F4\u3059",
+  "Always open {v0} in {v1}": "{v0}\u3092\u5E38\u306B{v1}\u3067\u958B\u304F",
+  "Always open {v0} in {v1}.": "{v0}\u3092\u5E38\u306B{v1}\u3067\u958B\u304D\u307E\u3059\u3002",
+  "Site default \xB7 {v0}": "\u30B5\u30A4\u30C8\u306E\u6307\u5B9A\uFF1A{v0}",
+  "Return to site default \xB7 {v0}": "\u30B5\u30A4\u30C8\u306E\u6307\u5B9A\u306B\u623B\u3059\uFF1A{v0}",
+  "Opened here explicitly \xB7 site default is {v0}": "\u624B\u52D5\u3067\u958B\u3044\u305FContainer\u3067\u3059\uFF08\u30B5\u30A4\u30C8\u306E\u6307\u5B9A\uFF1A{v0}\uFF09",
+  "Sign-in flow stays in this container \xB7 site default is {v0}": "\u30ED\u30B0\u30A4\u30F3\u51E6\u7406\u4E2D\u306F\u3053\u306EContainer\u3092\u4F7F\u7528\u3057\u307E\u3059\uFF08\u30B5\u30A4\u30C8\u306E\u6307\u5B9A\uFF1A{v0}\uFF09",
+  "Clear this container's cookies, site storage, cache, sign-in cache, and saved site permissions? Open pages may need to be reloaded.": "\u3053\u306EContainer\u306ECookie\u3001\u30B5\u30A4\u30C8\u30C7\u30FC\u30BF\u3001\u30AD\u30E3\u30C3\u30B7\u30E5\u3001\u8A8D\u8A3C\u30AD\u30E3\u30C3\u30B7\u30E5\u3001\u4FDD\u5B58\u6E08\u307F\u6A29\u9650\u3092\u6D88\u53BB\u3057\u307E\u3059\u304B\uFF1F\u958B\u3044\u3066\u3044\u308B\u30DA\u30FC\u30B8\u306F\u518D\u8AAD\u307F\u8FBC\u307F\u304C\u5FC5\u8981\u306B\u306A\u308B\u5834\u5408\u304C\u3042\u308A\u307E\u3059\u3002",
+  "Cleared browsing data and saved permissions for \u201C{v0}\u201D.": "\u300C{v0}\u300D\u306E\u95B2\u89A7\u30C7\u30FC\u30BF\u3068\u4FDD\u5B58\u6E08\u307F\u6A29\u9650\u3092\u6D88\u53BB\u3057\u307E\u3057\u305F\u3002",
+  "Could not clear browsing data for \u201C{v0}\u201D.": "\u300C{v0}\u300D\u306E\u95B2\u89A7\u30C7\u30FC\u30BF\u3092\u6D88\u53BB\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002",
+  "Delete \u201C{v0}\u201D? Its cookies, site storage, cache, saved permissions, form recovery data, and site default rules will be cleared. Browsing history will remain.": "\u300C{v0}\u300D\u3092\u524A\u9664\u3057\u307E\u3059\u304B\uFF1FCookie\u3001\u30B5\u30A4\u30C8\u30C7\u30FC\u30BF\u3001\u30AD\u30E3\u30C3\u30B7\u30E5\u3001\u4FDD\u5B58\u6E08\u307F\u6A29\u9650\u3001\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u30C7\u30FC\u30BF\u3001\u30B5\u30A4\u30C8\u6307\u5B9A\u3092\u6D88\u53BB\u3057\u307E\u3059\u3002\u95B2\u89A7\u5C65\u6B74\u306F\u4FDD\u6301\u3057\u307E\u3059\u3002",
+  "Deleted container \u201C{v0}\u201D and cleared its browsing data.": "Container\u300C{v0}\u300D\u3092\u524A\u9664\u3057\u3001\u95B2\u89A7\u30C7\u30FC\u30BF\u3092\u6D88\u53BB\u3057\u307E\u3057\u305F\u3002",
+  "Delete \u201C{v0}\u201D from your bookmarks?": "\u300C{v0}\u300D\u3092\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u304B\u3089\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
+  "Delete the empty folder \u201C{v0}\u201D?": "\u7A7A\u306E\u30D5\u30A9\u30EB\u30C0\u300C{v0}\u300D\u3092\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
+  "Delete \u201C{v0}\u201D and its {v1} bookmark{v2}?": "\u300C{v0}\u300D\u3068\u4E2D\u306E{v1}\u4EF6\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
+  "{v0} bookmark{v1} in {v2}": "{v2}\u306B{v0}\u4EF6\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
+  "Pin": "\u56FA\u5B9A",
+  "Unpin": "\u56FA\u5B9A\u3092\u89E3\u9664",
+  "Pin browser tab": "\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u56FA\u5B9A",
+  "Unpin browser tab": "\u30BF\u30D6\u306E\u56FA\u5B9A\u3092\u89E3\u9664",
+  "Remove": "\u53D6\u308A\u9664\u304F",
+  "No back history": "\u623B\u308B\u5C65\u6B74\u306F\u3042\u308A\u307E\u305B\u3093",
+  "No forward history": "\u9032\u3080\u5C65\u6B74\u306F\u3042\u308A\u307E\u305B\u3093",
+  "Navigation status": "\u8AAD\u307F\u8FBC\u307F\u72B6\u6CC1",
+  "Browser Core page": "Browser Core\u306E\u30DA\u30FC\u30B8",
+  "Migrate": "\u79FB\u884C",
+  "Delete history": "\u5C65\u6B74\u3092\u524A\u9664",
+  "Delete path": "\u7D4C\u8DEF\u3092\u524A\u9664",
+  "Delete history day": "\u3053\u306E\u65E5\u306E\u5C65\u6B74\u3092\u524A\u9664",
+  "Delete alternate history path": "\u5206\u5C90\u3057\u305F\u7D4C\u8DEF\u306E\u5C65\u6B74\u3092\u524A\u9664",
+  "Remove closed tab from history": "\u9589\u3058\u305F\u30BF\u30D6\u3092\u5C65\u6B74\u304B\u3089\u524A\u9664",
+  "Delete browsing history and detailed closed-tab recovery data? Open tabs, bookmarks, containers, cookies and form recovery remain.": "\u95B2\u89A7\u5C65\u6B74\u3068\u9589\u3058\u305F\u30BF\u30D6\u306E\u8A73\u7D30\u306A\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F\u30BF\u30D6\u3001\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3001Container\u3001Cookie\u3001\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u306F\u4FDD\u6301\u3057\u307E\u3059\u3002",
+  "Delete all saved Browser Core form recovery data?": "\u4FDD\u5B58\u3057\u305F\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u3059\u3079\u3066\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
+  "Delete all saved Browser Core form recovery data? Sites that opted in will stay enabled.": "\u4FDD\u5B58\u3057\u305F\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u3059\u3079\u3066\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F\u30B5\u30A4\u30C8\u3054\u3068\u306E\u8A31\u53EF\u8A2D\u5B9A\u306F\u4FDD\u6301\u3057\u307E\u3059\u3002",
+  "Reset all saved site permissions to Ask next time?": "\u4FDD\u5B58\u6E08\u307F\u306E\u6A29\u9650\u3092\u3059\u3079\u3066\u300C\u6B21\u56DE\u78BA\u8A8D\u300D\u306B\u623B\u3057\u307E\u3059\u304B\uFF1F",
+  "Delete this tab's browsing history and detailed recovery data?": "\u3053\u306E\u30BF\u30D6\u306E\u95B2\u89A7\u5C65\u6B74\u3068\u8A73\u7D30\u306A\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
+  "Remove this closed tab's browsing history and detailed recovery data?": "\u3053\u306E\u9589\u3058\u305F\u30BF\u30D6\u306E\u95B2\u89A7\u5C65\u6B74\u3068\u8A73\u7D30\u306A\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
+  "Delete web history recorded in {v0}?": "{v0}\u306E\u95B2\u89A7\u5C65\u6B74\u3092\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
+  "Delete {v0} visit(s) from this path?": "\u3053\u306E\u7D4C\u8DEF\u306E{v0}\u4EF6\u306E\u8A2A\u554F\u3092\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
+  "Delete \u201C{v0}\u201D from browser history?": "\u300C{v0}\u300D\u3092\u30D6\u30E9\u30A6\u30B6\u5C65\u6B74\u304B\u3089\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
+  "No browser history yet.": "\u95B2\u89A7\u5C65\u6B74\u306F\u307E\u3060\u3042\u308A\u307E\u305B\u3093\u3002",
+  "No history yet": "\u5C65\u6B74\u306F\u307E\u3060\u3042\u308A\u307E\u305B\u3093",
+  "Saved history version": "\u4FDD\u5B58\u3055\u308C\u305F\u5C65\u6B74\u306E\u7248",
+  "Current history": "\u73FE\u5728\u306E\u5C65\u6B74",
+  "Unknown saved time": "\u4FDD\u5B58\u6642\u523B\u4E0D\u660E",
+  "Loading saved history\u2026": "\u4FDD\u5B58\u3055\u308C\u305F\u5C65\u6B74\u3092\u8AAD\u307F\u8FBC\u307F\u4E2D\u2026",
+  "Legacy saved history": "\u65E7\u5F62\u5F0F\u306E\u4FDD\u5B58\u5C65\u6B74",
+  "Viewing saved history from {v0}. Read-only \xB7 {v1}": "{v0} \u306B\u4FDD\u5B58\u3055\u308C\u305F\u5C65\u6B74\u3092\u8868\u793A\u4E2D\uFF08\u8AAD\u307F\u53D6\u308A\u5C02\u7528\uFF09\u30FB{v1}",
+  "This saved history version is no longer available.": "\u3053\u306E\u4FDD\u5B58\u5C65\u6B74\u306E\u7248\u306F\u5229\u7528\u3067\u304D\u306A\u304F\u306A\u308A\u307E\u3057\u305F\u3002",
+  "This saved tab no longer has a restorable URL.": "\u3053\u306E\u4FDD\u5B58\u7248\u306E\u30BF\u30D6\u306B\u306F\u5FA9\u5143\u3067\u304D\u308BURL\u304C\u3042\u308A\u307E\u305B\u3093\u3002",
+  "This saved visit is no longer available.": "\u3053\u306E\u4FDD\u5B58\u7248\u306E\u8A2A\u554F\u5C65\u6B74\u306F\u5229\u7528\u3067\u304D\u306A\u304F\u306A\u308A\u307E\u3057\u305F\u3002",
+  "Restore saved visit": "\u4FDD\u5B58\u7248\u306E\u8A2A\u554F\u3092\u5FA9\u5143",
+  "Load older history": "\u3055\u3089\u306B\u53E4\u3044\u5C65\u6B74\u3092\u8AAD\u307F\u8FBC\u3080",
+  "{v0} \xB7 {v1} visit{v2}": "{v0}\u30FB{v1}\u4EF6\u306E\u8A2A\u554F",
+  "No history matches these filters.": "\u3053\u306E\u6761\u4EF6\u306B\u4E00\u81F4\u3059\u308B\u5C65\u6B74\u306F\u3042\u308A\u307E\u305B\u3093\u3002",
+  "No matching visits": "\u4E00\u81F4\u3059\u308B\u8A2A\u554F\u304C\u3042\u308A\u307E\u305B\u3093",
+  "Try clearing one or more filters.": "\u7D5E\u308A\u8FBC\u307F\u6761\u4EF6\u3092\u6E1B\u3089\u3057\u3066\u307F\u3066\u304F\u3060\u3055\u3044\u3002",
+  "No vault files found": "Vault\u306E\u30D5\u30A1\u30A4\u30EB\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093",
+  "Visited web pages will appear here without creating artificial gaps for idle time.": "\u8A2A\u554F\u3057\u305F\u30A6\u30A7\u30D6\u30DA\u30FC\u30B8\u304C\u3053\u3053\u306B\u8868\u793A\u3055\u308C\u307E\u3059\u3002\u64CD\u4F5C\u3057\u3066\u3044\u306A\u3044\u6642\u9593\u306B\u3088\u308B\u4F59\u5206\u306A\u7A7A\u767D\u306F\u5165\u308A\u307E\u305B\u3093\u3002",
+  "Alternate path \xB7 {v0} visit{v1}": "\u5206\u5C90\u3057\u305F\u7D4C\u8DEF\u30FB{v0}\u4EF6\u306E\u8A2A\u554F",
+  "Show redirects and reloads": "\u30EA\u30C0\u30A4\u30EC\u30AF\u30C8\u3068\u518D\u8AAD\u307F\u8FBC\u307F\u3092\u8868\u793A",
+  "Show {v0} reload, redirect, or navigation event{v1}": "{v0}\u4EF6\u306E\u518D\u8AAD\u307F\u8FBC\u307F\u30FB\u30EA\u30C0\u30A4\u30EC\u30AF\u30C8\u30FB\u79FB\u52D5\u3092\u8868\u793A",
+  "{v0} visit{v1} across {v2} day{v3}{v4}{v5}": "{v2}\u65E5\u9593\u30FB{v0}\u4EF6\u306E\u8A2A\u554F{v4}{v5}",
+  "{v0} deleted histor{v1} retained to preserve navigation paths{v2}": "\u79FB\u52D5\u7D4C\u8DEF\u3092\u4FDD\u3064\u305F\u3081\u3001\u524A\u9664\u6E08\u307F\u5C65\u6B74{v0}\u4EF6\u3092\u4FDD\u6301{v2}",
+  "Keep recovery data": "\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u4FDD\u6301",
+  "Use normal recovery retention": "\u901A\u5E38\u306E\u4FDD\u5B58\u671F\u9593\u306B\u623B\u3059",
+  "Restore in original container": "\u5143\u306EContainer\u3067\u5FA9\u5143",
+  "Original container deleted": "\u5143\u306EContainer\u306F\u524A\u9664\u3055\u308C\u3066\u3044\u307E\u3059",
+  "Detailed recovery data for this tab will be kept until you remove it.": "\u3053\u306E\u30BF\u30D6\u306E\u8A73\u7D30\u306A\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u624B\u52D5\u3067\u524A\u9664\u3059\u308B\u307E\u3067\u4FDD\u6301\u3057\u307E\u3059\u3002",
+  "Detailed recovery data for this tab will use normal retention again.": "\u3053\u306E\u30BF\u30D6\u306E\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u901A\u5E38\u306E\u4FDD\u5B58\u671F\u9593\u306B\u623B\u3057\u307E\u3057\u305F\u3002",
+  "Old tabs will still reopen from durable URLs, but high-fidelity closed-tab restoration will be lost.": "\u53E4\u3044\u30BF\u30D6\u306FURL\u304B\u3089\u958B\u304D\u76F4\u305B\u307E\u3059\u304C\u3001\u8A73\u7D30\u306A\u72B6\u614B\u306E\u5FA9\u5143\u306F\u3067\u304D\u306A\u304F\u306A\u308A\u307E\u3059\u3002",
+  "Disabled for this site": "\u3053\u306E\u30B5\u30A4\u30C8\u3067\u306F\u7121\u52B9",
+  "Reset site": "\u30B5\u30A4\u30C8\u306E\u8A2D\u5B9A\u3092\u30EA\u30BB\u30C3\u30C8",
+  "Reset form recovery for site": "\u30B5\u30A4\u30C8\u306E\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u3092\u30EA\u30BB\u30C3\u30C8",
+  "Reset form recovery for {v0}? This also deletes saved form recovery data for this site.": "{v0}\u306E\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u8A2D\u5B9A\u3092\u30EA\u30BB\u30C3\u30C8\u3057\u307E\u3059\u304B\uFF1F\u4FDD\u5B58\u3057\u305F\u5165\u529B\u5185\u5BB9\u3082\u524A\u9664\u3057\u307E\u3059\u3002",
+  "No matching fields were found for the saved form values.": "\u4FDD\u5B58\u5185\u5BB9\u306B\u5BFE\u5FDC\u3059\u308B\u5165\u529B\u6B04\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3067\u3057\u305F\u3002",
+  "No matching saved value was found for this field.": "\u3053\u306E\u5165\u529B\u6B04\u306B\u5BFE\u5FDC\u3059\u308B\u4FDD\u5B58\u5185\u5BB9\u304C\u3042\u308A\u307E\u305B\u3093\u3002",
+  "Restored the previous value for this field.": "\u3053\u306E\u5165\u529B\u6B04\u306E\u524D\u56DE\u306E\u5185\u5BB9\u3092\u5FA9\u5143\u3057\u307E\u3057\u305F\u3002",
+  "Restored {v0} browser tab(s).": "{v0}\u500B\u306E\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u5FA9\u5143\u3057\u307E\u3057\u305F\u3002",
+  "Restored {v0} form field(s).{v1}": "{v0}\u500B\u306E\u5165\u529B\u6B04\u3092\u5FA9\u5143\u3057\u307E\u3057\u305F\u3002{v1}",
+  "{v0} excluded field(s)": "{v0}\u500B\u306E\u5165\u529B\u6B04\u3092\u9664\u5916",
+  "{v0} is requesting \u201C{v1}\u201D.": "{v0}\u304C\u300C{v1}\u300D\u306E\u8A31\u53EF\u3092\u6C42\u3081\u3066\u3044\u307E\u3059\u3002",
+  "Waiting\u2026": "\u5F85\u6A5F\u4E2D\u2026",
+  "Loaded": "\u8AAD\u307F\u8FBC\u307F\u5B8C\u4E86",
+  "Load failed": "\u8AAD\u307F\u8FBC\u307F\u5931\u6557",
+  "Stopped": "\u505C\u6B62",
+  "Restored": "\u5FA9\u5143\u6E08\u307F",
+  "Open link": "\u30EA\u30F3\u30AF\u3092\u958B\u304F",
+  "Open link in new tab": "\u30EA\u30F3\u30AF\u3092\u65B0\u3057\u3044\u30BF\u30D6\u3067\u958B\u304F",
+  "Open link in background tab": "\u30EA\u30F3\u30AF\u3092\u80CC\u9762\u306E\u30BF\u30D6\u3067\u958B\u304F",
+  "Open link in new window": "\u30EA\u30F3\u30AF\u3092\u65B0\u3057\u3044\u30A6\u30A3\u30F3\u30C9\u30A6\u3067\u958B\u304F",
+  "Copy link address": "\u30EA\u30F3\u30AF\u306E\u30A2\u30C9\u30EC\u30B9\u3092\u30B3\u30D4\u30FC",
+  "Bookmark link": "\u30EA\u30F3\u30AF\u3092\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
+  "Open image in new tab": "\u753B\u50CF\u3092\u65B0\u3057\u3044\u30BF\u30D6\u3067\u958B\u304F",
+  "Copy image": "\u753B\u50CF\u3092\u30B3\u30D4\u30FC",
+  "Copy image address": "\u753B\u50CF\u306E\u30A2\u30C9\u30EC\u30B9\u3092\u30B3\u30D4\u30FC",
+  "Save image": "\u753B\u50CF\u3092\u4FDD\u5B58",
+  "Save image as\u2026": "\u540D\u524D\u3092\u4ED8\u3051\u3066\u753B\u50CF\u3092\u4FDD\u5B58\u2026",
+  "Camera": "\u30AB\u30E1\u30E9",
+  "Microphone": "\u30DE\u30A4\u30AF",
+  "Camera and microphone": "\u30AB\u30E1\u30E9\u3068\u30DE\u30A4\u30AF",
+  "Location": "\u4F4D\u7F6E\u60C5\u5831",
+  "Notifications": "\u901A\u77E5",
+  "Screen capture": "\u753B\u9762\u5171\u6709",
+  "Read clipboard": "\u30AF\u30EA\u30C3\u30D7\u30DC\u30FC\u30C9\u306E\u8AAD\u307F\u53D6\u308A",
+  "Write clipboard": "\u30AF\u30EA\u30C3\u30D7\u30DC\u30FC\u30C9\u3078\u306E\u66F8\u304D\u8FBC\u307F",
+  "Pointer lock": "\u30DE\u30A6\u30B9\u30DD\u30A4\u30F3\u30BF\u30FC\u306E\u56FA\u5B9A",
+  "Full screen": "\u5168\u753B\u9762\u8868\u793A",
+  "Open external links": "\u5916\u90E8\u30EA\u30F3\u30AF\u3092\u958B\u304F",
+  "Site storage access": "\u30B5\u30A4\u30C8\u306E\u30B9\u30C8\u30EC\u30FC\u30B8\u3078\u306E\u30A2\u30AF\u30BB\u30B9",
+  "Top-level storage access": "\u6700\u4E0A\u4F4D\u30B5\u30A4\u30C8\u306E\u30B9\u30C8\u30EC\u30FC\u30B8\u3078\u306E\u30A2\u30AF\u30BB\u30B9",
+  "Audio output devices": "\u97F3\u58F0\u51FA\u529B\u30C7\u30D0\u30A4\u30B9",
+  "Keyboard lock": "\u30AD\u30FC\u30DC\u30FC\u30C9\u306E\u56FA\u5B9A",
+  "Add": "\u8FFD\u52A0",
+  "Clear": "\u6D88\u53BB",
+  "Search": "\u691C\u7D22",
+  "Settings": "\u8A2D\u5B9A",
+  "Restore": "\u5FA9\u5143",
+  "Reveal": "\u8868\u793A",
+  "Copy": "\u30B3\u30D4\u30FC",
+  "Cut": "\u5207\u308A\u53D6\u308A",
+  "Paste": "\u8CBC\u308A\u4ED8\u3051",
+  "Select all": "\u3059\u3079\u3066\u9078\u629E",
+  "Paste and go": "\u8CBC\u308A\u4ED8\u3051\u3066\u958B\u304F",
+  "Allow": "\u8A31\u53EF",
+  "Block": "\u62D2\u5426",
+  "Ask next time": "\u6B21\u56DE\u78BA\u8A8D",
+  "Not now": "\u4ECA\u56DE\u306F\u62D2\u5426",
+  "Dismiss": "\u9589\u3058\u308B",
+  "Address and search": "\u30A2\u30C9\u30EC\u30B9\u30FB\u691C\u7D22",
+  "Ready": "\u6E96\u5099\u5B8C\u4E86",
+  "Web": "\u30A6\u30A7\u30D6",
+  "Vault": "Vault",
+  "Vault files": "Vault\u306E\u30D5\u30A1\u30A4\u30EB",
+  "Browser startup": "\u30D6\u30E9\u30A6\u30B6\u306E\u8D77\u52D5",
+  "Browser back": "\u30D6\u30E9\u30A6\u30B6\u3067\u623B\u308B",
+  "Browser forward": "\u30D6\u30E9\u30A6\u30B6\u3067\u9032\u3080",
+  "Browser zoom in": "\u30D6\u30E9\u30A6\u30B6\u3092\u62E1\u5927",
+  "Browser zoom out": "\u30D6\u30E9\u30A6\u30B6\u3092\u7E2E\u5C0F",
+  "Reset browser zoom for site": "\u30B5\u30A4\u30C8\u306E\u30BA\u30FC\u30E0\u3092\u30EA\u30BB\u30C3\u30C8",
+  "Default Home search": "\u30DB\u30FC\u30E0\u306E\u65E2\u5B9A\u306E\u691C\u7D22",
+  "Home search mode": "\u30DB\u30FC\u30E0\u306E\u691C\u7D22\u65B9\u6CD5",
+  "Web search engine": "\u691C\u7D22\u30A8\u30F3\u30B8\u30F3",
+  "Custom": "\u30AB\u30B9\u30BF\u30E0",
+  "Use Browser Core tab layout": "Browser Core\u306E\u30BF\u30D6\u914D\u7F6E\u3092\u4F7F\u3046",
+  "Replace new empty tabs with Home": "\u7A7A\u306E\u65B0\u898F\u30BF\u30D6\u3092\u30DB\u30FC\u30E0\u306B\u7F6E\u304D\u63DB\u3048\u308B",
+  "Apply the selected browser tab style only to panes that contain Browser Core tabs.": "\u30D6\u30E9\u30A6\u30B6\u306E\u30BF\u30D6\u304C\u3042\u308B\u30DA\u30A4\u30F3\u306B\u3001\u9078\u3093\u3060\u30BF\u30D6\u30B9\u30BF\u30A4\u30EB\u3092\u9069\u7528\u3057\u307E\u3059\u3002",
+  "Firefox keeps a readable minimum tab width and overflows horizontally. Chrome compresses tabs more aggressively.": "Firefox\u306F\u8AAD\u307F\u3084\u3059\u3044\u5E45\u3092\u4FDD\u3061\u3001\u6A2A\u306B\u30B9\u30AF\u30ED\u30FC\u30EB\u3057\u307E\u3059\u3002Chrome\u306F\u30BF\u30D6\u5E45\u3092\u3088\u308A\u5C0F\u3055\u304F\u3057\u307E\u3059\u3002",
+  "A newly created empty Obsidian tab becomes the Browser Core Home surface.": "\u65B0\u3057\u304F\u4F5C\u6210\u3057\u305F\u7A7A\u306E\u30BF\u30D6\u306B\u3001Browser Core\u306E\u30DB\u30FC\u30E0\u3092\u8868\u793A\u3057\u307E\u3059\u3002",
+  "Vault searches files in this vault. Web searches the web or opens an address.": "Vault\u3067\u306FVault\u5185\u306E\u30D5\u30A1\u30A4\u30EB\u3092\u691C\u7D22\u3057\u307E\u3059\u3002\u30A6\u30A7\u30D6\u3067\u306F\u30A6\u30A7\u30D6\u691C\u7D22\u3084URL\u3092\u958B\u304D\u307E\u3059\u3002",
+  "Used when Browser Core treats text as a web search rather than an address.": "\u5165\u529B\u5185\u5BB9\u3092\u30A6\u30A7\u30D6\u691C\u7D22\u3059\u308B\u3068\u304D\u306B\u4F7F\u7528\u3057\u307E\u3059\u3002",
+  "Use {query} where the encoded search text should be inserted.": "\u691C\u7D22\u8A9E\u3092\u633F\u5165\u3059\u308B\u4F4D\u7F6E\u306B {query} \u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
+  "Uses Obsidian's recent-file list; Browser Core does not maintain a duplicate recent-file database.": "Obsidian\u306E\u6700\u8FD1\u4F7F\u3063\u305F\u30D5\u30A1\u30A4\u30EB\u306E\u4E00\u89A7\u3092\u5229\u7528\u3057\u307E\u3059\u3002",
+  "Reads file bookmarks from Obsidian's built-in Bookmarks plugin without mixing them with web bookmarks.": "Obsidian\u6A19\u6E96\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u304B\u3089\u3001\u30D5\u30A1\u30A4\u30EB\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u8AAD\u307F\u53D6\u308A\u307E\u3059\u3002",
+  "Choose what happens when Obsidian starts and no browser tabs are already open.": "Obsidian\u8D77\u52D5\u6642\u306B\u30D6\u30E9\u30A6\u30B6\u306E\u30BF\u30D6\u304C\u306A\u3044\u5834\u5408\u306E\u52D5\u4F5C\u3092\u9078\u3073\u307E\u3059\u3002",
+  "History & recovery": "\u5C65\u6B74\u3068\u5FA9\u5143",
+  "History retention (days)": "\u5C65\u6B74\u306E\u4FDD\u5B58\u65E5\u6570",
+  "Automatic history size limit": "\u5C65\u6B74\u306E\u81EA\u52D5\u6574\u7406\u4EF6\u6570",
+  "Advanced history and recovery storage": "\u5C65\u6B74\u30FB\u5FA9\u5143\u30C7\u30FC\u30BF\u306E\u8A73\u7D30\u8A2D\u5B9A",
+  "Detailed tab recovery retention (days)": "\u8A73\u7D30\u306A\u30BF\u30D6\u5FA9\u5143\u30C7\u30FC\u30BF\u306E\u4FDD\u5B58\u65E5\u6570",
+  "Detailed recovery storage limit (MB)": "\u8A73\u7D30\u306A\u5FA9\u5143\u30C7\u30FC\u30BF\u306E\u4FDD\u5B58\u5BB9\u91CF\uFF08MB\uFF09",
+  "Form recovery retention (days)": "\u30D5\u30A9\u30FC\u30E0\u306E\u4FDD\u5B58\u65E5\u6570",
+  "Saved form versions per page": "\u30DA\u30FC\u30B8\u3054\u3068\u306E\u30D5\u30A9\u30FC\u30E0\u4FDD\u5B58\u6570",
+  "Pages with saved form recovery": "\u30D5\u30A9\u30FC\u30E0\u3092\u4FDD\u5B58\u3059\u308B\u30DA\u30FC\u30B8\u6570",
+  "History day boundaries default to 04:00 so late-night work stays together.": "\u65E5\u4ED8\u306F\u65E2\u5B9A\u3067\u5348\u524D4\u6642\u306B\u5207\u308A\u66FF\u308F\u308A\u3001\u6DF1\u591C\u306E\u4F5C\u696D\u3092\u540C\u3058\u65E5\u306B\u307E\u3068\u3081\u307E\u3059\u3002",
+  "0 keeps browsing history until you delete it. Protected tab histories are not removed automatically.": "0\u306F\u7121\u671F\u9650\u4FDD\u5B58\u3067\u3059\u3002\u4FDD\u8B77\u3057\u305F\u30BF\u30D6\u306E\u5C65\u6B74\u306F\u81EA\u52D5\u524A\u9664\u3055\u308C\u307E\u305B\u3093\u3002",
+  "0 disables size-based cleanup. A positive value allows the oldest closed, unprotected tab histories to be removed when stored history grows past this limit.": "0\u306F\u4EF6\u6570\u306B\u3088\u308B\u6574\u7406\u3092\u7121\u52B9\u306B\u3057\u307E\u3059\u3002\u4E0A\u9650\u3092\u8D85\u3048\u308B\u3068\u3001\u9589\u3058\u305F\u672A\u4FDD\u8B77\u30BF\u30D6\u306E\u53E4\u3044\u5C65\u6B74\u304B\u3089\u6574\u7406\u3057\u307E\u3059\u3002",
+  "How long Browser Core should keep extra state that can restore recently closed tabs more accurately.": "\u9589\u3058\u305F\u30BF\u30D6\u3092\u8A73\u3057\u304F\u5FA9\u5143\u3059\u308B\u305F\u3081\u306E\u30C7\u30FC\u30BF\u3092\u4FDD\u5B58\u3059\u308B\u671F\u9593\u3067\u3059\u3002",
+  "When this budget is exceeded, older unprotected recovery data may fall back to URL-only reopening.": "\u5BB9\u91CF\u3092\u8D85\u3048\u308B\u3068\u3001\u53E4\u3044\u672A\u4FDD\u8B77\u306E\u5FA9\u5143\u30C7\u30FC\u30BF\u306FURL\u3060\u3051\u306E\u5FA9\u5143\u306B\u306A\u308B\u5834\u5408\u304C\u3042\u308A\u307E\u3059\u3002",
+  "Allow form recovery as a feature. Capture remains opt-in per site, and password/payment credentials are excluded.": "\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u6A5F\u80FD\u3092\u6709\u52B9\u306B\u3057\u307E\u3059\u3002\u4FDD\u5B58\u306F\u30B5\u30A4\u30C8\u3054\u3068\u306B\u8A31\u53EF\u3057\u3001\u30D1\u30B9\u30EF\u30FC\u30C9\u3084\u6C7A\u6E08\u60C5\u5831\u306F\u9664\u5916\u3057\u307E\u3059\u3002",
+  "How long saved non-credential form values are retained.": "\u8A8D\u8A3C\u60C5\u5831\u3092\u542B\u307E\u306A\u3044\u30D5\u30A9\u30FC\u30E0\u306E\u5165\u529B\u5185\u5BB9\u3092\u4FDD\u5B58\u3059\u308B\u671F\u9593\u3067\u3059\u3002",
+  "How many recent recovery versions to keep for one page. Multi-step forms can use values from several versions.": "1\u30DA\u30FC\u30B8\u306B\u4FDD\u5B58\u3059\u308B\u5165\u529B\u5185\u5BB9\u306E\u5C65\u6B74\u6570\u3067\u3059\u3002\u8907\u6570\u6BB5\u968E\u306E\u30D5\u30A9\u30FC\u30E0\u3067\u306F\u3001\u8907\u6570\u306E\u5C65\u6B74\u3092\u5229\u7528\u3067\u304D\u307E\u3059\u3002",
+  "Maximum number of distinct pages that may keep form recovery data.": "\u30D5\u30A9\u30FC\u30E0\u306E\u5165\u529B\u5185\u5BB9\u3092\u4FDD\u5B58\u3059\u308B\u30DA\u30FC\u30B8\u6570\u306E\u4E0A\u9650\u3067\u3059\u3002",
+  "Deletes all saved non-credential form values without changing which sites have form recovery enabled.": "\u30B5\u30A4\u30C8\u3054\u3068\u306E\u8A31\u53EF\u8A2D\u5B9A\u3092\u4FDD\u3063\u305F\u307E\u307E\u3001\u4FDD\u5B58\u3057\u305F\u30D5\u30A9\u30FC\u30E0\u306E\u5165\u529B\u5185\u5BB9\u3092\u3059\u3079\u3066\u6D88\u53BB\u3057\u307E\u3059\u3002",
+  "Deletes browsing history and detailed recovery data for closed tabs. Open tabs stay open.": "\u95B2\u89A7\u5C65\u6B74\u3068\u9589\u3058\u305F\u30BF\u30D6\u306E\u8A73\u7D30\u306A\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u6D88\u53BB\u3057\u307E\u3059\u3002\u958B\u3044\u3066\u3044\u308B\u30BF\u30D6\u306F\u9589\u3058\u307E\u305B\u3093\u3002",
+  "Keeps browsing history, but removes extra state used to restore recently closed tabs more accurately. Open tabs start collecting detailed recovery again after they are reopened.": "\u95B2\u89A7\u5C65\u6B74\u3092\u6B8B\u3057\u3066\u3001\u30BF\u30D6\u306E\u8A73\u7D30\u306A\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u6D88\u53BB\u3057\u307E\u3059\u3002\u30BF\u30D6\u3092\u958B\u304D\u76F4\u3059\u3068\u518D\u3073\u4FDD\u5B58\u3092\u59CB\u3081\u307E\u3059\u3002",
+  "Returns saved site permissions to Ask next time. Container cookies and site storage are not changed.": "\u30B5\u30A4\u30C8\u306E\u4FDD\u5B58\u6E08\u307F\u6A29\u9650\u3092\u300C\u6B21\u56DE\u78BA\u8A8D\u300D\u306B\u623B\u3057\u307E\u3059\u3002Cookie\u3068\u30B5\u30A4\u30C8\u30C7\u30FC\u30BF\u306F\u7DAD\u6301\u3057\u307E\u3059\u3002",
+  "Cover the web page while a new page starts loading. Off by default to avoid a full-page flash.": "\u65B0\u3057\u3044\u30DA\u30FC\u30B8\u306E\u8AAD\u307F\u8FBC\u307F\u958B\u59CB\u6642\u306B\u3001\u753B\u9762\u5168\u4F53\u3092\u8986\u3044\u307E\u3059\u3002\u753B\u9762\u306E\u3061\u3089\u3064\u304D\u3092\u6291\u3048\u308B\u305F\u3081\u65E2\u5B9A\u3067\u306F\u7121\u52B9\u3067\u3059\u3002",
+  "Avoid large transitions, slides and parallax in Browser Core UI.": "\u5927\u304D\u306A\u30A2\u30CB\u30E1\u30FC\u30B7\u30E7\u30F3\u3084\u30B9\u30E9\u30A4\u30C9\u52B9\u679C\u3092\u6E1B\u3089\u3057\u307E\u3059\u3002",
+  "Used by sites without a site-specific zoom override.": "\u30BA\u30FC\u30E0\u3092\u500B\u5225\u306B\u8A2D\u5B9A\u3057\u3066\u3044\u306A\u3044\u30B5\u30A4\u30C8\u306B\u4F7F\u7528\u3057\u307E\u3059\u3002",
+  "Off uses only the selected default container. Manual keeps other containers available without automatic site routing. Automatic also applies site default rules.": "\u7121\u52B9\u3067\u306F\u65E2\u5B9A\u306EContainer\u3060\u3051\u3092\u4F7F\u7528\u3057\u307E\u3059\u3002\u624B\u52D5\u3067\u306F\u81EA\u5206\u3067\u5207\u308A\u66FF\u3048\u3001\u81EA\u52D5\u3067\u306F\u30B5\u30A4\u30C8\u3054\u3068\u306E\u6307\u5B9A\u3082\u9069\u7528\u3057\u307E\u3059\u3002",
+  "Used for new browser tabs, including when container controls are off. Automatic mode may replace it with a site's default container.": "\u65B0\u3057\u3044\u30BF\u30D6\u306B\u4F7F\u7528\u3057\u307E\u3059\u3002Container\u64CD\u4F5C\u304C\u7121\u52B9\u3067\u3082\u9069\u7528\u3055\u308C\u3001\u81EA\u52D5\u30E2\u30FC\u30C9\u3067\u306F\u30B5\u30A4\u30C8\u306E\u6307\u5B9A\u304C\u512A\u5148\u3055\u308C\u307E\u3059\u3002",
+  "Separate persistent login and site data": "\u30ED\u30B0\u30A4\u30F3\u72B6\u614B\u3068\u30B5\u30A4\u30C8\u30C7\u30FC\u30BF\u3092\u5206\u3051\u3066\u4FDD\u5B58",
+  "Creates a separate persistent login and site data.": "\u30ED\u30B0\u30A4\u30F3\u72B6\u614B\u3068\u30B5\u30A4\u30C8\u30C7\u30FC\u30BF\u3092\u5206\u3051\u305FContainer\u3092\u4F5C\u6210\u3057\u307E\u3059\u3002",
+  "Box": "\u7BB1",
+  "Personal": "\u500B\u4EBA\u7528",
+  "Work": "\u4ED5\u4E8B",
+  "Study": "\u5B66\u7FD2",
+  "Organization": "\u7D44\u7E54",
+  "Protected": "\u4FDD\u8B77",
+  "Favorite": "\u304A\u6C17\u306B\u5165\u308A",
+  "Browsing data": "\u95B2\u89A7\u30C7\u30FC\u30BF",
+  "Site default containers": "\u30B5\u30A4\u30C8\u3054\u3068\u306EContainer",
+  "Site default container": "\u3053\u306E\u30B5\u30A4\u30C8\u306EContainer",
+  "All containers": "\u3059\u3079\u3066\u306EContainer",
+  "Container": "Container",
+  "Container\u2026": "Container\u2026",
+  "Reopen current page in": "\u3053\u306E\u30DA\u30FC\u30B8\u3092\u5225\u306EContainer\u3067\u958B\u304F",
+  "No default container for this site": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u6307\u5B9A\u306F\u3042\u308A\u307E\u305B\u3093",
+  "Automatic site defaults are off": "\u30B5\u30A4\u30C8\u3054\u3068\u306E\u81EA\u52D5\u5207\u308A\u66FF\u3048\u306F\u7121\u52B9\u3067\u3059",
+  "Forget site default container": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u6307\u5B9A\u3092\u89E3\u9664",
+  "Site defaults are only available for web pages": "\u30B5\u30A4\u30C8\u306E\u6307\u5B9A\u306F\u30A6\u30A7\u30D6\u30DA\u30FC\u30B8\u3067\u5229\u7528\u3067\u304D\u307E\u3059",
+  "Clear browsing history": "\u95B2\u89A7\u5C65\u6B74\u3092\u6D88\u53BB",
+  "Clear detailed tab recovery": "\u8A73\u7D30\u306A\u30BF\u30D6\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u6D88\u53BB",
+  "Clear recovery data": "\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u6D88\u53BB",
+  "Clear form data": "\u30D5\u30A9\u30FC\u30E0\u30C7\u30FC\u30BF\u3092\u6D88\u53BB",
+  "Clear form recovery data": "\u30D5\u30A9\u30FC\u30E0\u306E\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u6D88\u53BB",
+  "Clear all saved form recovery data": "\u4FDD\u5B58\u6E08\u307F\u30D5\u30A9\u30FC\u30E0\u30C7\u30FC\u30BF\u3092\u3059\u3079\u3066\u6D88\u53BB",
+  "Reset permissions": "\u6A29\u9650\u3092\u30EA\u30BB\u30C3\u30C8",
+  "Reset site permissions": "\u30B5\u30A4\u30C8\u306E\u6A29\u9650\u3092\u30EA\u30BB\u30C3\u30C8",
+  "Site permissions": "\u30B5\u30A4\u30C8\u306E\u6A29\u9650",
+  "Site permission": "\u30B5\u30A4\u30C8\u306E\u6A29\u9650",
+  "Site permissions are only available for web pages": "\u6A29\u9650\u306E\u8A2D\u5B9A\u306F\u30A6\u30A7\u30D6\u30DA\u30FC\u30B8\u3067\u5229\u7528\u3067\u304D\u307E\u3059",
+  "No saved permissions for this site": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u4FDD\u5B58\u6E08\u307F\u6A29\u9650\u306F\u3042\u308A\u307E\u305B\u3093",
+  "Form recovery by site": "\u30B5\u30A4\u30C8\u3054\u3068\u306E\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143",
+  "Form recovery is only available for web pages.": "\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u306F\u30A6\u30A7\u30D6\u30DA\u30FC\u30B8\u3067\u5229\u7528\u3067\u304D\u307E\u3059\u3002",
+  "Saved form values": "\u4FDD\u5B58\u3057\u305F\u5165\u529B\u5185\u5BB9",
+  "Restore form values": "\u5165\u529B\u5185\u5BB9\u3092\u5FA9\u5143",
+  "Restore saved form values": "\u4FDD\u5B58\u3057\u305F\u5165\u529B\u5185\u5BB9\u3092\u5FA9\u5143",
+  "Restore matching fields": "\u4E00\u81F4\u3059\u308B\u9805\u76EE\u3092\u5FA9\u5143",
+  "Reset form recovery for this site": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u3092\u30EA\u30BB\u30C3\u30C8",
+  "Saved form values are available for this page.": "\u3053\u306E\u30DA\u30FC\u30B8\u306B\u306F\u4FDD\u5B58\u3057\u305F\u5165\u529B\u5185\u5BB9\u304C\u3042\u308A\u307E\u3059\u3002",
+  "Dismiss recovery message": "\u5FA9\u5143\u30E1\u30C3\u30BB\u30FC\u30B8\u3092\u9589\u3058\u308B",
+  "No saved form value is available for this page.": "\u3053\u306E\u30DA\u30FC\u30B8\u306B\u306F\u4FDD\u5B58\u3057\u305F\u5165\u529B\u5185\u5BB9\u304C\u3042\u308A\u307E\u305B\u3093\u3002",
+  "No saved form values are available for this page.": "\u3053\u306E\u30DA\u30FC\u30B8\u306B\u306F\u4FDD\u5B58\u3057\u305F\u5165\u529B\u5185\u5BB9\u304C\u3042\u308A\u307E\u305B\u3093\u3002",
+  "No saved form values for this page.": "\u3053\u306E\u30DA\u30FC\u30B8\u306E\u4FDD\u5B58\u6E08\u307F\u5165\u529B\u5185\u5BB9\u306F\u3042\u308A\u307E\u305B\u3093\u3002",
+  "Text field": "\u5165\u529B\u6B04",
+  "Form recovery disabled and stored form values cleared for this site.": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u3092\u7121\u52B9\u306B\u3057\u3001\u4FDD\u5B58\u5185\u5BB9\u3092\u6D88\u53BB\u3057\u307E\u3057\u305F\u3002",
+  "Form recovery enabled for this site.": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u3092\u6709\u52B9\u306B\u3057\u307E\u3057\u305F\u3002",
+  "Could not identify the focused form field.": "\u9078\u629E\u4E2D\u306E\u5165\u529B\u6B04\u3092\u7279\u5B9A\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002",
+  "This form field is excluded from recovery on this site.": "\u3053\u306E\u5165\u529B\u6B04\u3092\u3001\u3053\u306E\u30B5\u30A4\u30C8\u306E\u5FA9\u5143\u5BFE\u8C61\u304B\u3089\u9664\u5916\u3057\u307E\u3057\u305F\u3002",
+  "These values were saved for this page. Browser Core restores only fields it can match confidently; ambiguous fields remain unchanged.": "\u3053\u306E\u30DA\u30FC\u30B8\u3067\u4FDD\u5B58\u3057\u305F\u5165\u529B\u5185\u5BB9\u3067\u3059\u3002\u78BA\u5B9F\u306B\u5BFE\u5FDC\u3059\u308B\u5165\u529B\u6B04\u3060\u3051\u3092\u5FA9\u5143\u3057\u307E\u3059\u3002",
+  "Allow and Block are remembered for this site in the current container. Not now denies this request without saving a decision.": "\u8A31\u53EF\u30FB\u62D2\u5426\u306F\u3001\u3053\u306EContainer\u5185\u306E\u30B5\u30A4\u30C8\u306B\u4FDD\u5B58\u3057\u307E\u3059\u3002\u300C\u4ECA\u56DE\u306F\u62D2\u5426\u300D\u3067\u306F\u5224\u65AD\u3092\u4FDD\u5B58\u3057\u307E\u305B\u3093\u3002",
+  "Browser Core does not save a full live copy of the page. Some page state can only be restored by the browser engine, while saved form values and the website's own drafts are recovered separately.": "\u30DA\u30FC\u30B8\u5168\u4F53\u306E\u52D5\u4F5C\u72B6\u614B\u306F\u4FDD\u5B58\u3055\u308C\u307E\u305B\u3093\u3002\u30D6\u30E9\u30A6\u30B6\u306E\u5FA9\u5143\u3001\u4FDD\u5B58\u6E08\u307F\u30D5\u30A9\u30FC\u30E0\u3001\u30B5\u30A4\u30C8\u5074\u306E\u4E0B\u66F8\u304D\u3092\u5229\u7528\u3057\u307E\u3059\u3002",
+  "Detailed tab recovery is not currently available; the page can still be reopened normally.": "\u8A73\u7D30\u306A\u5FA9\u5143\u30C7\u30FC\u30BF\u306F\u3042\u308A\u307E\u305B\u3093\u304C\u3001\u901A\u5E38\u306E\u30DA\u30FC\u30B8\u3068\u3057\u3066\u958B\u304D\u76F4\u305B\u307E\u3059\u3002",
+  "Close tab": "\u30BF\u30D6\u3092\u9589\u3058\u308B",
+  "Close browser tab": "\u30D6\u30E9\u30A6\u30B6\u306E\u30BF\u30D6\u3092\u9589\u3058\u308B",
+  "Close current browser tab": "\u73FE\u5728\u306E\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u9589\u3058\u308B",
+  "Close other browser tabs": "\u307B\u304B\u306E\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u9589\u3058\u308B",
+  "Close browser tabs to the left": "\u5DE6\u5074\u306E\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u9589\u3058\u308B",
+  "Close browser tabs to the right": "\u53F3\u5074\u306E\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u9589\u3058\u308B",
+  "Close unpinned browser tabs": "\u56FA\u5B9A\u3057\u3066\u3044\u306A\u3044\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u9589\u3058\u308B",
+  "Duplicate browser tab": "\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u8907\u88FD",
+  "Move to new window": "\u65B0\u3057\u3044\u30A6\u30A3\u30F3\u30C9\u30A6\u3078\u79FB\u52D5",
+  "Move browser tab to new window": "\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u65B0\u3057\u3044\u30A6\u30A3\u30F3\u30C9\u30A6\u3078\u79FB\u52D5",
+  "Next browser tab": "\u6B21\u306E\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6",
+  "Previous browser tab": "\u524D\u306E\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6",
+  "Focus browser address bar": "\u30A2\u30C9\u30EC\u30B9\u30D0\u30FC\u3078\u79FB\u52D5",
+  "Open browser container picker": "Container\u3092\u9078\u3076",
+  "Switch to tab": "\u3053\u306E\u30BF\u30D6\u306B\u5207\u308A\u66FF\u3048",
+  "Reopen closed tab": "\u9589\u3058\u305F\u30BF\u30D6\u3092\u958B\u304F",
+  "Recently closed browser tabs": "\u6700\u8FD1\u9589\u3058\u305F\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6",
+  "Restore previous browser session": "\u524D\u56DE\u306E\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u5FA9\u5143",
+  "Restore tab": "\u30BF\u30D6\u3092\u5FA9\u5143",
+  "Pin restored tab": "\u5FA9\u5143\u3057\u305F\u30BF\u30D6\u3092\u56FA\u5B9A",
+  "Restore from here": "\u3053\u3053\u304B\u3089\u5FA9\u5143",
+  "Retry restore": "\u5FA9\u5143\u3092\u518D\u8A66\u884C",
+  "Recovery details": "\u5FA9\u5143\u306E\u8A73\u7D30",
+  "Restore latest page from this path": "\u3053\u306E\u7D4C\u8DEF\u306E\u6700\u5F8C\u306E\u30DA\u30FC\u30B8\u3092\u5FA9\u5143",
+  "No recently closed browser tab.": "\u6700\u8FD1\u9589\u3058\u305F\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u306F\u3042\u308A\u307E\u305B\u3093\u3002",
+  "No previous browser session is available.": "\u524D\u56DE\u306E\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u306E\u8A18\u9332\u306F\u3042\u308A\u307E\u305B\u3093\u3002",
+  "The previous browser session is already restored.": "\u524D\u56DE\u306E\u30BF\u30D6\u306F\u3059\u3067\u306B\u5FA9\u5143\u3055\u308C\u3066\u3044\u307E\u3059\u3002",
+  "This tab has no restorable URL.": "\u3053\u306E\u30BF\u30D6\u306B\u306F\u5FA9\u5143\u3067\u304D\u308BURL\u304C\u3042\u308A\u307E\u305B\u3093\u3002",
+  "This Obsidian build cannot move the tab to a new window.": "\u3053\u306EObsidian\u3067\u306F\u5225\u30A6\u30A3\u30F3\u30C9\u30A6\u3078\u79FB\u52D5\u3067\u304D\u307E\u305B\u3093\u3002",
+  "Hard reload": "\u30AD\u30E3\u30C3\u30B7\u30E5\u3092\u4F7F\u308F\u305A\u518D\u8AAD\u307F\u8FBC\u307F",
+  "Reload normally": "\u901A\u5E38\u306E\u518D\u8AAD\u307F\u8FBC\u307F",
+  "Reload browser page": "\u30D6\u30E9\u30A6\u30B6\u306E\u30DA\u30FC\u30B8\u3092\u518D\u8AAD\u307F\u8FBC\u307F",
+  "Bookmark current browser page": "\u73FE\u5728\u306E\u30DA\u30FC\u30B8\u3092\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
+  "Bookmark all open browser tabs": "\u958B\u3044\u3066\u3044\u308B\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u3059\u3079\u3066\u4FDD\u5B58",
+  "There are no web pages to bookmark.": "\u4FDD\u5B58\u3067\u304D\u308B\u30A6\u30A7\u30D6\u30DA\u30FC\u30B8\u304C\u3042\u308A\u307E\u305B\u3093\u3002",
+  "All open web pages are already bookmarked.": "\u958B\u3044\u3066\u3044\u308B\u30DA\u30FC\u30B8\u306F\u3059\u3079\u3066\u4FDD\u5B58\u6E08\u307F\u3067\u3059\u3002",
+  "Added to favorites.": "\u9078\u629C\u30E1\u30F3\u30D0\u30FC\u306B\u8FFD\u52A0\u3057\u307E\u3057\u305F\u3002",
+  "That move would create an invalid bookmark-folder cycle.": "\u30D5\u30A9\u30EB\u30C0\u3092\u81EA\u8EAB\u3084\u5B50\u30D5\u30A9\u30EB\u30C0\u306E\u4E2D\u3078\u79FB\u52D5\u3059\u308B\u3053\u3068\u306F\u3067\u304D\u307E\u305B\u3093\u3002",
+  "Copy title": "\u540D\u524D\u3092\u30B3\u30D4\u30FC",
+  "Copy page title and URL": "\u540D\u524D\u3068URL\u3092\u30B3\u30D4\u30FC",
+  "Copy file path": "\u30D5\u30A1\u30A4\u30EB\u306E\u30D1\u30B9\u3092\u30B3\u30D4\u30FC",
+  "Copy event details": "\u30A4\u30D9\u30F3\u30C8\u306E\u8A73\u7D30\u3092\u30B3\u30D4\u30FC",
+  "Copy tab history": "\u30BF\u30D6\u306E\u5C65\u6B74\u3092\u30B3\u30D4\u30FC",
+  "Open history": "\u5C65\u6B74\u3092\u958B\u304F",
+  "Show history": "\u5C65\u6B74\u3092\u8868\u793A",
+  "Search history": "\u5C65\u6B74\u3092\u691C\u7D22",
+  "Search browser history": "\u30D6\u30E9\u30A6\u30B6\u5C65\u6B74\u3092\u691C\u7D22",
+  "History for this site": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u5C65\u6B74",
+  "Search title, URL, domain, or tab": "\u540D\u524D\u30FBURL\u30FB\u30C9\u30E1\u30A4\u30F3\u30FB\u30BF\u30D6\u3067\u691C\u7D22",
+  "Filter history by day": "\u65E5\u4ED8\u3067\u7D5E\u308A\u8FBC\u3080",
+  "Filter history by container": "Container\u3067\u7D5E\u308A\u8FBC\u3080",
+  "Clear filters": "\u7D5E\u308A\u8FBC\u307F\u3092\u89E3\u9664",
+  "Search within this day": "\u3053\u306E\u65E5\u306E\u5C65\u6B74\u3092\u691C\u7D22",
+  "Browse visits by day, tab, and alternate path. Filtering only changes what is shown.": "\u65E5\u4ED8\u3001\u30BF\u30D6\u3001\u5206\u5C90\u3057\u305F\u7D4C\u8DEF\u304B\u3089\u95B2\u89A7\u5C65\u6B74\u3092\u898B\u3089\u308C\u307E\u3059\u3002\u7D5E\u308A\u8FBC\u307F\u3067\u306F\u5C65\u6B74\u306F\u524A\u9664\u3055\u308C\u307E\u305B\u3093\u3002",
+  "Show alternate paths": "\u5206\u5C90\u3057\u305F\u7D4C\u8DEF\u3092\u8868\u793A",
+  "Show alternate path": "\u5206\u5C90\u3057\u305F\u7D4C\u8DEF\u3092\u8868\u793A",
+  "Show full tab history": "\u30BF\u30D6\u306E\u5168\u5C65\u6B74\u3092\u8868\u793A",
+  "Show in full history": "\u5168\u5C65\u6B74\u3067\u898B\u308B",
+  "Hide redirects and reloads": "\u30EA\u30C0\u30A4\u30EC\u30AF\u30C8\u3068\u518D\u8AAD\u307F\u8FBC\u307F\u3092\u96A0\u3059",
+  "Expand all alternate paths": "\u3059\u3079\u3066\u306E\u5206\u5C90\u3092\u5C55\u958B",
+  "Collapse all alternate paths": "\u3059\u3079\u3066\u306E\u5206\u5C90\u3092\u6298\u308A\u305F\u305F\u3080",
+  "Collapse alternate path": "\u5206\u5C90\u3092\u6298\u308A\u305F\u305F\u3080",
+  "Open current path in new tabs": "\u73FE\u5728\u306E\u7D4C\u8DEF\u3092\u65B0\u3057\u3044\u30BF\u30D6\u3067\u958B\u304F",
+  "Open this path in new tabs": "\u3053\u306E\u7D4C\u8DEF\u3092\u65B0\u3057\u3044\u30BF\u30D6\u3067\u958B\u304F",
+  "Open all tabs from this day": "\u3053\u306E\u65E5\u306E\u30BF\u30D6\u3092\u3059\u3079\u3066\u958B\u304F",
+  "Reveal this visit in its alternate path": "\u3053\u306E\u8A2A\u554F\u3092\u5206\u5C90\u7D4C\u8DEF\u3067\u8868\u793A",
+  "Open redirect source": "\u30EA\u30C0\u30A4\u30EC\u30AF\u30C8\u5143\u3092\u958B\u304F",
+  "Open redirect destination": "\u30EA\u30C0\u30A4\u30EC\u30AF\u30C8\u5148\u3092\u958B\u304F",
+  "Delete alternate path": "\u3053\u306E\u5206\u5C90\u3092\u524A\u9664",
+  "Delete history entry": "\u3053\u306E\u5C65\u6B74\u3092\u524A\u9664",
+  "Delete tab history": "\u30BF\u30D6\u306E\u5C65\u6B74\u3092\u524A\u9664",
+  "Delete this day's history": "\u3053\u306E\u65E5\u306E\u5C65\u6B74\u3092\u524A\u9664",
+  "Remove from history": "\u5C65\u6B74\u304B\u3089\u524A\u9664",
+  "Deleted history entry": "\u524A\u9664\u3055\u308C\u305F\u5C65\u6B74",
+  "Remove deleted entry marker": "\u524A\u9664\u6E08\u307F\u306E\u5370\u3092\u53D6\u308A\u9664\u304F",
+  "Recent files": "\u6700\u8FD1\u306E\u30D5\u30A1\u30A4\u30EB",
+  "Looking for a Vault file?": "Vault\u306E\u30D5\u30A1\u30A4\u30EB\u3092\u63A2\u3057\u307E\u3059\u304B\uFF1F",
+  "Quick Switcher": "\u30AF\u30A4\u30C3\u30AF\u30B9\u30A4\u30C3\u30C1\u30E3\u30FC",
+  "Try another name or switch to Web.": "\u5225\u306E\u540D\u524D\u3067\u63A2\u3059\u304B\u3001\u30A6\u30A7\u30D6\u691C\u7D22\u3078\u5207\u308A\u66FF\u3048\u3066\u304F\u3060\u3055\u3044\u3002",
+  "Use Obsidian's Quick Switcher for notes and files.": "\u30CE\u30FC\u30C8\u3084\u30D5\u30A1\u30A4\u30EB\u306FObsidian\u306E\u30AF\u30A4\u30C3\u30AF\u30B9\u30A4\u30C3\u30C1\u30E3\u30FC\u3067\u63A2\u305B\u307E\u3059\u3002",
+  "Search your vault, browse the web, or continue where you left off.": "Vault\u3092\u691C\u7D22\u3057\u305F\u308A\u3001\u30A6\u30A7\u30D6\u3092\u958B\u3044\u305F\u308A\u3001\u524D\u56DE\u306E\u7D9A\u304D\u3092\u59CB\u3081\u3089\u308C\u307E\u3059\u3002",
+  "Open Obsidian Quick Switcher": "Obsidian\u306E\u30AF\u30A4\u30C3\u30AF\u30B9\u30A4\u30C3\u30C1\u30E3\u30FC\u3092\u958B\u304F",
+  "Open Browser Core settings": "Browser Core\u306E\u8A2D\u5B9A\u3092\u958B\u304F",
+  "Open Obsidian Settings \u2192 Community plugins \u2192 Unified Browser Core.": "Obsidian\u306E\u8A2D\u5B9A \u2192 \u30B3\u30DF\u30E5\u30CB\u30C6\u30A3\u30D7\u30E9\u30B0\u30A4\u30F3 \u2192 Unified Browser Core\u3092\u958B\u3044\u3066\u304F\u3060\u3055\u3044\u3002",
+  "Obsidian Quick Switcher is not available.": "Obsidian\u306E\u30AF\u30A4\u30C3\u30AF\u30B9\u30A4\u30C3\u30C1\u30E3\u30FC\u3092\u5229\u7528\u3067\u304D\u307E\u305B\u3093\u3002",
+  "That file is no longer available.": "\u305D\u306E\u30D5\u30A1\u30A4\u30EB\u306F\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3002",
+  "Could not open that file.": "\u30D5\u30A1\u30A4\u30EB\u3092\u958B\u3051\u307E\u305B\u3093\u3067\u3057\u305F\u3002",
+  "Import web bookmarks from Obsidian Bookmarks": "Obsidian\u306E\u30A6\u30A7\u30D6\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u53D6\u308A\u8FBC\u3080",
+  "Obsidian Bookmarks is unavailable or has no readable bookmark data.": "Obsidian\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u5229\u7528\u3067\u304D\u306A\u3044\u304B\u3001\u8AAD\u307F\u53D6\u308C\u308B\u30C7\u30FC\u30BF\u304C\u3042\u308A\u307E\u305B\u3093\u3002",
+  "Web viewer Bookmarks has no readable data in this vault.": "\u3053\u306EVault\u306BWeb viewer Bookmarks\u306E\u8AAD\u307F\u53D6\u308C\u308B\u30C7\u30FC\u30BF\u304C\u3042\u308A\u307E\u305B\u3093\u3002",
+  "No Surfing data was found in this vault. Run migration before uninstalling Surfing.": "Surfing\u306E\u30C7\u30FC\u30BF\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3002Surfing\u3092\u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30EB\u3059\u308B\u524D\u306B\u79FB\u884C\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
+  "Surfing data could not be read safely. No changes were made.": "Surfing\u306E\u30C7\u30FC\u30BF\u3092\u5B89\u5168\u306B\u8AAD\u307F\u53D6\u308C\u307E\u305B\u3093\u3067\u3057\u305F\u3002\u5909\u66F4\u306F\u884C\u3063\u3066\u3044\u307E\u305B\u3093\u3002",
+  "Surfing migration stopped. Source data was not deleted; run the command again to resume.": "\u79FB\u884C\u3092\u4E2D\u65AD\u3057\u307E\u3057\u305F\u3002\u5143\u30C7\u30FC\u30BF\u306F\u524A\u9664\u3055\u308C\u3066\u3044\u307E\u305B\u3093\u3002\u3082\u3046\u4E00\u5EA6\u5B9F\u884C\u3059\u308B\u3068\u518D\u958B\u3067\u304D\u307E\u3059\u3002",
+  "Close or reopen tabs using this container before deleting it.": "\u524A\u9664\u3059\u308B\u524D\u306B\u3001\u3053\u306EContainer\u306E\u30BF\u30D6\u3092\u9589\u3058\u308B\u304B\u5225\u306EContainer\u3067\u958B\u3044\u3066\u304F\u3060\u3055\u3044\u3002",
+  "Could not clear this container's browsing data, so the container was not deleted.": "\u95B2\u89A7\u30C7\u30FC\u30BF\u3092\u6D88\u53BB\u3067\u304D\u306A\u304B\u3063\u305F\u305F\u3081\u3001Container\u3092\u524A\u9664\u3057\u3066\u3044\u307E\u305B\u3093\u3002",
+  "Open new tab in this container": "\u3053\u306EContainer\u3067\u65B0\u3057\u3044\u30BF\u30D6\u3092\u958B\u304F",
+  "Language": "\u8868\u793A\u8A00\u8A9E",
+  "Follow Obsidian": "Obsidian\u306B\u5408\u308F\u305B\u308B",
+  "English": "\u82F1\u8A9E",
+  "Japanese": "\u65E5\u672C\u8A9E",
+  "Choose the language used by Browser Core.": "Browser Core\u306E\u8868\u793A\u8A00\u8A9E\u3092\u9078\u3073\u307E\u3059\u3002",
+  "Bookmarks": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
+  "Bookmark": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
+  "Bookmark page": "\u3053\u306E\u30DA\u30FC\u30B8\u3092\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
+  "Bookmark this page": "\u3053\u306E\u30DA\u30FC\u30B8\u3092\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
+  "Edit bookmark": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u7DE8\u96C6",
+  "Bookmark saved": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u4FDD\u5B58\u3057\u307E\u3057\u305F",
+  "New bookmark": "\u65B0\u3057\u3044\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
+  "New folder": "\u65B0\u3057\u3044\u30D5\u30A9\u30EB\u30C0",
+  "Bookmark bar": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u30D0\u30FC",
+  "Selected members": "\u9078\u629C\u30E1\u30F3\u30D0\u30FC",
+  "Manage selected members": "\u9078\u629C\u30E1\u30F3\u30D0\u30FC\u3092\u7DE8\u96C6",
+  "Done selecting": "\u9078\u629E\u3092\u5B8C\u4E86",
+  "No selected bookmarks": "\u9078\u629C\u30E1\u30F3\u30D0\u30FC\u306F\u307E\u3060\u3042\u308A\u307E\u305B\u3093",
+  "Select pages to show in your everyday bookmarks.": "\u3088\u304F\u4F7F\u3046\u30DA\u30FC\u30B8\u3092\u9078\u629C\u30E1\u30F3\u30D0\u30FC\u306B\u8FFD\u52A0\u3057\u307E\u3057\u3087\u3046\u3002",
+  "Empty folders ({count})": "\u7A7A\u306E\u30D5\u30A9\u30EB\u30C0\uFF08{count}\u4EF6\uFF09",
+  "Favorites bar": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u30D0\u30FC",
+  "Show bookmark bar": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u30D0\u30FC\u3092\u8868\u793A",
+  "Bookmark bar display": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u30D0\u30FC\u306E\u8868\u793A\u5185\u5BB9",
+  "Choose every bookmark and folder, or just the members you select.": "\u5168\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3068\u30D5\u30A9\u30EB\u30C0\u3001\u307E\u305F\u306F\u9078\u629C\u3057\u305F\u30E1\u30F3\u30D0\u30FC\u3092\u8868\u793A\u3057\u307E\u3059\u3002",
+  "All bookmarks": "\u3059\u3079\u3066\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
+  "Choose members": "\u30E1\u30F3\u30D0\u30FC\u3092\u9078\u3076",
+  "Show in selected members": "\u9078\u629C\u30E1\u30F3\u30D0\u30FC\u306B\u8868\u793A",
+  "Pick the pages you use every day from your bookmarks.": "\u6BCE\u65E5\u4F7F\u3046\u30DA\u30FC\u30B8\u3092\u3001\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u306E\u4E2D\u304B\u3089\u9078\u3093\u3067\u304F\u3060\u3055\u3044\u3002",
+  "Your everyday pages, one click away.": "\u3044\u3064\u3082\u306E\u30DA\u30FC\u30B8\u3078\u3001\u30EF\u30F3\u30AF\u30EA\u30C3\u30AF\u3002",
+  "Save freely. Find what you need by type or folder.": "\u6C17\u8EFD\u306B\u4FDD\u5B58\u3057\u3066\u3001\u7A2E\u985E\u3084\u30D5\u30A9\u30EB\u30C0\u304B\u3089\u898B\u3064\u3051\u307E\u3057\u3087\u3046\u3002",
+  "Organize by": "\u8868\u793A\u65B9\u6CD5",
+  "By type": "\u7A2E\u985E\u5225",
+  "By folder": "\u30D5\u30A9\u30EB\u30C0\u5225",
+  "Folders": "\u30D5\u30A9\u30EB\u30C0",
+  "References": "\u8CC7\u6599",
+  "Video": "\u52D5\u753B",
+  "Audio": "\u97F3\u58F0",
+  "Images": "\u753B\u50CF",
+  "Documents": "\u6587\u66F8\u30FB\u30D5\u30A1\u30A4\u30EB",
+  "Mail": "\u30E1\u30FC\u30EB",
+  "Blogs": "\u30D6\u30ED\u30B0",
+  "Forums": "\u63B2\u793A\u677F",
+  "Websites": "\u30A6\u30A7\u30D6\u30B5\u30A4\u30C8",
+  "Media type": "\u7A2E\u985E",
+  "Automatic": "\u81EA\u52D5",
+  "Automatic classification": "\u81EA\u52D5\u5206\u985E",
+  "Detected: {type}": "\u81EA\u52D5\u5224\u5B9A\uFF1A{type}",
+  "Change the type if automatic classification is incorrect.": "\u81EA\u52D5\u5206\u985E\u304C\u5408\u308F\u306A\u3044\u3068\u304D\u306F\u3001\u7A2E\u985E\u3092\u5909\u66F4\u3067\u304D\u307E\u3059\u3002",
+  "{count} bookmarks": "{count}\u4EF6\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
+  "{count} selected": "\u9078\u629C\u30E1\u30F3\u30D0\u30FC {count}\u4EF6",
+  "{count} folders": "{count}\u500B\u306E\u30D5\u30A9\u30EB\u30C0",
+  "{count} results": "{count}\u4EF6\u306E\u691C\u7D22\u7D50\u679C",
+  "No bookmarks yet": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u96C6\u3081\u307E\u3057\u3087\u3046",
+  "No matching bookmarks": "\u4E00\u81F4\u3059\u308B\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u304C\u3042\u308A\u307E\u305B\u3093",
+  "Save a page with the star in the toolbar, or add your first bookmark here.": "\u30C4\u30FC\u30EB\u30D0\u30FC\u306E\u661F\u304B\u3089\u30DA\u30FC\u30B8\u3092\u4FDD\u5B58\u3059\u308B\u304B\u3001\u3053\u3053\u304B\u3089\u6700\u521D\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u8FFD\u52A0\u3067\u304D\u307E\u3059\u3002",
+  "Try another title, URL, or folder name.": "\u5225\u306E\u540D\u524D\u3001URL\u3001\u30D5\u30A9\u30EB\u30C0\u540D\u3067\u691C\u7D22\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
+  "Search bookmarks": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u691C\u7D22",
+  "Name, URL, folder or tag": "\u540D\u524D\u30FBURL\u30FB\u30D5\u30A9\u30EB\u30C0\u30FB\u30BF\u30B0\u3067\u691C\u7D22",
+  "Filtered": "\u7D5E\u308A\u8FBC\u307F\u4E2D",
+  "Settings sections": "\u8A2D\u5B9A\u9805\u76EE\u3078\u79FB\u52D5",
+  "Page tools": "\u30DA\u30FC\u30B8\u64CD\u4F5C",
+  "Tab tools": "\u30BF\u30D6\u64CD\u4F5C",
+  "Close tabs": "\u30BF\u30D6\u3092\u9589\u3058\u308B",
+  "Import": "\u53D6\u308A\u8FBC\u3080",
+  "Import Obsidian Bookmarks": "Obsidian\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u53D6\u308A\u8FBC\u3080",
+  "Import Web viewer Bookmarks": "Web viewer Bookmarks\u304B\u3089\u53D6\u308A\u8FBC\u3080",
+  "Details": "\u8A73\u7D30",
+  "Title": "\u540D\u524D",
+  "Bookmark title": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u306E\u540D\u524D",
+  "Bookmark URL": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u306EURL",
+  "Description": "\u8AAC\u660E",
+  "Bookmark description": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u306E\u8AAC\u660E",
+  "Tags": "\u30BF\u30B0",
+  "Bookmark tags": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u306E\u30BF\u30B0",
+  "Separate tags with spaces": "\u30BF\u30B0\u3092\u7A7A\u767D\u3067\u533A\u5207\u308B",
+  "Save in": "\u4FDD\u5B58\u5148",
+  "Bookmarks root": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u306E\u4E00\u89A7",
+  "Choose bookmark folder": "\u4FDD\u5B58\u5148\u306E\u30D5\u30A9\u30EB\u30C0\u3092\u9078\u3076",
+  "New bookmark folder": "\u65B0\u3057\u3044\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u30D5\u30A9\u30EB\u30C0",
+  "Folder name": "\u30D5\u30A9\u30EB\u30C0\u540D",
+  "Bookmark image": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u306E\u30A2\u30A4\u30B3\u30F3",
+  "Bookmark image type": "\u30A2\u30A4\u30B3\u30F3\u306E\u7A2E\u985E",
+  "Website favicon": "\u30B5\u30A4\u30C8\u306E\u30A2\u30A4\u30B3\u30F3",
+  "Custom image": "\u753B\u50CF\u3092\u6307\u5B9A",
+  "Custom text": "\u6587\u5B57\u3092\u6307\u5B9A",
+  "Lucide icon": "Lucide\u30A2\u30A4\u30B3\u30F3",
+  "Custom value": "\u753B\u50CF\u30FB\u6587\u5B57\u30FB\u30A2\u30A4\u30B3\u30F3\u540D",
+  "Custom bookmark image or text": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u306E\u753B\u50CF\u3084\u6587\u5B57",
+  "Preview": "\u30D7\u30EC\u30D3\u30E5\u30FC",
+  "Save": "\u4FDD\u5B58",
+  "Cancel": "\u30AD\u30E3\u30F3\u30BB\u30EB",
+  "Done": "\u5B8C\u4E86",
+  "Close": "\u9589\u3058\u308B",
+  "Delete": "\u524A\u9664",
+  "Delete bookmark": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u524A\u9664",
+  "Remove bookmark": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u524A\u9664",
+  "Edit": "\u7DE8\u96C6",
+  "Move": "\u79FB\u52D5",
+  "Move to folder": "\u30D5\u30A9\u30EB\u30C0\u3078\u79FB\u52D5",
+  "Rename": "\u540D\u524D\u3092\u5909\u66F4",
+  "Rename bookmark folder": "\u30D5\u30A9\u30EB\u30C0\u306E\u540D\u524D\u3092\u5909\u66F4",
+  "Delete folder": "\u30D5\u30A9\u30EB\u30C0\u3092\u524A\u9664",
+  "Delete bookmark folder": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u30D5\u30A9\u30EB\u30C0\u3092\u524A\u9664",
+  "Delete \u201C{title}\u201D from your bookmarks?": "\u300C{title}\u300D\u3092\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u304B\u3089\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
+  "Open": "\u958B\u304F",
+  "Open in new tab": "\u65B0\u3057\u3044\u30BF\u30D6\u3067\u958B\u304F",
+  "Open all": "\u3059\u3079\u3066\u958B\u304F",
+  "Open all in new tabs": "\u65B0\u3057\u3044\u30BF\u30D6\u3067\u3059\u3079\u3066\u958B\u304F",
+  "Copy URL": "URL\u3092\u30B3\u30D4\u30FC",
+  "Copy page URL": "\u30DA\u30FC\u30B8\u306EURL\u3092\u30B3\u30D4\u30FC",
+  "URL copied.": "URL\u3092\u30B3\u30D4\u30FC\u3057\u307E\u3057\u305F\u3002",
+  "Show in history": "\u5C65\u6B74\u3067\u898B\u308B",
+  "View page in history": "\u3053\u306E\u30DA\u30FC\u30B8\u306E\u5C65\u6B74\u3092\u898B\u308B",
+  "Sort contents": "\u540D\u524D\u9806\u306B\u4E26\u3079\u308B",
+  "Add to favorites": "\u9078\u629C\u30E1\u30F3\u30D0\u30FC\u306B\u8FFD\u52A0",
+  "Remove from favorites": "\u9078\u629C\u30E1\u30F3\u30D0\u30FC\u304B\u3089\u5916\u3059",
+  "Show in favorites bar": "\u9078\u629C\u30E1\u30F3\u30D0\u30FC\u306B\u8868\u793A",
+  "Add current page to favorites": "\u3053\u306E\u30DA\u30FC\u30B8\u3092\u9078\u629C\u30E1\u30F3\u30D0\u30FC\u306B\u8FFD\u52A0",
+  "Hide favorites bar": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u30D0\u30FC\u3092\u975E\u8868\u793A",
+  "Open bookmarks": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u958B\u304F",
+  "Show bookmarks": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u8868\u793A",
+  "Initial background color override": "\u521D\u671F\u80CC\u666F\u8272\u306E\u4E0A\u66F8\u304D",
+  "Use the Obsidian theme background before a page is painted. Turn off to use the browser's own background.": "\u30DA\u30FC\u30B8\u63CF\u753B\u524D\u306E\u80CC\u666F\u306BObsidian\u306E\u30C6\u30FC\u30DE\u8272\u3092\u4F7F\u3044\u307E\u3059\u3002\u7121\u52B9\u306B\u3059\u308B\u3068\u30D6\u30E9\u30A6\u30B6\u672C\u6765\u306E\u80CC\u666F\u306B\u306A\u308A\u307E\u3059\u3002",
+  "Tab style": "\u30BF\u30D6\u306E\u30B9\u30BF\u30A4\u30EB",
+  "Integrate with Obsidian tab strips": "Obsidian\u306E\u30BF\u30D6\u30D0\u30FC\u3068\u7D71\u5408",
+  "Replace empty tabs with Home": "\u7A7A\u306E\u30BF\u30D6\u3092\u30DB\u30FC\u30E0\u306B\u7F6E\u304D\u63DB\u3048\u308B",
+  "Default search engine": "\u65E2\u5B9A\u306E\u691C\u7D22\u30A8\u30F3\u30B8\u30F3",
+  "Custom search URL": "\u691C\u7D22URL\u3092\u6307\u5B9A",
+  "Home": "\u30DB\u30FC\u30E0",
+  "History": "\u5C65\u6B74",
+  "Home search": "\u30DB\u30FC\u30E0\u306E\u691C\u7D22",
+  "Show recent Vault files on Home": "\u6700\u8FD1\u306EVault\u30D5\u30A1\u30A4\u30EB\u3092\u30DB\u30FC\u30E0\u306B\u8868\u793A",
+  "Show bookmarked Vault files on Home": "Vault\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u30DB\u30FC\u30E0\u306B\u8868\u793A",
+  "Migration": "\u79FB\u884C",
+  "Migrate from Surfing": "Surfing\u304B\u3089\u79FB\u884C",
+  "Preview and migrate": "\u5185\u5BB9\u3092\u78BA\u8A8D\u3057\u3066\u79FB\u884C",
+  "Resume migration": "\u79FB\u884C\u3092\u518D\u958B",
+  "Migrated": "\u79FB\u884C\u6E08\u307F",
+  "Startup": "\u8D77\u52D5\u6642",
+  "Startup behavior": "\u8D77\u52D5\u6642\u306E\u52D5\u4F5C",
+  "Restore previous session": "\u524D\u56DE\u306E\u30BF\u30D6\u3092\u5FA9\u5143",
+  "Open Home": "\u30DB\u30FC\u30E0\u3092\u958B\u304F",
+  "Do nothing": "\u4F55\u3082\u3057\u306A\u3044",
+  "None": "\u306A\u3057",
+  "Off": "\u7121\u52B9",
+  "Manual": "\u624B\u52D5",
+  "Containers": "Container",
+  "Container use": "Container\u306E\u5229\u7528",
+  "Default container": "\u65E2\u5B9A\u306EContainer",
+  "Add container": "Container\u3092\u8FFD\u52A0",
+  "Container name": "Container\u540D",
+  "Clear browsing data and saved permissions": "\u95B2\u89A7\u30C7\u30FC\u30BF\u3068\u4FDD\u5B58\u6E08\u307F\u6A29\u9650\u3092\u6D88\u53BB",
+  "Delete container": "Container\u3092\u524A\u9664",
+  "Clear browsing data": "\u95B2\u89A7\u30C7\u30FC\u30BF\u3092\u6D88\u53BB",
+  "Manage containers": "Container\u3092\u7BA1\u7406",
+  "Appearance": "\u8868\u793A",
+  "Reduced motion": "\u30A2\u30CB\u30E1\u30FC\u30B7\u30E7\u30F3\u3092\u6E1B\u3089\u3059",
+  "Default web content zoom": "\u30A6\u30A7\u30D6\u30DA\u30FC\u30B8\u306E\u65E2\u5B9A\u306E\u30BA\u30FC\u30E0",
+  "Full-page loading shield": "\u8AAD\u307F\u8FBC\u307F\u4E2D\u306E\u5168\u9762\u30B7\u30FC\u30EB\u30C9",
+  "Permissions": "\u6A29\u9650",
+  "Site permissions\u2026": "\u30B5\u30A4\u30C8\u306E\u6A29\u9650\u2026",
+  "Form recovery": "\u30D5\u30A9\u30FC\u30E0\u306E\u5FA9\u5143",
+  "Enable form recovery": "\u30D5\u30A9\u30FC\u30E0\u306E\u5FA9\u5143\u3092\u6709\u52B9\u306B\u3059\u308B",
+  "History retention": "\u5C65\u6B74\u306E\u4FDD\u5B58",
+  "History day starts at": "\u5C65\u6B74\u306E\u65E5\u4ED8\u306E\u5207\u308A\u66FF\u3048\u6642\u523B",
+  "History retention days": "\u5C65\u6B74\u306E\u4FDD\u5B58\u65E5\u6570",
+  "History node limit": "\u5C65\u6B74\u306E\u4FDD\u5B58\u4EF6\u6570",
+  "Closed-tab recovery": "\u9589\u3058\u305F\u30BF\u30D6\u306E\u5FA9\u5143",
+  "Recovery retention days": "\u5FA9\u5143\u30C7\u30FC\u30BF\u306E\u4FDD\u5B58\u65E5\u6570",
+  "Recovery storage limit": "\u5FA9\u5143\u30C7\u30FC\u30BF\u306E\u4FDD\u5B58\u5BB9\u91CF",
+  "Clear history": "\u5C65\u6B74\u3092\u6D88\u53BB",
+  "Back": "\u623B\u308B",
+  "Forward": "\u9032\u3080",
+  "Reload": "\u518D\u8AAD\u307F\u8FBC\u307F",
+  "Stop loading": "\u8AAD\u307F\u8FBC\u307F\u3092\u505C\u6B62",
+  "Open home": "\u30DB\u30FC\u30E0\u3092\u958B\u304F",
+  "Search browser tabs": "\u30D6\u30E9\u30A6\u30B6\u306E\u30BF\u30D6\u3092\u691C\u7D22",
+  "Open Quick Switcher": "\u30AF\u30A4\u30C3\u30AF\u30B9\u30A4\u30C3\u30C1\u30E3\u30FC\u3092\u958B\u304F",
+  "Zoom in": "\u62E1\u5927",
+  "Zoom out": "\u7E2E\u5C0F",
+  "Reset site zoom": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u30BA\u30FC\u30E0\u3092\u30EA\u30BB\u30C3\u30C8",
+  "Inspect page": "\u958B\u767A\u8005\u30C4\u30FC\u30EB\u3092\u958B\u304F",
+  "Browser menu": "\u30D6\u30E9\u30A6\u30B6\u30E1\u30CB\u30E5\u30FC",
+  "New browser tab": "\u65B0\u3057\u3044\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6",
+  "Search the web": "\u30A6\u30A7\u30D6\u3092\u691C\u7D22",
+  "Search Vault": "Vault\u3092\u691C\u7D22",
+  "Web bookmarks": "\u30A6\u30A7\u30D6\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
+  "Recently opened files": "\u6700\u8FD1\u958B\u3044\u305F\u30D5\u30A1\u30A4\u30EB",
+  "Bookmarked files": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3057\u305F\u30D5\u30A1\u30A4\u30EB",
+  "Loading\u2026": "\u8AAD\u307F\u8FBC\u307F\u4E2D\u2026",
+  "Offline": "\u30AA\u30D5\u30E9\u30A4\u30F3",
+  "Page could not be loaded": "\u30DA\u30FC\u30B8\u3092\u8AAD\u307F\u8FBC\u3081\u307E\u305B\u3093\u3067\u3057\u305F",
+  "Open browser": "\u30D6\u30E9\u30A6\u30B6\u3092\u958B\u304F",
+  "Open browser history": "\u30D6\u30E9\u30A6\u30B6\u306E\u5C65\u6B74\u3092\u958B\u304F",
+  "Open browser bookmarks": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u958B\u304F",
+  "Migrate browsing data from Surfing": "Surfing\u306E\u95B2\u89A7\u30C7\u30FC\u30BF\u3092\u79FB\u884C",
+  "Import bookmarks from Web viewer Bookmarks": "Web viewer Bookmarks\u304B\u3089\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u53D6\u308A\u8FBC\u3080",
+  "Reopen last closed browser tab": "\u6700\u5F8C\u306B\u9589\u3058\u305F\u30BF\u30D6\u3092\u958B\u304F",
+  "Bookmark current page": "\u73FE\u5728\u306E\u30DA\u30FC\u30B8\u3092\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
+  "Open new Home tab": "\u65B0\u3057\u3044\u30DB\u30FC\u30E0\u30BF\u30D6\u3092\u958B\u304F",
+  "Replace current tab with Home": "\u73FE\u5728\u306E\u30BF\u30D6\u3092\u30DB\u30FC\u30E0\u306B\u7F6E\u304D\u63DB\u3048\u308B",
+  "Search only Markdown files": "Markdown\u30D5\u30A1\u30A4\u30EB\u306E\u307F\u691C\u7D22",
+  "When enabled, Vault search excludes attachments.": "\u6709\u52B9\u306B\u3059\u308B\u3068\u6DFB\u4ED8\u30D5\u30A1\u30A4\u30EB\u3092\u691C\u7D22\u5BFE\u8C61\u304B\u3089\u9664\u5916\u3057\u307E\u3059\u3002",
+  "Show uncreated linked notes": "\u672A\u4F5C\u6210\u30EA\u30F3\u30AF\u3092\u691C\u7D22\u7D50\u679C\u306B\u8868\u793A",
+  "Include unresolved Markdown links in Vault search results.": "\u5B58\u5728\u3057\u306A\u3044Markdown\u30EA\u30F3\u30AF\u3082\u5019\u88DC\u306B\u542B\u3081\u307E\u3059\u3002",
+  "Show file paths in search": "\u691C\u7D22\u7D50\u679C\u306B\u30D5\u30A1\u30A4\u30EB\u30D1\u30B9\u3092\u8868\u793A",
+  "Show each result's path or matched alias.": "\u30D5\u30A1\u30A4\u30EB\u30D1\u30B9\u307E\u305F\u306F\u4E00\u81F4\u3057\u305F\u5225\u540D\u3092\u8868\u793A\u3057\u307E\u3059\u3002",
+  "Show search shortcuts": "\u691C\u7D22\u30B7\u30E7\u30FC\u30C8\u30AB\u30C3\u30C8\u3092\u8868\u793A",
+  "Show keyboard guidance below Home search.": "\u30DB\u30FC\u30E0\u691C\u7D22\u306E\u4E0B\u306B\u30AD\u30FC\u30DC\u30FC\u30C9\u64CD\u4F5C\u3092\u8868\u793A\u3057\u307E\u3059\u3002",
+  "Show Omnisearch excerpts": "Omnisearch\u306E\u629C\u7C8B\u3092\u8868\u793A",
+  "Display a text excerpt for Omnisearch results.": "Omnisearch\u306E\u691C\u7D22\u7D50\u679C\u306B\u672C\u6587\u306E\u629C\u7C8B\u3092\u8868\u793A\u3057\u307E\u3059\u3002",
+  "Search result count": "\u691C\u7D22\u7D50\u679C\u306E\u8868\u793A\u4EF6\u6570",
+  "Search delay (ms)": "\u691C\u7D22\u306E\u9045\u5EF6\uFF08\u30DF\u30EA\u79D2\uFF09",
+  "Delay between typing and updating suggestions.": "\u5165\u529B\u304B\u3089\u5019\u88DC\u66F4\u65B0\u307E\u3067\u306E\u5F85\u6A5F\u6642\u9593\u3067\u3059\u3002",
+  "Bookmarked file count": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u306E\u8868\u793A\u4EF6\u6570",
+  "Recent file count": "\u6700\u8FD1\u306E\u30D5\u30A1\u30A4\u30EB\u306E\u8868\u793A\u4EF6\u6570",
+  "Restore hidden recent files": "\u975E\u8868\u793A\u306E\u6700\u8FD1\u306E\u30D5\u30A1\u30A4\u30EB\u3092\u5FA9\u5143",
+  "Make files hidden from the Home recent list visible again.": "\u30DB\u30FC\u30E0\u306E\u6700\u8FD1\u306E\u4E00\u89A7\u3067\u975E\u8868\u793A\u306B\u3057\u305F\u30D5\u30A1\u30A4\u30EB\u3092\u518D\u8868\u793A\u3057\u307E\u3059\u3002",
+  "Home appearance": "\u30DB\u30FC\u30E0\u306E\u5916\u89B3",
+  "Home title": "\u30DB\u30FC\u30E0\u306E\u30BF\u30A4\u30C8\u30EB",
+  "Home logo": "\u30DB\u30FC\u30E0\u306E\u30ED\u30B4",
+  "Lucide icon name, Vault image path, HTTPS image URL, or blank.": "Lucide\u30A2\u30A4\u30B3\u30F3\u540D\u3001Vault\u5185\u306E\u753B\u50CF\u30D1\u30B9\u3001HTTPS\u753B\u50CFURL\u3001\u307E\u305F\u306F\u7A7A\u6B04\u3067\u3059\u3002",
+  "Home title font size": "\u30DB\u30FC\u30E0\u306E\u30BF\u30A4\u30C8\u30EB\u6587\u5B57\u30B5\u30A4\u30BA",
+  "Home title weight": "\u30DB\u30FC\u30E0\u306E\u30BF\u30A4\u30C8\u30EB\u306E\u592A\u3055",
+  "Home title font family": "\u30DB\u30FC\u30E0\u306E\u30BF\u30A4\u30C8\u30EB\u30D5\u30A9\u30F3\u30C8",
+  "Home title color": "\u30DB\u30FC\u30E0\u306E\u30BF\u30A4\u30C8\u30EB\u8272",
+  "Default theme font": "\u30C6\u30FC\u30DE\u65E2\u5B9A\u306E\u30D5\u30A9\u30F3\u30C8",
+  "Theme color (blank)": "\u30C6\u30FC\u30DE\u8272\uFF08\u7A7A\u6B04\uFF09",
+  "Accent selected search result": "\u9078\u629E\u3057\u305F\u691C\u7D22\u7D50\u679C\u306B\u30A2\u30AF\u30BB\u30F3\u30C8\u8272\u3092\u4F7F\u7528",
+  "Use the theme accent color for the active suggestion.": "\u9078\u629E\u4E2D\u306E\u5019\u88DC\u306B\u30C6\u30FC\u30DE\u306E\u30A2\u30AF\u30BB\u30F3\u30C8\u8272\u3092\u4F7F\u7528\u3057\u307E\u3059\u3002",
+  "Home on Obsidian startup": "Obsidian\u8D77\u52D5\u6642\u306E\u30DB\u30FC\u30E0",
+  "Choose whether to focus a Home tab on startup, optionally closing other workspace tabs.": "\u8D77\u52D5\u6642\u306B\u30DB\u30FC\u30E0\u3092\u9078\u629E\u3059\u308B\u304B\u3001\u5FC5\u8981\u306A\u3089\u4ED6\u306E\u30BF\u30D6\u3092\u9589\u3058\u308B\u304B\u3092\u8A2D\u5B9A\u3057\u307E\u3059\u3002",
+  "Use browser startup behavior": "\u30D6\u30E9\u30A6\u30B6\u30FC\u306E\u8D77\u52D5\u6642\u8A2D\u5B9A\u306B\u5F93\u3046",
+  "Focus or open Home": "\u30DB\u30FC\u30E0\u3092\u9078\u629E\u307E\u305F\u306F\u958B\u304F",
+  "Home only (close other workspace tabs)": "\u30DB\u30FC\u30E0\u306E\u307F\uFF08\u4ED6\u306E\u30EF\u30FC\u30AF\u30B9\u30DA\u30FC\u30B9\u30BF\u30D6\u3092\u9589\u3058\u308B\uFF09",
+  "Hide recent file": "\u6700\u8FD1\u306E\u4E00\u89A7\u304B\u3089\u975E\u8868\u793A",
+  "Set custom icon": "\u30A2\u30A4\u30B3\u30F3\u3092\u8A2D\u5B9A",
+  "Search Lucide icons": "Lucide\u30A2\u30A4\u30B3\u30F3\u3092\u691C\u7D22",
+  "Reset to default icon": "\u65E2\u5B9A\u306E\u30A2\u30A4\u30B3\u30F3\u3078\u623B\u3059",
+  "Clear search filter": "\u691C\u7D22\u30D5\u30A3\u30EB\u30BF\u30FC\u3092\u89E3\u9664",
+  "Vault search results": "Vault\u691C\u7D22\u7D50\u679C",
+  "\u2191\u2193 select \xB7 Enter open \xB7 Ctrl/\u2318+Enter new tab \xB7 Shift+Enter create \xB7 Tab filter \xB7 Esc dismiss": "\u2191\u2193 \u9078\u629E \xB7 Enter \u958B\u304F \xB7 Ctrl/\u2318+Enter \u65B0\u3057\u3044\u30BF\u30D6 \xB7 Shift+Enter \u4F5C\u6210 \xB7 Tab \u7D5E\u308A\u8FBC\u307F \xB7 Esc \u9589\u3058\u308B",
+  "Uncreated": "\u672A\u4F5C\u6210",
+  "Press Shift+Enter to create a note.": "Shift+Enter\u3067\u65B0\u3057\u3044\u30CE\u30FC\u30C8\u3092\u4F5C\u6210\u3057\u307E\u3059\u3002",
+  "Create note: {name}": "\u30CE\u30FC\u30C8\u3092\u4F5C\u6210\uFF1A{name}",
+  "Enter a valid note name.": "\u6709\u52B9\u306A\u30CE\u30FC\u30C8\u540D\u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
+  "Could not create that note.": "\u30CE\u30FC\u30C8\u3092\u4F5C\u6210\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002",
+  "Home search failed.": "\u30DB\u30FC\u30E0\u691C\u7D22\u306B\u5931\u6557\u3057\u307E\u3057\u305F\u3002",
+  "Omnisearch is not enabled.": "Omnisearch\u304C\u6709\u52B9\u306B\u306A\u3063\u3066\u3044\u307E\u305B\u3093\u3002"
+};
+
+// src/ui/home-icon-picker.ts
+var HomeIconPicker = class extends import_obsidian2.FuzzySuggestModal {
+  constructor(app, choose) {
+    super(app);
+    this.choose = choose;
+    this.setPlaceholder(t("Search Lucide icons"));
+    this.limit = 60;
+  }
+  getItems() {
+    return ["", ...(0, import_obsidian2.getIconIds)()];
+  }
+  getItemText(icon) {
+    return icon || t("Reset to default icon");
+  }
+  renderSuggestion(match, el) {
+    const row = el.createDiv({ cls: "ubc-home-icon-choice" });
+    const preview = row.createSpan();
+    (0, import_obsidian2.setIcon)(preview, match.item || "rotate-ccw");
+    row.createSpan({ text: this.getItemText(match.item) });
+  }
+  onChooseItem(item) {
+    this.choose(item || void 0);
+  }
+};
+
+// src/ui/home-search-embed.ts
+var import_obsidian4 = require("obsidian");
+
+// src/ui/home-search-widget.ts
+var import_obsidian3 = require("obsidian");
+var nextHomeWidgetId = 0;
+var matchesNoteFilter = (filter) => (filter.kind === "type" || filter.kind === "extension") && matchesHomeFilter("md", filter);
+function mountHomeSearch(parent, host, sections) {
+  const settings = () => host.core.settings();
+  const widgetId = ++nextHomeWidgetId;
+  const wrapper = parent.createDiv({ cls: "ubc-home-search-widget" });
+  const modePicker = wrapper.createDiv({ cls: "ubc-home-search-modes", attr: { role: "group", "aria-label": t("Home search mode") } });
+  const vaultMode = modePicker.createEl("button", { text: t("Vault"), attr: { type: "button" } });
+  const omniMode = modePicker.createEl("button", { text: "Omnisearch", attr: { type: "button" } });
+  const webMode = modePicker.createEl("button", { text: t("Web"), attr: { type: "button" } });
+  const inputRow = wrapper.createDiv({ cls: "ubc-home-search-row" });
+  const filterPill = inputRow.createEl("button", { cls: "ubc-home-search-filter is-hidden", attr: { type: "button", "aria-label": t("Clear search filter") } });
+  const input = inputRow.createEl("input", { cls: "ubc-home-search", attr: { "aria-label": t("Home search"), type: "search", autocomplete: "off" } });
+  const resultsEl = wrapper.createDiv({ cls: "ubc-home-search-results", attr: { role: "listbox", "aria-label": t("Vault search results") } });
+  const shortcuts = wrapper.createDiv({ cls: "ubc-home-shortcuts", text: t("\u2191\u2193 select \xB7 Enter open \xB7 Ctrl/\u2318+Enter new tab \xB7 Shift+Enter create \xB7 Tab filter \xB7 Esc dismiss") });
+  if (!settings().homeShowShortcuts) shortcuts.addClass("is-hidden");
+  let mode = settings().homeSearchMode;
+  let filter;
+  let current = [];
+  let selected = 0;
+  let requestId = 0;
+  let timer;
+  let disposed = false;
+  const updateFilter = () => {
+    filterPill.toggleClass("is-hidden", !filter);
+    filterPill.setText(filter ? filter.value + " \xD7" : "");
+  };
+  const clearResults = () => {
+    resultsEl.empty();
+    current = [];
+    selected = 0;
+    input.removeAttribute("aria-activedescendant");
+    sections?.removeClass("is-hidden");
+  };
+  const markSelection = () => {
+    for (const [index, child] of Array.from(resultsEl.querySelectorAll("[data-home-result]")).entries()) {
+      const chosen = selected === index;
+      child.toggleClass("is-selected", chosen);
+      child.setAttribute("aria-selected", String(chosen));
+      if (chosen) {
+        input.setAttribute("aria-activedescendant", child.id);
+        child.scrollIntoView({ block: "nearest" });
+      }
+    }
+  };
+  const showResults = (files, query) => {
+    if (disposed) return;
+    resultsEl.empty();
+    current = files;
+    selected = 0;
+    if (!query) {
+      clearResults();
+      return;
+    }
+    sections?.addClass("is-hidden");
+    const heading = resultsEl.createDiv({ cls: "ubc-home-results-heading" });
+    heading.createEl("strong", { text: files.length ? t("{count} results", { count: files.length }) : t("No vault files found") });
+    if (!files.length && mode !== "omnisearch") {
+      heading.createSpan({ cls: "ubc-card-subtitle", text: t("Press Shift+Enter to create a note.") });
+    }
+    for (const [index, item] of files.entries()) {
+      const button2 = resultsEl.createEl("button", {
+        cls: "ubc-home-result",
+        attr: { id: "ubc-home-result-" + widgetId + "-" + String(requestId) + "-" + index, type: "button", role: "option", "data-home-result": "" }
+      });
+      const icon = button2.createSpan({ cls: "ubc-home-result-icon" });
+      (0, import_obsidian3.setIcon)(icon, item.unresolved ? "file-plus" : "file");
+      const info = button2.createSpan({ cls: "ubc-home-result-info" });
+      info.createSpan({ cls: "ubc-home-result-name", text: item.name + (item.unresolved ? " (" + t("Uncreated") + ")" : "") });
+      if (settings().homeShowFilePaths) info.createSpan({ cls: "ubc-card-subtitle", text: item.matchedAlias ? item.matchedAlias + " \xB7 " + item.path : item.path });
+      if (mode === "omnisearch" && settings().homeShowOmnisearchExcerpts && item.excerpt) {
+        info.createSpan({ cls: "ubc-card-subtitle", text: item.excerpt.slice(0, 320) });
+      }
+      button2.addEventListener("pointerenter", () => {
+        selected = index;
+        markSelection();
+      });
+      button2.addEventListener("click", (event) => {
+        void activate(item, event.metaKey || event.ctrlKey);
+      });
+      button2.addEventListener("auxclick", (event) => {
+        if (event.button === 1) {
+          event.preventDefault();
+          void activate(item, true);
+        }
+      });
+      button2.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        const menu = new import_obsidian3.Menu();
+        menu.addItem((entry) => entry.setTitle(t("Open")).onClick(() => void activate(item, false)));
+        menu.addItem((entry) => entry.setTitle(t("Open in new tab")).onClick(() => void activate(item, true)));
+        menu.showAtMouseEvent(event);
+      });
+    }
+    if (!files.length && mode === "vault" && safeHomeNoteName(query) && (!filter || filter.kind === "type" && filter.value === "markdown" || filter.kind === "extension" && filter.value === "md")) {
+      const create = resultsEl.createEl("button", { cls: "ubc-home-create", text: t("Create note: {name}", { name: query }) });
+      create.addEventListener("click", () => void createNote(false));
+    }
+    markSelection();
+  };
+  async function activate(file, newTab) {
+    try {
+      if (file.unresolved) {
+        const created = await host.home.createNote(file.name, file.path);
+        host.onFileCreated?.({ path: created.path, extension: created.extension, name: created.basename });
+      }
+      await host.openFile(file.path, newTab);
+    } catch (error) {
+      console.warn("Unified Browser Core: Home could not open a file", error);
+      new import_obsidian3.Notice(t("Could not open that file."));
+    }
+  }
+  async function createNote(newTab) {
+    try {
+      const name = safeHomeNoteName(input.value);
+      if (!name) {
+        new import_obsidian3.Notice(t("Enter a valid note name."));
+        return;
+      }
+      const file = await host.home.createNote(name);
+      host.onFileCreated?.({ path: file.path, name: file.basename, extension: file.extension });
+      await host.openFile(file.path, newTab);
+    } catch (error) {
+      console.warn("Unified Browser Core: could not create note", error);
+      new import_obsidian3.Notice(t("Could not create that note."));
+    }
+  }
+  const render = async () => {
+    if (disposed) return;
+    const id = ++requestId;
+    const query = input.value.trim();
+    if (!query || mode === "web" || filter?.kind === "web") {
+      clearResults();
+      return;
+    }
+    let files = [];
+    try {
+      if (mode === "omnisearch" || filter?.kind === "omnisearch") {
+        files = await host.home.searchOmnisearch(query, settings().homeMaxSearchResults);
+      } else {
+        files = host.home.searchFiles(
+          query,
+          settings().homeMaxSearchResults,
+          filter,
+          settings().homeMarkdownOnly,
+          settings().homeShowUnresolvedLinks
+        );
+      }
+      if (id !== requestId || disposed) return;
+      showResults(files, query);
+    } catch (error) {
+      if (id === requestId) {
+        clearResults();
+        console.warn("Unified Browser Core: Home search failed", error);
+        new import_obsidian3.Notice(t("Home search failed."));
+      }
+    }
+  };
+  const schedule = () => {
+    if (timer !== void 0) window.clearTimeout(timer);
+    const delay = Math.max(0, Math.min(500, settings().homeSearchDelayMs));
+    if (delay) timer = window.setTimeout(() => {
+      timer = void 0;
+      void render();
+    }, delay);
+    else void render();
+  };
+  const setMode = (next, persist = true) => {
+    if (next === "omnisearch" && !host.home.hasOmnisearch()) {
+      new import_obsidian3.Notice(t("Omnisearch is not enabled."));
+      return;
+    }
+    mode = next;
+    vaultMode.toggleClass("is-active", mode === "vault");
+    omniMode.toggleClass("is-active", mode === "omnisearch");
+    webMode.toggleClass("is-active", mode === "web");
+    for (const [button2, name] of [[vaultMode, "vault"], [omniMode, "omnisearch"], [webMode, "web"]]) {
+      button2.setAttribute("aria-pressed", String(name === mode));
+    }
+    input.placeholder = mode === "web" ? t("Search the web or enter an address") : t("Search files in your vault");
+    clearResults();
+    if (persist && settings().homeSearchMode !== mode) host.core.updateSettings({ homeSearchMode: mode });
+    host.onModeChange?.(mode);
+    schedule();
+    input.focus();
+  };
+  vaultMode.addEventListener("click", () => {
+    filter = void 0;
+    updateFilter();
+    setMode("vault");
+  });
+  omniMode.addEventListener("click", () => {
+    filter = void 0;
+    updateFilter();
+    setMode("omnisearch");
+  });
+  webMode.addEventListener("click", () => {
+    filter = void 0;
+    updateFilter();
+    setMode("web");
+  });
+  filterPill.addEventListener("click", () => {
+    filter = void 0;
+    updateFilter();
+    schedule();
+    input.focus();
+  });
+  input.addEventListener("input", schedule);
+  input.addEventListener("keydown", (event) => {
+    if (event.isComposing) return;
+    if (event.key === "Tab") {
+      const parsed = parseHomeFilter(input.value);
+      if (parsed) {
+        if (parsed.kind === "omnisearch" && !host.home.hasOmnisearch()) {
+          new import_obsidian3.Notice(t("Omnisearch is not enabled."));
+          return;
+        }
+        event.preventDefault();
+        if (parsed.kind === "web") {
+          filter = void 0;
+          setMode("web");
+        } else if (parsed.kind === "omnisearch") {
+          filter = void 0;
+          setMode("omnisearch");
+        } else {
+          filter = parsed;
+          setMode("vault");
+        }
+        input.value = "";
+        updateFilter();
+        clearResults();
+      }
+      return;
+    }
+    if (event.key === "Backspace" && !input.value && filter) {
+      event.preventDefault();
+      filter = void 0;
+      updateFilter();
+      schedule();
+      return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      if (!current.length) return;
+      event.preventDefault();
+      selected = (selected + (event.key === "ArrowDown" ? 1 : -1) + current.length) % current.length;
+      markSelection();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      ++requestId;
+      clearResults();
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const newTab = event.ctrlKey || event.metaKey;
+      if (mode === "web") {
+        if (input.value.trim()) void host.webSearch(input.value.trim());
+      } else if (event.shiftKey && mode === "vault" && (!filter || matchesNoteFilter(filter))) {
+        void createNote(newTab);
+      } else if (current[selected]) {
+        const chosen = current[selected];
+        if (chosen) void activate(chosen, newTab);
+      } else if (mode === "vault" && safeHomeNoteName(input.value) && (!filter || matchesNoteFilter(filter))) {
+        void createNote(newTab);
+      }
+    }
+  });
+  omniMode.toggleClass("is-hidden", !host.home.hasOmnisearch());
+  if (mode === "omnisearch" && !host.home.hasOmnisearch()) mode = "vault";
+  setMode(mode, false);
+  return {
+    input,
+    dispose: () => {
+      disposed = true;
+      ++requestId;
+      if (timer !== void 0) window.clearTimeout(timer);
+      wrapper.remove();
+    }
+  };
+}
+
+// src/navigation/address-normalizer.ts
+function normalizeBrowserAddress(value, searchUrl) {
+  const trimmed = value.trim();
+  if (!trimmed) return "browser://home";
+  if (/^browser:\/\//i.test(trimmed)) {
+    return "browser://" + trimmed.slice("browser://".length).toLowerCase();
+  }
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) return trimmed;
+  const inferred = inferWebAddress(trimmed);
+  return inferred ?? searchUrl(trimmed);
+}
+function inferWebAddress(value) {
+  if (/\s/.test(value) || value.includes("@")) return void 0;
+  let parsed;
+  try {
+    parsed = new URL("https://" + value);
+  } catch {
+    return void 0;
+  }
+  const hostname = parsed.hostname;
+  if (!hostname) return void 0;
+  if (hostname === "localhost" || isIpv4(hostname) || isBracketedIpv6(value)) {
+    return "http://" + value;
+  }
+  const labels = hostname.split(".");
+  if (labels.length < 2 || labels.some((label2) => !label2)) return void 0;
+  const suffix = labels.at(-1) ?? "";
+  if (!/^(?:[a-z]{2,}|xn--[a-z0-9-]+)$/i.test(suffix)) return void 0;
+  return "https://" + value;
+}
+function isIpv4(hostname) {
+  const parts = hostname.split(".");
+  return parts.length === 4 && parts.every((part) => {
+    if (!/^\d{1,3}$/.test(part)) return false;
+    const value = Number(part);
+    return value >= 0 && value <= 255;
+  });
+}
+function isBracketedIpv6(value) {
+  return /^\[[0-9a-f:.]+\](?::\d+)?(?:[/?#]|$)/i.test(value);
+}
+
+// src/ui/home-search-embed.ts
+var EmbeddedHomeSearch = class extends import_obsidian4.MarkdownRenderChild {
+  constructor(container, plugin, source3) {
+    super(container);
+    this.plugin = plugin;
+    this.directives = new Set(source3.split(/\r?\n/).map((line) => line.trim().toLowerCase()));
+  }
+  widget;
+  directives;
+  onload() {
+    const el = this.containerEl.createDiv({ cls: "ubc-home-embedded" });
+    if (!this.directives.has("only search bar")) el.createEl("h3", { text: this.plugin.core.settings().homeTitle || t("Home") });
+    this.widget = mountHomeSearch(el, {
+      app: this.plugin.app,
+      core: this.plugin.core,
+      home: this.plugin.homeAdapter,
+      openFile: async (path, newTab) => {
+        const leaf = this.plugin.app.workspace.getMostRecentLeaf() ?? this.plugin.app.workspace.getLeaf("tab");
+        await this.plugin.homeAdapter.openFile(leaf, path, newTab);
+      },
+      webSearch: async (query) => {
+        await this.plugin.openBrowser({
+          url: normalizeBrowserAddress(query, (term) => this.plugin.core.searchUrl(term))
+        });
+      }
+    });
+    if (this.directives.has("show starred files") || this.directives.has("show bookmarked files")) {
+      this.renderFiles(el, t("Bookmarked files"), this.plugin.homeAdapter.bookmarkedFiles(this.plugin.core.settings().homeMaxBookmarkedFiles));
+    }
+    if (this.directives.has("show recent files")) {
+      this.renderFiles(el, t("Recent files"), this.plugin.homeAdapter.recentFiles(
+        this.plugin.core.settings().homeMaxRecentFiles,
+        this.plugin.core.settings().homeHiddenRecentPaths
+      ));
+    }
+  }
+  renderFiles(parent, title, files) {
+    if (!files.length) return;
+    parent.createEl("h4", { text: title });
+    const list = parent.createDiv({ cls: "ubc-home-embedded-files" });
+    for (const file of files) {
+      const item = list.createEl("button", { text: file.name, attr: { type: "button", title: file.path } });
+      item.addEventListener("click", async (event) => {
+        const leaf = this.plugin.app.workspace.getMostRecentLeaf() ?? this.plugin.app.workspace.getLeaf("tab");
+        const opened = await this.plugin.homeAdapter.openFile(leaf, file.path, event.ctrlKey || event.metaKey);
+        if (!opened) new import_obsidian4.Notice(t("That file is no longer available."));
+      });
+    }
+  }
+  onunload() {
+    this.widget?.dispose();
+    this.widget = void 0;
+    this.containerEl.empty();
+  }
+};
+
+// src/ui/embedded-browser.ts
+var import_obsidian5 = require("obsidian");
+
+// src/integrations/obsidian-link-policy.ts
+function parseObsidianWebLink(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return null;
+  try {
+    const url = new URL(trimmed);
+    if (!url.hostname || !["http:", "https:"].includes(url.protocol)) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+// src/integrations/obsidian-link-router.ts
+function isElement(target) {
+  return target !== null && typeof target.closest === "function" && target.nodeType === 1;
+}
+function isWithin(anchor, target) {
+  return !!target && typeof target.nodeType === "number" && anchor.contains(target);
+}
+function linkIntentFromDom(target, modifiers) {
+  if (!isElement(target)) return null;
+  if (target.closest(".ubc-browser-view, .ubc-embedded-browser, .ubc-hover-preview")) return null;
+  const anchor = target.closest("a[href], .metadata-link-inner[data-href]");
+  if (!anchor) return null;
+  const context = anchor.closest(".metadata-container, .metadata-property, .markdown-rendered, .markdown-preview-view, .markdown-reading-view, .canvas-node");
+  if (!context) return null;
+  const url = parseObsidianWebLink(anchor.getAttribute("href") ?? anchor.getAttribute("data-href"));
+  if (!url) return null;
+  const source3 = context.closest(".metadata-container, .metadata-property") ? "properties" : context.closest(".canvas-node") ? "canvas" : "reading";
+  return { url, source: source3, external: Boolean(modifiers.metaKey || modifiers.ctrlKey) };
+}
+function linkIntentFromClickableToken(editor, position, external) {
+  if (!editor?.getClickableTokenAt || !position) return null;
+  const token = editor.getClickableTokenAt(position);
+  if (token?.type !== "external-link") return null;
+  const url = parseObsidianWebLink(token.text);
+  return url ? { url, source: "live-preview", external } : null;
+}
+function linkIntentFromEditorDom(workspace, target, x, y, external) {
+  if (!target.closest(".cm-link .cm-underline") || !target.closest(".markdown-source-view") || target.closest(".ubc-browser-view")) return null;
+  const leaf = workspace.getLeavesOfType("markdown").find((candidate) => candidate.view.containerEl?.contains(target));
+  const editor = leaf?.view?.editor;
+  return linkIntentFromClickableToken(editor, editor?.posAtCoords?.(x, y) ?? null, external);
+}
+function registerObsidianLinkBridge(plugin) {
+  const documents = /* @__PURE__ */ new Map();
+  const bindDocument = (doc) => {
+    if (documents.has(doc)) return;
+    const onClick = (event) => {
+      if (event.defaultPrevented || event.button !== 0) return;
+      let intent = linkIntentFromDom(event.target, event);
+      if (!intent && isElement(event.target)) {
+        intent = linkIntentFromEditorDom(
+          plugin.app.workspace,
+          event.target,
+          event.clientX,
+          event.clientY,
+          Boolean(event.metaKey || event.ctrlKey)
+        );
+      }
+      if (!intent) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      plugin.open(intent);
+    };
+    const onPointerOver = (event) => {
+      if (!isElement(event.target)) return;
+      const anchor = event.target.closest("a[href], .metadata-link-inner[data-href], .cm-underline");
+      if (!anchor || isWithin(anchor, event.relatedTarget)) return;
+      const intent = linkIntentFromDom(anchor, event) ?? linkIntentFromEditorDom(plugin.app.workspace, anchor, event.clientX, event.clientY, false);
+      if (intent) plugin.preview(anchor, intent);
+    };
+    const onPointerOut = (event) => {
+      if (!isElement(event.target)) return;
+      const anchor = event.target.closest("a[href], .metadata-link-inner[data-href], .cm-underline");
+      if (anchor && !isWithin(anchor, event.relatedTarget)) plugin.leavePreview(anchor);
+    };
+    const onScroll = () => plugin.closePreview();
+    const onVisibilityChange = () => {
+      if (doc.hidden) plugin.closePreview();
+    };
+    doc.addEventListener("click", onClick, true);
+    doc.addEventListener("pointerover", onPointerOver, true);
+    doc.addEventListener("pointerout", onPointerOut, true);
+    doc.addEventListener("scroll", onScroll, true);
+    doc.addEventListener("visibilitychange", onVisibilityChange);
+    documents.set(doc, () => {
+      doc.removeEventListener("click", onClick, true);
+      doc.removeEventListener("pointerover", onPointerOver, true);
+      doc.removeEventListener("pointerout", onPointerOut, true);
+      doc.removeEventListener("scroll", onScroll, true);
+      doc.removeEventListener("visibilitychange", onVisibilityChange);
+    });
+  };
+  bindDocument(document);
+  const bindExistingDocuments = () => plugin.app.workspace.iterateAllLeaves((leaf) => {
+    const doc = leaf.view.containerEl?.ownerDocument;
+    if (doc) bindDocument(doc);
+  });
+  bindExistingDocuments();
+  plugin.registerEvent(plugin.app.workspace.on("layout-change", bindExistingDocuments));
+  plugin.registerEvent(plugin.app.workspace.on("window-open", (_workspaceWindow, win) => bindDocument(win.document)));
+  plugin.registerEvent(plugin.app.workspace.on("window-close", (_workspaceWindow, win) => {
+    documents.get(win.document)?.();
+    documents.delete(win.document);
+  }));
+  plugin.register(() => {
+    for (const dispose of documents.values()) dispose();
+    documents.clear();
+  });
+  plugin.registerEvent(plugin.app.workspace.on("url-menu", (menu, url) => {
+    const parsed = parseObsidianWebLink(url);
+    if (!parsed) return;
+    menu.addItem((item) => item.setTitle("Open in Unified Browser Core").setIcon("globe").onClick(() => plugin.open({ url: parsed, source: "url-menu", external: false })));
+  }));
+  plugin.registerEvent(plugin.app.workspace.on("editor-menu", (menu, editor) => {
+    const text = editor.getClickableTokenAt?.(editor.getCursor());
+    const url = text?.type === "external-link" ? parseObsidianWebLink(text.text) : null;
+    if (!url) return;
+    menu.addItem((item) => item.setTitle("Open link in Unified Browser Core").setIcon("globe").onClick(() => plugin.open({ url, source: "editor-menu", external: false })));
+  }));
+  if (plugin.claimSurfingProtocol) {
+    plugin.registerObsidianProtocolHandler("web-open", (params) => {
+      const url = parseObsidianWebLink(params.url);
+      if (url) plugin.open({ url, source: "protocol", external: false });
+    });
+  }
+}
+
+// src/ui/embedded-browser.ts
+var EmbeddedBrowser = class extends import_obsidian5.MarkdownRenderChild {
+  constructor(container, plugin, url) {
+    super(container);
+    this.plugin = plugin;
+    this.currentUrl = url;
+    this.containerId = plugin.core.resolveContainerForNavigation(url, plugin.core.defaultContainerForNewTab());
+  }
+  webview;
+  popupDispose;
+  disposed = false;
+  address;
+  status;
+  currentUrl;
+  containerId;
+  onload() {
+    const root = this.containerEl.createDiv({ cls: "ubc-embedded-browser" });
+    const bar = root.createDiv({ cls: "ubc-embedded-browser-bar" });
+    this.address = bar.createSpan({ cls: "ubc-embedded-browser-address", text: this.currentUrl });
+    this.address.title = this.currentUrl;
+    this.status = bar.createSpan({ cls: "ubc-embedded-browser-status", text: "Loading\u2026", attr: { "aria-live": "polite" } });
+    const open = bar.createEl("button", { attr: { type: "button", title: "Open in UBC tab", "aria-label": "Open in UBC tab" } });
+    (0, import_obsidian5.setIcon)(open, "external-link");
+    open.addEventListener("click", () => void this.plugin.openBrowser({ url: this.currentUrl }));
+    const reload = bar.createEl("button", { attr: { type: "button", title: "Reload", "aria-label": "Reload" } });
+    (0, import_obsidian5.setIcon)(reload, "refresh-cw");
+    reload.addEventListener("click", () => this.webview?.reload());
+    const guest = this.plugin.managedWebviewBackend.create(
+      this.plugin.core.containers.get(this.containerId).partition,
+      () => this.plugin.core.settings(),
+      this.containerEl.ownerDocument
+    );
+    this.webview = guest;
+    const bind = (rebind) => {
+      if (this.disposed || this.webview !== guest) return;
+      if (rebind) {
+        this.popupDispose?.();
+        this.popupDispose = void 0;
+      }
+      this.popupDispose ??= this.plugin.windowOpenAdapter.bind(guest, (url, disposition) => {
+        if (!this.disposed) void this.plugin.openFromOpener(url, this.containerId, disposition);
+      });
+      if (rebind && !this.popupDispose) guest.removeAttribute("allowpopups");
+      this.plugin.bindPermissions(guest, this.containerId);
+    };
+    guest.addEventListener("did-attach", () => bind(false));
+    guest.addEventListener("dom-ready", () => {
+      bind(true);
+      this.status.textContent = "Ready";
+    });
+    guest.addEventListener("did-navigate", (raw) => {
+      const event = raw;
+      if (event.isMainFrame === false) return;
+      const next = parseObsidianWebLink(event.url);
+      if (next) {
+        this.currentUrl = next;
+        this.address.textContent = next;
+        this.address.title = next;
+      }
+    });
+    guest.addEventListener("did-fail-load", () => {
+      this.status.textContent = "Load failed";
+    });
+    guest.addEventListener("did-start-loading", () => {
+      this.status.textContent = "Loading\u2026";
+    });
+    guest.addEventListener("did-stop-loading", () => {
+      this.status.textContent = "Ready";
+    });
+    root.appendChild(guest);
+    guest.src = this.currentUrl;
+  }
+  onunload() {
+    this.disposed = true;
+    this.popupDispose?.();
+    this.popupDispose = void 0;
+    if (this.webview) this.plugin.managedWebviewBackend.destroy(this.webview);
+    this.webview = void 0;
+    this.containerEl.empty();
+  }
+};
+function parseSurfingEmbedSource(source3) {
+  const value = source3.trim();
+  if (!value) return null;
+  const plain = parseObsidianWebLink(value);
+  if (plain) return plain;
+  try {
+    const settings = (0, import_obsidian5.parseYaml)(value);
+    if (!settings || typeof settings !== "object") return null;
+    return parseObsidianWebLink(settings.url);
+  } catch {
+    return null;
+  }
+}
+function addEmbeddedBrowser(container, plugin, source3) {
+  const url = parseSurfingEmbedSource(source3);
+  if (!url) {
+    const message = container.createDiv({ cls: "ubc-embed-error", text: "Expected a valid http:// or https:// URL (or YAML: url: https://\u2026)." });
+    message.setAttribute("role", "alert");
+    return null;
+  }
+  return new EmbeddedBrowser(container, plugin, url);
+}
+
+// src/ui/obsidian-hover-preview.ts
+var ObsidianHoverPreview = class {
+  constructor(plugin) {
+    this.plugin = plugin;
+  }
+  timer;
+  dismissTimer;
+  anchor = null;
+  url = "";
+  pane;
+  component;
+  enter(anchor, url) {
+    if (anchor.ownerDocument.hidden) return;
+    if (this.anchor === anchor && this.url === url) {
+      this.cancelDismiss();
+      return;
+    }
+    this.close();
+    this.anchor = anchor;
+    this.url = url;
+    this.timer = setTimeout(() => {
+      this.timer = void 0;
+      if (!anchor.isConnected || this.plugin.isUnloading()) return;
+      this.show(anchor, url);
+    }, 550);
+  }
+  leave(anchor) {
+    if (this.anchor !== anchor) return;
+    if (this.timer !== void 0) {
+      this.close();
+      return;
+    }
+    this.scheduleDismiss();
+  }
+  close() {
+    this.cancelDismiss();
+    if (this.timer !== void 0) clearTimeout(this.timer);
+    this.timer = void 0;
+    this.anchor = null;
+    this.url = "";
+    this.component?.unload();
+    this.component = void 0;
+    this.pane?.remove();
+    this.pane = void 0;
+  }
+  show(anchor, url) {
+    const doc = anchor.ownerDocument;
+    const win = doc.defaultView;
+    if (!win || this.anchor !== anchor || this.url !== url || doc.hidden) {
+      this.close();
+      return;
+    }
+    const pane = doc.createElement("div");
+    pane.className = "ubc-hover-preview";
+    pane.setAttribute("role", "region");
+    pane.setAttribute("aria-label", "Web link preview");
+    const rect = anchor.getBoundingClientRect();
+    const width = Math.min(520, win.innerWidth - 24);
+    const height = Math.min(365, win.innerHeight - 24);
+    const left = Math.min(Math.max(12, rect.left), Math.max(12, win.innerWidth - width - 12));
+    const top = rect.bottom + height + 8 < win.innerHeight ? rect.bottom + 8 : Math.max(12, rect.top - height - 8);
+    pane.style.left = `${left}px`;
+    pane.style.top = `${top}px`;
+    pane.style.width = `${width}px`;
+    pane.style.height = `${height}px`;
+    pane.addEventListener("pointerenter", () => this.cancelDismiss());
+    pane.addEventListener("pointerleave", () => this.scheduleDismiss());
+    pane.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") this.close();
+    });
+    doc.body.appendChild(pane);
+    this.pane = pane;
+    const component = new EmbeddedBrowser(pane, this.plugin, url);
+    this.component = component;
+    component.load();
+  }
+  scheduleDismiss() {
+    this.cancelDismiss();
+    this.dismissTimer = setTimeout(() => this.close(), 240);
+  }
+  cancelDismiss() {
+    if (this.dismissTimer !== void 0) clearTimeout(this.dismissTimer);
+    this.dismissTimer = void 0;
+  }
+};
+
+// src/ui/html-file-view.ts
+var import_obsidian6 = require("obsidian");
+var import_node_path = require("node:path");
+var import_node_url2 = require("node:url");
+var UBC_HTML_FILE_VIEW = "ubc-html-file-view";
+var UbcHtmlFileView = class extends import_obsidian6.FileView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+    this.allowNoFile = false;
+  }
+  getViewType() {
+    return UBC_HTML_FILE_VIEW;
+  }
+  getDisplayText() {
+    return this.file?.basename ?? "HTML browser view";
+  }
+  canAcceptExtension(extension) {
+    return extension === "html" || extension === "htm";
+  }
+  async onLoadFile(file) {
+    const adapter = this.app.vault.adapter;
+    if (!(adapter instanceof import_obsidian6.FileSystemAdapter)) return;
+    const url = (0, import_node_url2.pathToFileURL)((0, import_node_path.join)(adapter.getBasePath(), file.path)).href;
+    await this.plugin.openBrowser({ url });
+    if (this.leaf.view === this) this.leaf.detach();
+  }
+};
+
+// src/integrations/obsidian-canvas.ts
+var import_obsidian7 = require("obsidian");
+function registerObsidianCanvasBrowserActions(host) {
+  const observers = /* @__PURE__ */ new Map();
+  const actions = /* @__PURE__ */ new Map();
+  let scheduled = false;
+  const scan = () => {
+    scheduled = false;
+    const roots = /* @__PURE__ */ new Set();
+    for (const leaf of host.app.workspace.getLeavesOfType("canvas")) {
+      const canvas = leaf.view.containerEl.querySelector(".canvas");
+      if (canvas) roots.add(canvas);
+    }
+    for (const [root, observer] of observers) {
+      if (roots.has(root) && root.isConnected) continue;
+      observer.disconnect();
+      observers.delete(root);
+    }
+    for (const [node, action] of actions) {
+      if (node.isConnected && [...roots].some((root) => root.contains(node))) continue;
+      action.remove();
+      actions.delete(node);
+    }
+    for (const root of roots) {
+      if (!observers.has(root)) {
+        const observer = new MutationObserver(() => schedule());
+        observer.observe(root, { subtree: true, childList: true, attributes: true, attributeFilter: ["src"] });
+        observers.set(root, observer);
+      }
+      for (const node of root.querySelectorAll(".canvas-node")) {
+        const guest = node.querySelector(".canvas-node-content webview[src]");
+        const url = parseObsidianWebLink(guest?.getAttribute("src"));
+        const existing = actions.get(node);
+        if (!url) {
+          if (existing) {
+            existing.remove();
+            actions.delete(node);
+          }
+          continue;
+        }
+        if (existing) continue;
+        const parent = node.querySelector(".canvas-node-container") ?? node;
+        const button2 = parent.createEl("button", {
+          cls: "ubc-canvas-browser-action clickable-icon",
+          attr: { type: "button", title: "Open Canvas link in Unified Browser Core", "aria-label": "Open Canvas link in Unified Browser Core" }
+        });
+        (0, import_obsidian7.setIcon)(button2, "globe");
+        const cancel = (event) => {
+          event.stopPropagation();
+        };
+        for (const type of ["pointerdown", "mousedown", "mouseup"]) button2.addEventListener(type, cancel);
+        button2.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const current = parseObsidianWebLink(node.querySelector(".canvas-node-content webview")?.getAttribute("src"));
+          if (current) host.openUrl(current);
+        });
+        actions.set(node, button2);
+      }
+    }
+  };
+  const schedule = () => {
+    if (scheduled) return;
+    scheduled = true;
+    queueMicrotask(scan);
+  };
+  host.registerEvent(host.app.workspace.on("layout-change", schedule));
+  host.registerEvent(host.app.workspace.on("file-open", schedule));
+  host.register(() => {
+    for (const observer of observers.values()) observer.disconnect();
+    observers.clear();
+    for (const button2 of actions.values()) button2.remove();
+    actions.clear();
+  });
+  schedule();
+}
+
+// src/integrations/obsidian-web-transfer.ts
+function webTextFragmentUrl(url, selected) {
+  const content = selected.replace(/\s+/g, " ").trim();
+  if (!content) return null;
+  let target;
+  try {
+    target = new URL(url);
+  } catch {
+    return null;
+  }
+  if (target.protocol !== "http:" && target.protocol !== "https:") return null;
+  const chars = Array.from(content);
+  const encoded = chars.length > 250 ? `${encodeURIComponent(chars.slice(0, 140).join(""))},${encodeURIComponent(chars.slice(-90).join(""))}` : encodeURIComponent(content);
+  const existing = target.hash.replace(/^#/, "").replace(/:~:text=.*$/u, "");
+  target.hash = `${existing}:~:text=${encoded}`;
+  return target.href;
+}
+function formatBrowserTabsMarkdown(tabs) {
+  return tabs.filter((item) => /^https?:\/\//i.test(item.url)).map((item) => {
+    const name = (item.title || item.url).replace(/[\[\]\\]/g, "\\$&").replace(/[\r\n]+/g, " ");
+    return `- [${name}](<${item.url.replaceAll(">", "%3E")}>)`;
+  }).join("\n");
+}
+function videoTimestampLink(url, time) {
+  if (!Number.isFinite(time) || time < 0) return null;
+  let page;
+  try {
+    page = new URL(url);
+  } catch {
+    return null;
+  }
+  if (!/^https?:$/u.test(page.protocol)) return null;
+  const seconds = Math.floor(time);
+  if (/(^|\.)youtube\.com$|(^|\.)youtu\.be$|(^|\.)bilibili\.com$/iu.test(page.hostname)) {
+    page.searchParams.set("t", String(seconds));
+  } else {
+    page.hash = `t=${seconds}`;
+  }
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor(seconds % 3600 / 60);
+  const remainder = seconds % 60;
+  const label2 = hours ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}` : `${minutes}:${String(remainder).padStart(2, "0")}`;
+  return { url: page.href, label: label2 };
+}
+function selectionNoteContent(selection) {
+  const title = selection.title.trim() || "Web selection";
+  const baseName = title.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "-").slice(0, 100).trim() || "Web selection";
+  const text = selection.text.trim();
+  if (!text || !/^https?:\/\//i.test(selection.url)) throw new Error("Expected selected web text and an HTTP(S) source");
+  const frontmatter = `---
+title: ${JSON.stringify(title)}
+source: ${JSON.stringify(selection.url)}
+---
+
+`;
+  const quote = text.split(/\r?\n/).map((line) => line ? `> ${line}` : ">").join("\n");
+  return { baseName, markdown: `${frontmatter}${quote}
+
+[Source](${selection.url})
+` };
+}
+
+// src/integrations/obsidian-vault-bookmark-mirror.ts
+var import_obsidian8 = require("obsidian");
+var BOOKMARK_VAULT_FOLDER = "UBC Bookmarks";
+function parseMirroredBookmark(markdown) {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(markdown);
+  if (!match) return null;
+  let raw;
+  try {
+    raw = (0, import_obsidian8.parseYaml)(match[1] ?? "");
+  } catch {
+    return null;
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const fm = raw;
+  if (typeof fm.ubc_bookmark_id !== "string" || !/^[a-zA-Z0-9_-]{1,180}$/u.test(fm.ubc_bookmark_id)) return null;
+  if (typeof fm.url !== "string") return null;
+  try {
+    const parsed = new URL(fm.url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  } catch {
+    return null;
+  }
+  return {
+    id: fm.ubc_bookmark_id,
+    url: fm.url,
+    title: typeof fm.title === "string" && fm.title.trim() ? fm.title.trim() : fm.url,
+    description: typeof fm.description === "string" ? fm.description : "",
+    tags: Array.isArray(fm.tags) ? fm.tags.filter((s) => typeof s === "string") : [],
+    favorite: fm.favorite === true
+  };
+}
+function serializeMirroredBookmark(bookmark) {
+  return [
+    "---",
+    `ubc_bookmark_id: ${JSON.stringify(bookmark.id)}`,
+    `url: ${JSON.stringify(bookmark.url)}`,
+    `title: ${JSON.stringify(bookmark.title)}`,
+    `description: ${JSON.stringify(bookmark.description ?? "")}`,
+    `tags: ${JSON.stringify(bookmark.tags ?? [])}`,
+    `favorite: ${bookmark.favorite ? "true" : "false"}`,
+    "---",
+    "",
+    `[Open web page](<${bookmark.url.replaceAll(">", "%3E")}>)`,
+    ""
+  ].join("\n");
+}
+var ObsidianVaultBookmarkMirror = class {
+  constructor(app, core, refreshViews, host) {
+    this.app = app;
+    this.core = core;
+    this.refreshViews = refreshViews;
+    this.host = host;
+    const onChange = (file) => {
+      if (this.matches(file.path)) this.enqueue(() => this.reconcile());
+    };
+    host.registerEvent(app.vault.on("create", onChange));
+    host.registerEvent(app.vault.on("modify", onChange));
+    host.registerEvent(app.vault.on("delete", onChange));
+    host.registerEvent(app.vault.on("rename", (file, previous) => {
+      if (this.matches(file.path) || this.matches(previous)) this.enqueue(() => this.reconcile());
+    }));
+    this.unregisters.push(core.events.on("bookmark-changed", (event) => {
+      if (this.applyingFromVault || !this.enabled) return;
+      if (event.kind !== "bookmark") return;
+      this.enqueue(async () => {
+        if (event.action === "deleted") await this.removePublished(event.id);
+        else if (event.entry) await this.publish(event.entry);
+      });
+    }));
+    host.register(() => this.dispose());
+  }
+  files = /* @__PURE__ */ new Map();
+  queue = Promise.resolve();
+  disposed = false;
+  applyingFromVault = false;
+  unregisters = [];
+  get enabled() {
+    return this.core.state.vaultBookmarkMirror.enabled;
+  }
+  async setEnabled(enabled) {
+    if (this.disposed) return;
+    this.core.state.vaultBookmarkMirror.enabled = enabled;
+    this.core.scheduleSave();
+    if (enabled) await this.enqueue(() => this.reconcile());
+  }
+  async initialize() {
+    if (this.enabled) await this.enqueue(() => this.reconcile());
+  }
+  /** Await all event-scheduled mirror writes, useful during controlled reload. */
+  async flush() {
+    let observed;
+    do {
+      observed = this.queue;
+      await observed;
+    } while (observed !== this.queue);
+  }
+  matches(path) {
+    return path === BOOKMARK_VAULT_FOLDER || path.startsWith(BOOKMARK_VAULT_FOLDER + "/");
+  }
+  enqueue(task) {
+    const run = this.queue.then(() => this.disposed || !this.enabled ? void 0 : task());
+    this.queue = run.catch((error) => console.warn("Unified Browser Core: Vault bookmark mirror", error));
+    return run;
+  }
+  async readManagedFiles() {
+    const folder = this.app.vault.getAbstractFileByPath(BOOKMARK_VAULT_FOLDER);
+    const result = /* @__PURE__ */ new Map();
+    if (!(folder instanceof import_obsidian8.TFolder)) return { records: result, unreadable: false };
+    let unreadable = false;
+    for (const item of folder.children) {
+      if (!(item instanceof import_obsidian8.TFile) || item.extension !== "md") continue;
+      const data = parseMirroredBookmark(await this.app.vault.cachedRead(item));
+      if (data && !result.has(data.id)) result.set(data.id, { file: item, data });
+      else if (this.core.state.vaultBookmarkMirror.publishedIds.some((id) => item.path === `${BOOKMARK_VAULT_FOLDER}/${encodeURIComponent(id)}.md` || this.files.get(id) === item)) {
+        unreadable = true;
+      }
+    }
+    return { records: result, unreadable };
+  }
+  /** One serial reconciliation. A deletion is authoritative *only* for an ID
+   * previously published by this mirror; unrelated bookmarks are preserved. */
+  async reconcile() {
+    const tracked = this.core.state.vaultBookmarkMirror.publishedIds;
+    const root = this.app.vault.getAbstractFileByPath(BOOKMARK_VAULT_FOLDER);
+    if (!root && tracked.length) {
+      this.core.state.vaultBookmarkMirror.enabled = false;
+      this.core.scheduleSave();
+      new import_obsidian8.Notice("UBC Vault bookmark folder vanished; sync paused to protect bookmarks.");
+      return;
+    }
+    const { records, unreadable } = await this.readManagedFiles();
+    const activeIds = new Set(records.keys());
+    this.applyingFromVault = true;
+    try {
+      for (const id of tracked) {
+        if (activeIds.has(id)) continue;
+        if (unreadable) continue;
+        if (this.core.bookmarks.getBookmark(id)) this.core.bookmarks.deleteBookmark(id);
+      }
+      for (const [id, { file, data }] of records) {
+        const current = this.core.bookmarks.getBookmark(id);
+        if (!current) {
+          const linked = this.core.bookmarks.findByUrl(data.url);
+          if (!linked) this.core.bookmarks.addBookmark({
+            id,
+            title: data.title,
+            url: data.url,
+            description: data.description,
+            tags: data.tags,
+            favorite: data.favorite
+          });
+          if (linked && linked.id !== id) console.info("Unified Browser Core: Vault bookmark URL already exists with another ID", file.path);
+          if (this.core.bookmarks.getBookmark(id)) this.files.set(id, file);
+          continue;
+        }
+        if (current.url !== data.url || current.title !== data.title || (current.description ?? "") !== data.description || JSON.stringify(current.tags ?? []) !== JSON.stringify(data.tags)) {
+          this.core.bookmarks.updateBookmark(id, {
+            url: data.url,
+            title: data.title,
+            description: data.description,
+            tags: data.tags
+          });
+        }
+        if (current.favorite !== data.favorite) this.core.bookmarks.setFavorite(id, data.favorite);
+        this.files.set(id, file);
+      }
+    } finally {
+      this.applyingFromVault = false;
+    }
+    if (unreadable) {
+      console.warn("Unified Browser Core: a managed Vault bookmark note has invalid frontmatter; export paused");
+      this.core.scheduleSave();
+      this.refreshViews();
+      return;
+    }
+    const nextTracked = new Set(tracked.filter((id) => activeIds.has(id) || unreadable));
+    for (const bookmark of this.core.bookmarks.allBookmarks()) {
+      if (records.has(bookmark.id)) {
+        nextTracked.add(bookmark.id);
+        continue;
+      }
+      const file = await this.publish(bookmark);
+      if (file) nextTracked.add(bookmark.id);
+    }
+    this.core.state.vaultBookmarkMirror.publishedIds = [...nextTracked];
+    this.core.scheduleSave();
+    this.refreshViews();
+  }
+  async publish(bookmark) {
+    if (!this.enabled || !/^https?:\/\//i.test(bookmark.url)) return null;
+    const directory = this.app.vault.getAbstractFileByPath(BOOKMARK_VAULT_FOLDER);
+    if (!directory) await this.app.vault.createFolder(BOOKMARK_VAULT_FOLDER);
+    if (directory && !(directory instanceof import_obsidian8.TFolder)) throw new Error("Bookmark mirror folder is not a folder");
+    let existing = this.files.get(bookmark.id);
+    if (!existing?.parent) {
+      for (const item of this.app.vault.getAbstractFileByPath(BOOKMARK_VAULT_FOLDER).children) {
+        if (!(item instanceof import_obsidian8.TFile) || item.extension !== "md") continue;
+        if (parseMirroredBookmark(await this.app.vault.cachedRead(item))?.id === bookmark.id) {
+          existing = item;
+          break;
+        }
+      }
+    }
+    if (existing) {
+      this.files.set(bookmark.id, existing);
+      const current = parseMirroredBookmark(await this.app.vault.cachedRead(existing));
+      if (current && current.url === bookmark.url && current.title === bookmark.title && current.description === (bookmark.description ?? "") && current.favorite === bookmark.favorite && JSON.stringify(current.tags) === JSON.stringify(bookmark.tags ?? [])) return existing;
+      await this.app.fileManager.processFrontMatter(existing, (frontmatter) => {
+        frontmatter.ubc_bookmark_id = bookmark.id;
+        frontmatter.url = bookmark.url;
+        frontmatter.title = bookmark.title;
+        frontmatter.description = bookmark.description ?? "";
+        frontmatter.tags = bookmark.tags ?? [];
+        frontmatter.favorite = bookmark.favorite;
+      });
+      return existing;
+    }
+    const name = encodeURIComponent(bookmark.id);
+    const path = `${BOOKMARK_VAULT_FOLDER}/${name}.md`;
+    if (this.app.vault.getAbstractFileByPath(path)) {
+      console.warn("Unified Browser Core: refused to overwrite unrelated Vault note", path);
+      return null;
+    }
+    const file = await this.app.vault.create(path, serializeMirroredBookmark(bookmark));
+    this.files.set(bookmark.id, file);
+    const state = this.core.state.vaultBookmarkMirror;
+    if (!state.publishedIds.includes(bookmark.id)) {
+      state.publishedIds.push(bookmark.id);
+      this.core.scheduleSave();
+    }
+    return file;
+  }
+  async removePublished(id) {
+    const state = this.core.state.vaultBookmarkMirror;
+    if (!state.publishedIds.includes(id)) return;
+    let file = this.files.get(id);
+    if (!file?.parent) {
+      const { records } = await this.readManagedFiles();
+      file = records.get(id)?.file;
+    }
+    if (file) await this.app.vault.trash(file, false);
+    this.files.delete(id);
+    state.publishedIds = state.publishedIds.filter((value) => value !== id);
+    this.core.scheduleSave();
+  }
+  dispose() {
+    this.disposed = true;
+    this.unregisters.forEach((dispose) => dispose());
+    this.unregisters.length = 0;
+    this.files.clear();
+  }
+};
+
+// src/ui/obsidian-browser-tree-view.ts
+var import_obsidian10 = require("obsidian");
+
+// src/core/id.ts
+function createId(prefix) {
+  const random = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `${prefix}-${random}`;
+}
+function safePartitionPart(value) {
+  return value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "container";
+}
+
+// src/ui/text-prompt.ts
+var import_obsidian9 = require("obsidian");
+function promptText(app, title, initialValue = "", placeholder = "") {
+  return new Promise((resolve) => {
+    new TextPromptModal(app, title, initialValue, placeholder, resolve).open();
+  });
+}
+var TextPromptModal = class extends import_obsidian9.Modal {
+  constructor(app, promptTitle, initialValue, placeholder, resolveValue) {
+    super(app);
+    this.promptTitle = promptTitle;
+    this.initialValue = initialValue;
+    this.placeholder = placeholder;
+    this.resolveValue = resolveValue;
+  }
+  settled = false;
+  onOpen() {
+    this.contentEl.createEl("h2", { text: this.promptTitle });
+    const field2 = this.contentEl.createEl("label", { cls: "ubc-prompt-field" });
+    if (this.placeholder) field2.createSpan({ cls: "ubc-prompt-label", text: this.placeholder });
+    const input = field2.createEl("input", {
+      attr: {
+        type: "text",
+        placeholder: this.placeholder,
+        "aria-label": this.placeholder || this.promptTitle
+      }
+    });
+    input.value = this.initialValue;
+    input.addClass("ubc-prompt-input");
+    const actions = this.contentEl.createDiv({ cls: "ubc-modal-actions" });
+    actions.createEl("button", { text: t("Cancel") }).addEventListener("click", () => this.finish(void 0));
+    const save = actions.createEl("button", { text: t("Save") });
+    const submit = () => {
+      const value = input.value.trim();
+      if (!value) return;
+      this.finish(value);
+    };
+    const syncSave = () => {
+      const enabled = Boolean(input.value.trim());
+      save.disabled = !enabled;
+      save.toggleClass("mod-cta", enabled);
+    };
+    save.addEventListener("click", submit);
+    input.addEventListener("input", syncSave);
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || save.disabled) return;
+      event.preventDefault();
+      submit();
+    });
+    syncSave();
+    input.focus();
+    input.select();
+  }
+  onClose() {
+    this.contentEl.empty();
+    if (!this.settled) this.resolveValue(void 0);
+  }
+  finish(value) {
+    if (this.settled) return;
+    this.settled = true;
+    this.resolveValue(value);
+    this.close();
+  }
+};
+
+// src/tabs/browser-tab-tree-model.ts
+function orderedTabTree(tabs, tree) {
+  const order = new Map(tree.tabOrder.map((id, index) => [id, index]));
+  const sorted = [...tabs].sort((a, b) => (order.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.id) ?? Number.MAX_SAFE_INTEGER));
+  const groups = /* @__PURE__ */ new Map();
+  for (const group of tree.groups) groups.set(group.id, []);
+  const ungrouped = [];
+  for (const tab of sorted) {
+    const assigned = tree.tabToGroup[tab.id];
+    const target = assigned ? groups.get(assigned) : void 0;
+    if (target) target.push(tab);
+    else ungrouped.push(tab);
+  }
+  return { groups, ungrouped };
+}
+
+// src/ui/obsidian-browser-tree-view.ts
+var BROWSER_TREE_VIEW_TYPE = "ubc-browser-tab-tree";
+var ObsidianBrowserTreeView = class extends import_obsidian10.ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+  }
+  disposeEvents = [];
+  renderScheduled = false;
+  getViewType() {
+    return BROWSER_TREE_VIEW_TYPE;
+  }
+  getDisplayText() {
+    return "Browser tab tree";
+  }
+  getIcon() {
+    return "list-tree";
+  }
+  async onOpen() {
+    this.disposeEvents.push(this.plugin.core.events.on("leaf-opened", () => this.scheduleRender()));
+    this.disposeEvents.push(this.plugin.core.events.on("leaf-closed", () => this.scheduleRender()));
+    this.disposeEvents.push(this.plugin.core.events.on("navigation-committed", () => this.scheduleRender()));
+    this.registerEvent(this.app.workspace.on("layout-change", () => this.scheduleRender()));
+    this.render();
+  }
+  async onClose() {
+    for (const dispose of this.disposeEvents) dispose();
+    this.disposeEvents = [];
+    this.contentEl.empty();
+  }
+  state() {
+    return this.plugin.core.state.browserTabTree;
+  }
+  persist() {
+    this.plugin.core.scheduleSave();
+    this.render();
+  }
+  scheduleRender() {
+    if (this.renderScheduled) return;
+    this.renderScheduled = true;
+    queueMicrotask(() => {
+      this.renderScheduled = false;
+      this.render();
+    });
+  }
+  async addGroup() {
+    const name = await promptText(this.app, "New browser tab group", "", "Group name");
+    if (!name) return;
+    this.state().groups.push({ id: createId("tab-group"), name, collapsed: false });
+    this.persist();
+  }
+  moveTab(id, groupId, beforeId) {
+    const tree = this.state();
+    if (groupId && !tree.groups.some((group) => group.id === groupId)) return;
+    if (groupId) tree.tabToGroup[id] = groupId;
+    else delete tree.tabToGroup[id];
+    const order = tree.tabOrder.filter((tabId) => tabId !== id);
+    const position = beforeId ? order.indexOf(beforeId) : -1;
+    if (position < 0) order.push(id);
+    else order.splice(position, 0, id);
+    tree.tabOrder = order;
+    this.persist();
+  }
+  async saveCurrentWorkspace() {
+    const name = await promptText(this.app, "Save browser workspace", "", "Workspace name");
+    if (!name) return;
+    const tree = this.state();
+    if (tree.savedWorkspaces[name]) {
+      new import_obsidian10.Notice("That browser workspace name is already in use.");
+      return;
+    }
+    tree.savedWorkspaces[name] = {
+      savedAt: Date.now(),
+      groups: tree.groups.map((group) => ({ ...group })),
+      tabs: this.plugin.api.tabs().map((tab) => ({
+        id: tab.id,
+        url: tab.url,
+        title: tab.title,
+        containerId: tab.containerId,
+        pinned: tab.pinned,
+        groupId: tree.tabToGroup[tab.id] ?? null
+      }))
+    };
+    this.persist();
+    new import_obsidian10.Notice(`Browser workspace saved: ${name}`);
+  }
+  async restoreWorkspace(name) {
+    const saved = this.state().savedWorkspaces[name];
+    if (!saved) return;
+    const tree = this.state();
+    const groups = new Map(tree.groups.map((group) => [group.id, group]));
+    for (const group of saved.groups) if (!groups.has(group.id)) tree.groups.push({ ...group });
+    let restored = 0;
+    for (const tab of saved.tabs) {
+      try {
+        const leaf = await this.plugin.openBrowser({
+          url: tab.url,
+          containerId: tab.containerId,
+          state: { pinned: tab.pinned },
+          reveal: false
+        });
+        leaf.setPinned(tab.pinned);
+        const current = leaf.view.getState();
+        const id = current.lifecycleId;
+        if (id) this.moveTab(id, tab.groupId);
+        restored++;
+      } catch (error) {
+        console.warn("Unified Browser Core: could not restore browser tab", tab.url, error);
+      }
+    }
+    this.persist();
+    new import_obsidian10.Notice(`Restored ${restored} browser tabs from ${name}`);
+  }
+  render() {
+    if (!this.contentEl) return;
+    this.contentEl.empty();
+    const root = this.contentEl.createDiv({ cls: "ubc-tab-tree" });
+    const header = root.createDiv({ cls: "ubc-tab-tree-header" });
+    header.createEl("h3", { text: "Browser tabs" });
+    const add = header.createEl("button", { cls: "clickable-icon", attr: { "aria-label": "Create browser tab group", title: "Create group" } });
+    (0, import_obsidian10.setIcon)(add, "folder-plus");
+    add.addEventListener("click", () => void this.addGroup());
+    const save = header.createEl("button", { cls: "clickable-icon", attr: { "aria-label": "Save browser workspace", title: "Save workspace" } });
+    (0, import_obsidian10.setIcon)(save, "save");
+    save.addEventListener("click", () => void this.saveCurrentWorkspace());
+    const restore = header.createEl("button", { cls: "clickable-icon", attr: { "aria-label": "Restore browser workspace", title: "Restore workspace" } });
+    (0, import_obsidian10.setIcon)(restore, "folder-open");
+    restore.addEventListener("click", () => {
+      const menu = new import_obsidian10.Menu();
+      for (const name of Object.keys(this.state().savedWorkspaces).sort()) {
+        menu.addItem((item) => item.setTitle(name).onClick(() => void this.restoreWorkspace(name)));
+      }
+      menu.addItem((item) => item.setTitle("Save current workspace\u2026").onClick(() => void this.saveCurrentWorkspace()));
+      const bounds = restore.getBoundingClientRect();
+      menu.showAtPosition({ x: bounds.left, y: bounds.bottom });
+    });
+    const tree = this.state();
+    const { groups, ungrouped } = orderedTabTree(this.plugin.api.tabs(), tree);
+    for (const group of tree.groups) {
+      const section = root.createDiv({ cls: "ubc-tab-tree-group" });
+      const label3 = section.createEl("button", { cls: "ubc-tab-tree-group-header", attr: { "aria-expanded": String(!group.collapsed) } });
+      const icon = label3.createSpan();
+      (0, import_obsidian10.setIcon)(icon, group.collapsed ? "chevron-right" : "chevron-down");
+      label3.createSpan({ text: group.name });
+      label3.createSpan({ cls: "ubc-tab-tree-count", text: String(groups.get(group.id)?.length ?? 0) });
+      label3.addEventListener("click", () => {
+        group.collapsed = !group.collapsed;
+        this.persist();
+      });
+      this.acceptDrop(label3, group.id);
+      label3.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        const menu = new import_obsidian10.Menu();
+        menu.addItem((item) => item.setTitle("Rename group").onClick(async () => {
+          const renamed = await promptText(this.app, "Rename tab group", group.name);
+          if (renamed) {
+            group.name = renamed;
+            this.persist();
+          }
+        }));
+        menu.addItem((item) => item.setTitle("Remove group (keep tabs)").onClick(() => {
+          for (const [tabId, groupId] of Object.entries(tree.tabToGroup)) if (groupId === group.id) delete tree.tabToGroup[tabId];
+          tree.groups = tree.groups.filter((entry) => entry.id !== group.id);
+          this.persist();
+        }));
+        menu.showAtMouseEvent(event);
+      });
+      if (!group.collapsed) for (const tab of groups.get(group.id) ?? []) this.renderTab(section, tab, group.id);
+    }
+    const other = root.createDiv({ cls: "ubc-tab-tree-ungrouped" });
+    const label2 = other.createDiv({ cls: "ubc-tab-tree-group-header", text: `Ungrouped \xB7 ${ungrouped.length}` });
+    this.acceptDrop(label2, null);
+    for (const tab of ungrouped) this.renderTab(other, tab, null);
+    if (!this.plugin.api.tabs().length) root.createDiv({ cls: "ubc-tab-tree-empty", text: "No browser tabs. Open a browser tab to see it here." });
+  }
+  acceptDrop(target, groupId, beforeId) {
+    target.addEventListener("dragover", (event) => {
+      if (!event.dataTransfer?.types.includes("application/x-ubc-tab")) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+    });
+    target.addEventListener("drop", (event) => {
+      const id = event.dataTransfer?.getData("application/x-ubc-tab");
+      if (!id || !this.plugin.api.tabs().some((tab) => tab.id === id)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.moveTab(id, groupId, beforeId === id ? void 0 : beforeId);
+    });
+  }
+  renderTab(parent, tab, groupId) {
+    const item = parent.createDiv({ cls: "ubc-tab-tree-entry" });
+    item.draggable = true;
+    item.setAttribute("role", "listitem");
+    item.setAttribute("aria-label", tab.title || tab.url);
+    item.toggleClass("is-active", tab.active);
+    const icon = item.createSpan({ cls: "ubc-tab-tree-icon" });
+    (0, import_obsidian10.setIcon)(icon, tab.pinned ? "pin" : "globe");
+    const text = item.createEl("button", { cls: "ubc-tab-tree-label", attr: { type: "button", title: tab.url } });
+    text.createSpan({ text: tab.title || tab.url });
+    text.createSpan({ cls: "ubc-tab-tree-url", text: tab.url });
+    text.addEventListener("click", () => void this.plugin.api.activateTab(tab.id));
+    item.addEventListener("dragstart", (event) => {
+      event.dataTransfer?.setData("application/x-ubc-tab", tab.id);
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+    });
+    this.acceptDrop(item, groupId, tab.id);
+    item.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      const menu = new import_obsidian10.Menu();
+      menu.addItem((entry) => entry.setTitle("Activate").onClick(() => void this.plugin.api.activateTab(tab.id)));
+      menu.addItem((entry) => entry.setTitle("Move to Ungrouped").onClick(() => this.moveTab(tab.id, null)));
+      for (const group of this.state().groups) {
+        menu.addItem((entry) => entry.setTitle(`Move to ${group.name}`).onClick(() => this.moveTab(tab.id, group.id)));
+      }
+      menu.addItem((entry) => entry.setTitle("Close tab").onClick(() => this.plugin.api.closeTab(tab.id)));
+      menu.showAtMouseEvent(event);
+    });
+  }
+};
+
+// src/integrations/obsidian-search-surfaces.ts
+var import_obsidian11 = require("obsidian");
+function registerObsidianSearchSurfaces(host) {
+  const widgets = /* @__PURE__ */ new Map();
+  let scheduled = false;
+  const render = () => {
+    scheduled = false;
+    const roots = /* @__PURE__ */ new Set();
+    if (!host.core.settings().replaceEmptyTabsWithHome) {
+      for (const leaf of host.app.workspace.getLeavesOfType("empty")) {
+        const root = leaf.view.containerEl.querySelector(".empty-state-container");
+        if (root) roots.add(root);
+      }
+    }
+    for (const [root, widget] of widgets) {
+      if (roots.has(root) && root.isConnected) continue;
+      widget.remove();
+      widgets.delete(root);
+    }
+    for (const root of roots) {
+      if (widgets.has(root)) continue;
+      const form = root.createEl("form", { cls: "ubc-obsidian-empty-search", attr: { role: "search" } });
+      const icon = form.createSpan({ cls: "ubc-obsidian-empty-search-icon" });
+      (0, import_obsidian11.setIcon)(icon, "search");
+      const input = form.createEl("input", { attr: {
+        type: "search",
+        "aria-label": "Search the web with UBC",
+        placeholder: "Search the web or enter a URL",
+        autocomplete: "off",
+        autocapitalize: "off",
+        spellcheck: "false"
+      } });
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const text = input.value.trim();
+        if (!text) return;
+        const url = normalizeBrowserAddress(text, (query) => host.core.searchUrl(query));
+        void host.openBrowser({ url });
+      });
+      widgets.set(root, form);
+    }
+  };
+  const schedule = () => {
+    if (scheduled) return;
+    scheduled = true;
+    queueMicrotask(render);
+  };
+  host.registerEvent(host.app.workspace.on("layout-change", schedule));
+  host.register(() => {
+    for (const widget of widgets.values()) widget.remove();
+    widgets.clear();
+  });
+  schedule();
 }
 
 // src/adapters/obsidian-bookmarks.ts
@@ -1810,15 +4063,6 @@ function mapBookmarkChange(event) {
   };
 }
 
-// src/core/id.ts
-function createId(prefix) {
-  const random = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-  return `${prefix}-${random}`;
-}
-function safePartitionPart(value) {
-  return value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "container";
-}
-
 // src/bookmarks/bookmark-store.ts
 var BookmarkStore = class {
   constructor(state, onChanged = () => void 0) {
@@ -1851,7 +4095,7 @@ var BookmarkStore = class {
     }
     const siblings = this.children(input.parentId ?? null);
     const bookmark = {
-      id: createId("bookmark"),
+      id: input.id && !this.state.bookmarks[input.id] ? input.id : createId("bookmark"),
       kind: "bookmark",
       parentId: input.parentId ?? null,
       title: input.title || input.url,
@@ -3073,6 +5317,25 @@ var DEFAULT_SETTINGS = {
   homeSearchMode: "vault",
   showRecentVaultFilesOnHome: true,
   showVaultBookmarksOnHome: true,
+  homeMarkdownOnly: false,
+  homeShowUnresolvedLinks: false,
+  homeShowFilePaths: true,
+  homeShowShortcuts: true,
+  homeShowOmnisearchExcerpts: true,
+  homeMaxSearchResults: 10,
+  homeMaxRecentFiles: 8,
+  homeMaxBookmarkedFiles: 8,
+  homeSearchDelayMs: 0,
+  homeHiddenRecentPaths: [],
+  homeBookmarkIcons: {},
+  homeTitle: "Home",
+  homeLogo: "home",
+  homeTitleFontSize: "2rem",
+  homeTitleFontWeight: 650,
+  homeTitleFontFamily: "",
+  homeTitleColor: "",
+  homeSelectionAccent: true,
+  homeStartupMode: "normal",
   searchUrlTemplate: "https://www.google.com/search?q={query}",
   historyDayStartMinutes: 240,
   historyRetentionDays: 0,
@@ -3146,6 +5409,8 @@ var BrowserCore = class {
     const startupBehavior = settingsPatch.startupBehavior ?? (legacyRestorePreviousSession === false ? "none" : DEFAULT_SETTINGS.startupBehavior);
     const historyDayStartMinutes = settingsPatch.historyDayStartMinutes ?? (typeof legacyHistoryDayStartHour === "number" ? Math.round(legacyHistoryDayStartHour * 60) : DEFAULT_SETTINGS.historyDayStartMinutes);
     const showFavoritesBar = settingsPatch.showFavoritesBar ?? legacyShowBookmarkBar ?? DEFAULT_SETTINGS.showFavoritesBar;
+    const homeHiddenRecentPaths = Array.isArray(settingsPatch.homeHiddenRecentPaths) ? settingsPatch.homeHiddenRecentPaths.filter((path) => typeof path === "string") : [];
+    const homeBookmarkIcons = settingsPatch.homeBookmarkIcons && typeof settingsPatch.homeBookmarkIcons === "object" && !Array.isArray(settingsPatch.homeBookmarkIcons) ? Object.fromEntries(Object.entries(settingsPatch.homeBookmarkIcons).filter(([path, icon]) => Boolean(path) && typeof icon === "string")) : {};
     const rawBookmarks = raw?.bookmarks?.bookmarks ?? { ...EMPTY_BOOKMARKS.bookmarks };
     const normalizedBookmarks = Object.fromEntries(
       Object.entries(rawBookmarks).map(([id, bookmark]) => [id, {
@@ -3158,7 +5423,15 @@ var BrowserCore = class {
     const bookmarks = mergeDuplicateBookmarks(normalizedBookmarks);
     return {
       version: 6,
-      settings: { ...DEFAULT_SETTINGS, ...settingsPatch, startupBehavior, historyDayStartMinutes, showFavoritesBar },
+      settings: {
+        ...DEFAULT_SETTINGS,
+        ...settingsPatch,
+        startupBehavior,
+        historyDayStartMinutes,
+        showFavoritesBar,
+        homeHiddenRecentPaths,
+        homeBookmarkIcons
+      },
       siteZoom: raw?.siteZoom ?? {},
       containers: raw?.containers ?? {},
       siteContainerRules: raw?.siteContainerRules ?? [],
@@ -3177,7 +5450,17 @@ var BrowserCore = class {
       formRecovery: raw?.formRecovery ?? {},
       formRecoveryPolicies: raw?.formRecoveryPolicies ?? {},
       sessionCheckpoint: raw?.sessionCheckpoint ?? { capturedAt: 0, leaves: [] },
-      surfingMigration: raw?.surfingMigration
+      surfingMigration: raw?.surfingMigration,
+      vaultBookmarkMirror: {
+        enabled: raw?.vaultBookmarkMirror?.enabled === true,
+        publishedIds: Array.isArray(raw?.vaultBookmarkMirror?.publishedIds) ? raw.vaultBookmarkMirror.publishedIds.filter((id) => typeof id === "string") : []
+      },
+      browserTabTree: {
+        groups: Array.isArray(raw?.browserTabTree?.groups) ? raw.browserTabTree.groups : [],
+        tabToGroup: raw?.browserTabTree?.tabToGroup && typeof raw.browserTabTree.tabToGroup === "object" ? raw.browserTabTree.tabToGroup : {},
+        tabOrder: Array.isArray(raw?.browserTabTree?.tabOrder) ? raw.browserTabTree.tabOrder : [],
+        savedWorkspaces: raw?.browserTabTree?.savedWorkspaces && typeof raw.browserTabTree.savedWorkspaces === "object" ? raw.browserTabTree.savedWorkspaces : {}
+      }
     };
   }
   settings() {
@@ -3311,656 +5594,6 @@ function mergeDuplicateBookmarks(bookmarks) {
 // src/core/experimental-features.ts
 var RICH_NAVIGATION_RESTORE_ENABLED = false;
 
-// src/i18n.ts
-var language = "auto";
-var resolveLocale = () => typeof navigator === "undefined" ? "en" : navigator.language;
-function setLocaleResolver(resolver) {
-  resolveLocale = resolver;
-}
-function setLanguage(value) {
-  language = value;
-}
-function t(source3, values = {}) {
-  let locale = language;
-  if (locale === "auto") {
-    try {
-      locale = resolveLocale();
-    } catch {
-      locale = "en";
-    }
-  }
-  const result = locale.toLowerCase().startsWith("ja") ? ja[source3] ?? source3 : source3;
-  return result.replace(/\{(\w+)\}/g, (match, key) => String(values[key] ?? match));
-}
-var ja = {
-  "Passwords": "\u30D1\u30B9\u30EF\u30FC\u30C9",
-  "Password manager": "\u30D1\u30B9\u30EF\u30FC\u30C9\u30DE\u30CD\u30FC\u30B8\u30E3\u30FC",
-  "Open password vault": "\u30D1\u30B9\u30EF\u30FC\u30C9\u91D1\u5EAB\u3092\u958B\u304F",
-  "Lock password vault": "\u30D1\u30B9\u30EF\u30FC\u30C9\u91D1\u5EAB\u3092\u30ED\u30C3\u30AF",
-  "Fill password": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u5165\u529B",
-  "Lock": "\u30ED\u30C3\u30AF",
-  "Continue": "\u7D9A\u3051\u308B",
-  "Unlock password vault": "\u30D1\u30B9\u30EF\u30FC\u30C9\u91D1\u5EAB\u3092\u89E3\u9664",
-  "Unlock with Windows Hello": "Windows Hello\u3067\u89E3\u9664",
-  "Unlock with recovery key": "\u56DE\u5FA9\u30AD\u30FC\u3067\u89E3\u9664",
-  "Recovery key": "\u56DE\u5FA9\u30AD\u30FC",
-  "Save your recovery key": "\u56DE\u5FA9\u30AD\u30FC\u3092\u4FDD\u7BA1\u3057\u3066\u304F\u3060\u3055\u3044",
-  "Store this key outside your vault. It unlocks encrypted backups when Windows Hello or this PC is unavailable.": "\u3053\u306E\u30AD\u30FC\u306FVault\u306E\u5916\u306B\u5B89\u5168\u306B\u4FDD\u7BA1\u3057\u3066\u304F\u3060\u3055\u3044\u3002Windows Hello\u3084\u3053\u306EPC\u304C\u4F7F\u3048\u306A\u304F\u306A\u3063\u305F\u3068\u304D\u3001\u6697\u53F7\u5316\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u3092\u89E3\u9664\u3067\u304D\u307E\u3059\u3002",
-  "I saved the recovery key securely": "\u56DE\u5FA9\u30AD\u30FC\u3092\u5B89\u5168\u306A\u5834\u6240\u306B\u4FDD\u7BA1\u3057\u307E\u3057\u305F",
-  "Choose Windows Hello or enter your recovery key. Failed authentication never falls back automatically.": "Windows Hello\u3067\u8A8D\u8A3C\u3059\u308B\u304B\u3001\u56DE\u5FA9\u30AD\u30FC\u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\u3002\u8A8D\u8A3C\u306B\u5931\u6557\u3057\u3066\u3082\u81EA\u52D5\u3067\u5225\u306E\u65B9\u5F0F\u306B\u5207\u308A\u66FF\u308F\u308A\u307E\u305B\u3093\u3002",
-  "Save password": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u4FDD\u5B58",
-  "Edit password": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u7DE8\u96C6",
-  "Update password": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u66F4\u65B0",
-  "Save password?": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u4FDD\u5B58\u3057\u307E\u3059\u304B\uFF1F",
-  "Update password?": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u66F4\u65B0\u3057\u307E\u3059\u304B\uFF1F",
-  "Site origin": "\u30B5\u30A4\u30C8\u306E\u30AA\u30EA\u30B8\u30F3",
-  "Name": "\u540D\u524D",
-  "Username": "\u30E6\u30FC\u30B6\u30FC\u540D",
-  "Password": "\u30D1\u30B9\u30EF\u30FC\u30C9",
-  "Generate password": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u751F\u6210",
-  "Show / hide": "\u8868\u793A\uFF0F\u975E\u8868\u793A",
-  "Container ID (empty for all)": "Container ID\uFF08\u7A7A\u6B04\u306A\u3089\u3059\u3079\u3066\uFF09",
-  "An encrypted vault inside Browser Core. Fill only after choosing an account; forms are never submitted automatically.": "Browser Core\u5185\u306E\u6697\u53F7\u5316\u91D1\u5EAB\u3067\u3059\u3002\u30A2\u30AB\u30A6\u30F3\u30C8\u3092\u9078\u3093\u3060\u3068\u304D\u3060\u3051\u5165\u529B\u3057\u3001\u30D5\u30A9\u30FC\u30E0\u306F\u81EA\u52D5\u9001\u4FE1\u3057\u307E\u305B\u3093\u3002",
-  "Create your password vault": "\u30D1\u30B9\u30EF\u30FC\u30C9\u91D1\u5EAB\u3092\u4F5C\u6210",
-  "Windows Hello setup asks for authentication twice to verify that the key can be used again. A recovery key is issued for backups and other devices.": "Windows Hello\u306E\u8A2D\u5B9A\u3067\u306F\u3001\u9375\u3092\u518D\u5229\u7528\u3067\u304D\u308B\u3053\u3068\u3092\u78BA\u304B\u3081\u308B\u305F\u3081\u306B2\u56DE\u8A8D\u8A3C\u3057\u307E\u3059\u3002\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u3084\u5225\u306E\u7AEF\u672B\u3067\u4F7F\u3046\u56DE\u5FA9\u30AD\u30FC\u3082\u767A\u884C\u3057\u307E\u3059\u3002",
-  "Set up with Windows Hello": "Windows Hello\u3067\u8A2D\u5B9A",
-  "Set up with recovery key": "\u56DE\u5FA9\u30AD\u30FC\u3067\u8A2D\u5B9A",
-  "Password vault is locked": "\u30D1\u30B9\u30EF\u30FC\u30C9\u91D1\u5EAB\u306F\u30ED\u30C3\u30AF\u3055\u308C\u3066\u3044\u307E\u3059",
-  "New password": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u8FFD\u52A0",
-  "The password vault file could not be read. It has not been overwritten. Restore an encrypted backup.": "\u30D1\u30B9\u30EF\u30FC\u30C9\u91D1\u5EAB\u306E\u30D5\u30A1\u30A4\u30EB\u3092\u8AAD\u307F\u53D6\u308C\u307E\u305B\u3093\u3067\u3057\u305F\u3002\u30D5\u30A1\u30A4\u30EB\u306F\u4E0A\u66F8\u304D\u3057\u3066\u3044\u307E\u305B\u3093\u3002\u6697\u53F7\u5316\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u304B\u3089\u5FA9\u5143\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
-  "Export encrypted backup": "\u6697\u53F7\u5316\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u3092\u66F8\u304D\u51FA\u3059",
-  "Import encrypted backup": "\u6697\u53F7\u5316\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u3092\u53D6\u308A\u8FBC\u3080",
-  "New recovery key": "\u56DE\u5FA9\u30AD\u30FC\u3092\u518D\u767A\u884C",
-  "Keep old recovery keys for old backups. The new key applies to the current vault and future backups.": "\u53E4\u3044\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u7528\u306B\u53E4\u3044\u56DE\u5FA9\u30AD\u30FC\u3082\u4FDD\u7BA1\u3057\u3066\u304F\u3060\u3055\u3044\u3002\u65B0\u3057\u3044\u30AD\u30FC\u306F\u73FE\u5728\u306E\u91D1\u5EAB\u3068\u4ECA\u5F8C\u306E\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u306B\u9069\u7528\u3055\u308C\u307E\u3059\u3002",
-  "Replace Windows Hello key": "Windows Hello\u306E\u9375\u3092\u518D\u767B\u9332",
-  "Enable Windows Hello": "Windows Hello\u3092\u6709\u52B9\u306B\u3059\u308B",
-  "Disable Windows Hello": "Windows Hello\u3092\u7121\u52B9\u306B\u3059\u308B",
-  "Make sure you have your recovery key. Future unlocks will require it.": "\u56DE\u5FA9\u30AD\u30FC\u3092\u4FDD\u7BA1\u3057\u3066\u3044\u308B\u3053\u3068\u3092\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002\u4ECA\u5F8C\u306E\u89E3\u9664\u306B\u306F\u56DE\u5FA9\u30AD\u30FC\u304C\u5FC5\u8981\u3067\u3059\u3002",
-  "Allow save suggestions on all sites": "\u5168\u30B5\u30A4\u30C8\u306E\u4FDD\u5B58\u63D0\u6848\u3092\u518D\u3073\u8A31\u53EF",
-  "Lock after inactivity (minutes)": "\u91D1\u5EAB\u3092\u64CD\u4F5C\u3057\u306A\u3044\u3068\u304D\u306E\u81EA\u52D5\u30ED\u30C3\u30AF\uFF08\u5206\uFF09",
-  "Enter a value from 1 to 60.": "1\uFF5E60\u306E\u5024\u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
-  "Search passwords": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u691C\u7D22",
-  "No saved passwords": "\u4FDD\u5B58\u3055\u308C\u305F\u30D1\u30B9\u30EF\u30FC\u30C9\u306F\u3042\u308A\u307E\u305B\u3093",
-  "No username": "\u30E6\u30FC\u30B6\u30FC\u540D\u306A\u3057",
-  "Delete password": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u524A\u9664",
-  "Windows Hello protects local unlock. Recovery keys unlock backups. Other Obsidian plugins share this process; unlocked credentials cannot be isolated from a compromised host.": "Windows Hello\u3067\u3053\u306E\u7AEF\u672B\u306E\u91D1\u5EAB\u3092\u89E3\u9664\u3057\u3001\u56DE\u5FA9\u30AD\u30FC\u3067\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u3092\u89E3\u9664\u3067\u304D\u307E\u3059\u3002\u4ED6\u306EObsidian\u30D7\u30E9\u30B0\u30A4\u30F3\u3068\u306F\u30D7\u30ED\u30BB\u30B9\u3092\u5171\u6709\u3057\u3066\u3044\u308B\u305F\u3081\u3001\u4FB5\u5BB3\u3055\u308C\u305F\u30DB\u30B9\u30C8\u304B\u3089\u89E3\u9664\u4E2D\u306E\u8A8D\u8A3C\u60C5\u5831\u3092\u9694\u96E2\u3059\u308B\u3053\u3068\u306F\u3067\u304D\u307E\u305B\u3093\u3002",
-  "Import replaces the current password vault. Export a backup first. Enter the recovery key belonging to the imported backup.": "\u53D6\u308A\u8FBC\u307F\u306F\u73FE\u5728\u306E\u30D1\u30B9\u30EF\u30FC\u30C9\u91D1\u5EAB\u3092\u7F6E\u304D\u63DB\u3048\u307E\u3059\u3002\u5148\u306B\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u3092\u66F8\u304D\u51FA\u3057\u3066\u304F\u3060\u3055\u3044\u3002\u53D6\u308A\u8FBC\u3080\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u306E\u56DE\u5FA9\u30AD\u30FC\u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
-  "Replace password vault": "\u30D1\u30B9\u30EF\u30FC\u30C9\u91D1\u5EAB\u3092\u7F6E\u304D\u63DB\u3048\u308B",
-  "Replace the current password vault with this backup?": "\u73FE\u5728\u306E\u30D1\u30B9\u30EF\u30FC\u30C9\u91D1\u5EAB\u3092\u3053\u306E\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u3067\u7F6E\u304D\u63DB\u3048\u307E\u3059\u304B\uFF1F",
-  "Choose an account": "\u30A2\u30AB\u30A6\u30F3\u30C8\u3092\u9078\u629E",
-  "Generate and fill password": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u751F\u6210\u3057\u3066\u5165\u529B",
-  "Manage passwords": "\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u7BA1\u7406",
-  "Never for this site": "\u3053\u306E\u30B5\u30A4\u30C8\u3067\u306F\u63D0\u6848\u3057\u306A\u3044",
-  "Manage the encrypted vault, Windows Hello, recovery keys, backups, and automatic locking.": "\u6697\u53F7\u5316\u91D1\u5EAB\u30FBWindows Hello\u30FB\u56DE\u5FA9\u30AD\u30FC\u30FB\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u30FB\u81EA\u52D5\u30ED\u30C3\u30AF\u3092\u7BA1\u7406\u3057\u307E\u3059\u3002",
-  "Password operation failed. Check your key, Windows Hello, and file access.": "\u30D1\u30B9\u30EF\u30FC\u30C9\u306E\u64CD\u4F5C\u306B\u5931\u6557\u3057\u307E\u3057\u305F\u3002\u56DE\u5FA9\u30AD\u30FC\u3001Windows Hello\u3001\u30D5\u30A1\u30A4\u30EB\u3078\u306E\u30A2\u30AF\u30BB\u30B9\u3092\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
-  "Password input is unavailable on this page. Use an HTTPS page with a visible login form.": "\u3053\u306E\u30DA\u30FC\u30B8\u3067\u306F\u30D1\u30B9\u30EF\u30FC\u30C9\u3092\u5165\u529B\u3067\u304D\u307E\u305B\u3093\u3002HTTPS\u306E\u30DA\u30FC\u30B8\u3067\u3001\u8868\u793A\u3055\u308C\u3066\u3044\u308B\u30ED\u30B0\u30A4\u30F3\u30D5\u30A9\u30FC\u30E0\u3092\u4F7F\u7528\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
-  "Search files in your vault": "Vault\u5185\u306E\u30D5\u30A1\u30A4\u30EB\u3092\u691C\u7D22",
-  "Search the web or enter an address": "\u30A6\u30A7\u30D6\u3092\u691C\u7D22\u3001\u307E\u305F\u306F\u30A2\u30C9\u30EC\u30B9\u3092\u5165\u529B",
-  "Never show again": "\u4ECA\u5F8C\u8868\u793A\u3057\u306A\u3044",
-  "Show recovery notifications": "\u5FA9\u5143\u901A\u77E5\u3092\u8868\u793A",
-  "Recovery notifications disappear when you interact with the page. Turn this on to show them again after choosing Never show again.": "\u30DA\u30FC\u30B8\u3092\u64CD\u4F5C\u3059\u308B\u3068\u5FA9\u5143\u901A\u77E5\u304C\u6D88\u3048\u307E\u3059\u3002\u300C\u4ECA\u5F8C\u8868\u793A\u3057\u306A\u3044\u300D\u3092\u9078\u629E\u3057\u305F\u5F8C\u306F\u3001\u3053\u3053\u3067\u518D\u8868\u793A\u3092\u6709\u52B9\u306B\u3067\u304D\u307E\u3059\u3002",
-  "Detailed tab recovery is no longer available. Browser Core is reopening the saved URL from browsing history.": "\u8A73\u7D30\u306A\u30BF\u30D6\u5FA9\u5143\u30C7\u30FC\u30BF\u304C\u306A\u3044\u305F\u3081\u3001\u5C65\u6B74\u306B\u4FDD\u5B58\u3057\u305FURL\u3092\u958B\u304D\u76F4\u3057\u307E\u3057\u305F\u3002",
-  "Detailed tab recovery could not be applied. Browser Core is reopening the saved URL and can still use form recovery or the website's own saved state.": "\u8A73\u7D30\u306A\u30BF\u30D6\u5FA9\u5143\u3092\u9069\u7528\u3067\u304D\u306A\u304B\u3063\u305F\u305F\u3081\u3001\u4FDD\u5B58\u3057\u305FURL\u3092\u958B\u304D\u76F4\u3057\u307E\u3057\u305F\u3002\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u3084\u30B5\u30A4\u30C8\u81EA\u8EAB\u306E\u4FDD\u5B58\u72B6\u614B\u3092\u5229\u7528\u3067\u304D\u307E\u3059\u3002",
-  "Navigation state restored from the closed tab. Some live page state may still need to reload.": "\u9589\u3058\u305F\u30BF\u30D6\u306E\u79FB\u52D5\u5C65\u6B74\u3092\u5FA9\u5143\u3057\u307E\u3057\u305F\u3002\u30DA\u30FC\u30B8\u306E\u4E00\u90E8\u306F\u518D\u8AAD\u307F\u8FBC\u307F\u304C\u5FC5\u8981\u306A\u5834\u5408\u304C\u3042\u308A\u307E\u3059\u3002",
-  "Detailed tab state restored. Some page state may still depend on the website.": "\u8A73\u7D30\u306A\u30BF\u30D6\u72B6\u614B\u3092\u5FA9\u5143\u3057\u307E\u3057\u305F\u3002\u4E00\u90E8\u306E\u72B6\u614B\u306F\u30B5\u30A4\u30C8\u81EA\u8EAB\u306E\u51E6\u7406\u306B\u4F9D\u5B58\u3057\u307E\u3059\u3002",
-  "Relative to this Obsidian window. Used by sites without a site-specific zoom override.": "\u3053\u306EObsidian\u30A6\u30A3\u30F3\u30C9\u30A6\u306E\u500D\u7387\u3092\u57FA\u6E96\u306B\u3057\u307E\u3059\u3002\u30B5\u30A4\u30C8\u56FA\u6709\u306E\u500D\u7387\u304C\u306A\u3044\u5834\u5408\u306B\u9069\u7528\u3055\u308C\u307E\u3059\u3002",
-  "No override": "\u4E0A\u66F8\u304D\u306A\u3057",
-  "Follow theme": "\u30C6\u30FC\u30DE\u306B\u5408\u308F\u305B\u308B",
-  "Custom color": "\u4EFB\u610F\u306E\u8272",
-  "Initial background color": "\u521D\u671F\u80CC\u666F\u8272",
-  "Choose the background before the site paints. The site's own colors remain in control once painted.": "\u30B5\u30A4\u30C8\u304C\u63CF\u753B\u3055\u308C\u308B\u524D\u306E\u80CC\u666F\u8272\u3092\u9078\u629E\u3057\u307E\u3059\u3002\u63CF\u753B\u5F8C\u306F\u30B5\u30A4\u30C8\u81EA\u8EAB\u306E\u8272\u304C\u512A\u5148\u3055\u308C\u307E\u3059\u3002",
-  "Playback and authentication": "\u518D\u751F\u3068\u8A8D\u8A3C",
-  "Autoplay": "\u81EA\u52D5\u518D\u751F",
-  "Block audible autoplay": "\u97F3\u58F0\u4ED8\u304D\u306E\u81EA\u52D5\u518D\u751F\u3092\u6291\u5236",
-  "Allow autoplay": "\u81EA\u52D5\u518D\u751F\u3092\u8A31\u53EF",
-  "Block audible autoplay until you interact with the page. Muted videos may still play. Reopen tabs after changing this setting.": "\u30DA\u30FC\u30B8\u3092\u64CD\u4F5C\u3059\u308B\u307E\u3067\u97F3\u58F0\u4ED8\u304D\u306E\u81EA\u52D5\u518D\u751F\u3092\u6291\u5236\u3057\u307E\u3059\u3002\u7121\u97F3\u306E\u52D5\u753B\u306F\u518D\u751F\u3055\u308C\u308B\u5834\u5408\u304C\u3042\u308A\u307E\u3059\u3002\u5909\u66F4\u5F8C\u306F\u30BF\u30D6\u3092\u958B\u304D\u76F4\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
-  "Block passkey requests": "\u30D1\u30B9\u30AD\u30FC\u8981\u6C42\u3092\u6291\u5236",
-  "Prevent sites from requesting or creating passkeys, including requests you start yourself. Turn off to sign in with a passkey. Reload pages after changing this setting.": "\u30B5\u30A4\u30C8\u306E\u30D1\u30B9\u30AD\u30FC\u8981\u6C42\u30FB\u767B\u9332\u3092\u6291\u5236\u3057\u307E\u3059\u3002\u624B\u52D5\u3067\u958B\u59CB\u3057\u305F\u8981\u6C42\u3082\u5BFE\u8C61\u3067\u3059\u3002\u30D1\u30B9\u30AD\u30FC\u3067\u30ED\u30B0\u30A4\u30F3\u3059\u308B\u969B\u306F\u30AA\u30D5\u306B\u3057\u3066\u304F\u3060\u3055\u3044\u3002\u5909\u66F4\u5F8C\u306F\u30DA\u30FC\u30B8\u3092\u518D\u8AAD\u307F\u8FBC\u307F\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
-  "Clear browser history": "\u30D6\u30E9\u30A6\u30B6\u5C65\u6B74\u3092\u6D88\u53BB",
-  "Copy link": "\u30EA\u30F3\u30AF\u3092\u30B3\u30D4\u30FC",
-  "Show link in history": "\u30EA\u30F3\u30AF\u306E\u5C65\u6B74\u3092\u898B\u308B",
-  "Copy image URL": "\u753B\u50CF\u306EURL\u3092\u30B3\u30D4\u30FC",
-  "Download image": "\u753B\u50CF\u3092\u30C0\u30A6\u30F3\u30ED\u30FC\u30C9",
-  "Undo": "\u5143\u306B\u623B\u3059",
-  "Redo": "\u3084\u308A\u76F4\u3059",
-  "Copy selected text": "\u9078\u629E\u3057\u305F\u6587\u5B57\u3092\u30B3\u30D4\u30FC",
-  "Restore previous value": "\u524D\u56DE\u306E\u5165\u529B\u5185\u5BB9\u3092\u5FA9\u5143",
-  "Restore all saved form values": "\u4FDD\u5B58\u3057\u305F\u5165\u529B\u5185\u5BB9\u3092\u3059\u3079\u3066\u5FA9\u5143",
-  "Show saved form values": "\u4FDD\u5B58\u3057\u305F\u5165\u529B\u5185\u5BB9\u3092\u8868\u793A",
-  "Disable recovery for this field": "\u3053\u306E\u5165\u529B\u6B04\u3092\u5FA9\u5143\u5BFE\u8C61\u304B\u3089\u5916\u3059",
-  "Disable form recovery for this site": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u3092\u7121\u52B9\u306B\u3059\u308B",
-  "Enable form recovery for this site": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u3092\u6709\u52B9\u306B\u3059\u308B",
-  "Reopen in container\u2026": "\u5225\u306EContainer\u3067\u958B\u304D\u76F4\u3059\u2026",
-  "Open link in {name}": "{name}\u3067\u30EA\u30F3\u30AF\u3092\u958B\u304F",
-  "Search \u201C{query}\u201D": "\u300C{query}\u300D\u3092\u691C\u7D22",
-  "Adopt Surfing's persistent login session, import bookmarks and compatible settings, and copy open tabs. Existing Browser Core data and Surfing source files are kept.": "Surfing\u306E\u30ED\u30B0\u30A4\u30F3\u72B6\u614B\u3001\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3001\u5BFE\u5FDC\u3059\u308B\u8A2D\u5B9A\u3001\u958B\u3044\u3066\u3044\u308B\u30BF\u30D6\u3092\u79FB\u884C\u3057\u307E\u3059\u3002\u65E2\u5B58\u306EUBC\u30C7\u30FC\u30BF\u3068Surfing\u306E\u5143\u30C7\u30FC\u30BF\u306F\u4FDD\u6301\u3057\u307E\u3059\u3002",
-  "Completed. Original Surfing data was kept. Backup: {v0}": "\u79FB\u884C\u6E08\u307F\u3067\u3059\u3002\u5143\u30C7\u30FC\u30BF\u306F\u4FDD\u6301\u3057\u3066\u3044\u307E\u3059\u3002\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\uFF1A{v0}",
-  "Surfing migration already completed. Backup: {v0}": "Surfing\u306E\u79FB\u884C\u306F\u5B8C\u4E86\u3057\u3066\u3044\u307E\u3059\u3002\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\uFF1A{v0}",
-  "Applied automatically when an independent navigation opens a matching site.": "\u4E00\u81F4\u3059\u308B\u30B5\u30A4\u30C8\u3092\u958B\u3044\u305F\u3068\u304D\u306B\u81EA\u52D5\u3067\u9069\u7528\u3057\u307E\u3059\u3002",
-  "Saved for later, but currently paused because automatic container routing is off.": "\u6307\u5B9A\u306F\u4FDD\u5B58\u3055\u308C\u3066\u3044\u307E\u3059\u304C\u3001Container\u306E\u81EA\u52D5\u5207\u308A\u66FF\u3048\u304C\u7121\u52B9\u306E\u305F\u3081\u505C\u6B62\u3057\u3066\u3044\u307E\u3059\u3002",
-  "Open in {v0}": "{v0}\u3067\u958B\u304F",
-  "Reopen in {v0}": "{v0}\u3067\u958B\u304D\u76F4\u3059",
-  "Always open {v0} in {v1}": "{v0}\u3092\u5E38\u306B{v1}\u3067\u958B\u304F",
-  "Always open {v0} in {v1}.": "{v0}\u3092\u5E38\u306B{v1}\u3067\u958B\u304D\u307E\u3059\u3002",
-  "Site default \xB7 {v0}": "\u30B5\u30A4\u30C8\u306E\u6307\u5B9A\uFF1A{v0}",
-  "Return to site default \xB7 {v0}": "\u30B5\u30A4\u30C8\u306E\u6307\u5B9A\u306B\u623B\u3059\uFF1A{v0}",
-  "Opened here explicitly \xB7 site default is {v0}": "\u624B\u52D5\u3067\u958B\u3044\u305FContainer\u3067\u3059\uFF08\u30B5\u30A4\u30C8\u306E\u6307\u5B9A\uFF1A{v0}\uFF09",
-  "Sign-in flow stays in this container \xB7 site default is {v0}": "\u30ED\u30B0\u30A4\u30F3\u51E6\u7406\u4E2D\u306F\u3053\u306EContainer\u3092\u4F7F\u7528\u3057\u307E\u3059\uFF08\u30B5\u30A4\u30C8\u306E\u6307\u5B9A\uFF1A{v0}\uFF09",
-  "Clear this container's cookies, site storage, cache, sign-in cache, and saved site permissions? Open pages may need to be reloaded.": "\u3053\u306EContainer\u306ECookie\u3001\u30B5\u30A4\u30C8\u30C7\u30FC\u30BF\u3001\u30AD\u30E3\u30C3\u30B7\u30E5\u3001\u8A8D\u8A3C\u30AD\u30E3\u30C3\u30B7\u30E5\u3001\u4FDD\u5B58\u6E08\u307F\u6A29\u9650\u3092\u6D88\u53BB\u3057\u307E\u3059\u304B\uFF1F\u958B\u3044\u3066\u3044\u308B\u30DA\u30FC\u30B8\u306F\u518D\u8AAD\u307F\u8FBC\u307F\u304C\u5FC5\u8981\u306B\u306A\u308B\u5834\u5408\u304C\u3042\u308A\u307E\u3059\u3002",
-  "Cleared browsing data and saved permissions for \u201C{v0}\u201D.": "\u300C{v0}\u300D\u306E\u95B2\u89A7\u30C7\u30FC\u30BF\u3068\u4FDD\u5B58\u6E08\u307F\u6A29\u9650\u3092\u6D88\u53BB\u3057\u307E\u3057\u305F\u3002",
-  "Could not clear browsing data for \u201C{v0}\u201D.": "\u300C{v0}\u300D\u306E\u95B2\u89A7\u30C7\u30FC\u30BF\u3092\u6D88\u53BB\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002",
-  "Delete \u201C{v0}\u201D? Its cookies, site storage, cache, saved permissions, form recovery data, and site default rules will be cleared. Browsing history will remain.": "\u300C{v0}\u300D\u3092\u524A\u9664\u3057\u307E\u3059\u304B\uFF1FCookie\u3001\u30B5\u30A4\u30C8\u30C7\u30FC\u30BF\u3001\u30AD\u30E3\u30C3\u30B7\u30E5\u3001\u4FDD\u5B58\u6E08\u307F\u6A29\u9650\u3001\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u30C7\u30FC\u30BF\u3001\u30B5\u30A4\u30C8\u6307\u5B9A\u3092\u6D88\u53BB\u3057\u307E\u3059\u3002\u95B2\u89A7\u5C65\u6B74\u306F\u4FDD\u6301\u3057\u307E\u3059\u3002",
-  "Deleted container \u201C{v0}\u201D and cleared its browsing data.": "Container\u300C{v0}\u300D\u3092\u524A\u9664\u3057\u3001\u95B2\u89A7\u30C7\u30FC\u30BF\u3092\u6D88\u53BB\u3057\u307E\u3057\u305F\u3002",
-  "Delete \u201C{v0}\u201D from your bookmarks?": "\u300C{v0}\u300D\u3092\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u304B\u3089\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
-  "Delete the empty folder \u201C{v0}\u201D?": "\u7A7A\u306E\u30D5\u30A9\u30EB\u30C0\u300C{v0}\u300D\u3092\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
-  "Delete \u201C{v0}\u201D and its {v1} bookmark{v2}?": "\u300C{v0}\u300D\u3068\u4E2D\u306E{v1}\u4EF6\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
-  "{v0} bookmark{v1} in {v2}": "{v2}\u306B{v0}\u4EF6\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
-  "Pin": "\u56FA\u5B9A",
-  "Unpin": "\u56FA\u5B9A\u3092\u89E3\u9664",
-  "Pin browser tab": "\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u56FA\u5B9A",
-  "Unpin browser tab": "\u30BF\u30D6\u306E\u56FA\u5B9A\u3092\u89E3\u9664",
-  "Remove": "\u53D6\u308A\u9664\u304F",
-  "No back history": "\u623B\u308B\u5C65\u6B74\u306F\u3042\u308A\u307E\u305B\u3093",
-  "No forward history": "\u9032\u3080\u5C65\u6B74\u306F\u3042\u308A\u307E\u305B\u3093",
-  "Navigation status": "\u8AAD\u307F\u8FBC\u307F\u72B6\u6CC1",
-  "Browser Core page": "Browser Core\u306E\u30DA\u30FC\u30B8",
-  "Migrate": "\u79FB\u884C",
-  "Delete history": "\u5C65\u6B74\u3092\u524A\u9664",
-  "Delete path": "\u7D4C\u8DEF\u3092\u524A\u9664",
-  "Delete history day": "\u3053\u306E\u65E5\u306E\u5C65\u6B74\u3092\u524A\u9664",
-  "Delete alternate history path": "\u5206\u5C90\u3057\u305F\u7D4C\u8DEF\u306E\u5C65\u6B74\u3092\u524A\u9664",
-  "Remove closed tab from history": "\u9589\u3058\u305F\u30BF\u30D6\u3092\u5C65\u6B74\u304B\u3089\u524A\u9664",
-  "Delete browsing history and detailed closed-tab recovery data? Open tabs, bookmarks, containers, cookies and form recovery remain.": "\u95B2\u89A7\u5C65\u6B74\u3068\u9589\u3058\u305F\u30BF\u30D6\u306E\u8A73\u7D30\u306A\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F\u30BF\u30D6\u3001\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3001Container\u3001Cookie\u3001\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u306F\u4FDD\u6301\u3057\u307E\u3059\u3002",
-  "Delete all saved Browser Core form recovery data?": "\u4FDD\u5B58\u3057\u305F\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u3059\u3079\u3066\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
-  "Delete all saved Browser Core form recovery data? Sites that opted in will stay enabled.": "\u4FDD\u5B58\u3057\u305F\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u3059\u3079\u3066\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F\u30B5\u30A4\u30C8\u3054\u3068\u306E\u8A31\u53EF\u8A2D\u5B9A\u306F\u4FDD\u6301\u3057\u307E\u3059\u3002",
-  "Reset all saved site permissions to Ask next time?": "\u4FDD\u5B58\u6E08\u307F\u306E\u6A29\u9650\u3092\u3059\u3079\u3066\u300C\u6B21\u56DE\u78BA\u8A8D\u300D\u306B\u623B\u3057\u307E\u3059\u304B\uFF1F",
-  "Delete this tab's browsing history and detailed recovery data?": "\u3053\u306E\u30BF\u30D6\u306E\u95B2\u89A7\u5C65\u6B74\u3068\u8A73\u7D30\u306A\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
-  "Remove this closed tab's browsing history and detailed recovery data?": "\u3053\u306E\u9589\u3058\u305F\u30BF\u30D6\u306E\u95B2\u89A7\u5C65\u6B74\u3068\u8A73\u7D30\u306A\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
-  "Delete web history recorded in {v0}?": "{v0}\u306E\u95B2\u89A7\u5C65\u6B74\u3092\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
-  "Delete {v0} visit(s) from this path?": "\u3053\u306E\u7D4C\u8DEF\u306E{v0}\u4EF6\u306E\u8A2A\u554F\u3092\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
-  "Delete \u201C{v0}\u201D from browser history?": "\u300C{v0}\u300D\u3092\u30D6\u30E9\u30A6\u30B6\u5C65\u6B74\u304B\u3089\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
-  "No browser history yet.": "\u95B2\u89A7\u5C65\u6B74\u306F\u307E\u3060\u3042\u308A\u307E\u305B\u3093\u3002",
-  "No history yet": "\u5C65\u6B74\u306F\u307E\u3060\u3042\u308A\u307E\u305B\u3093",
-  "Saved history version": "\u4FDD\u5B58\u3055\u308C\u305F\u5C65\u6B74\u306E\u7248",
-  "Current history": "\u73FE\u5728\u306E\u5C65\u6B74",
-  "Unknown saved time": "\u4FDD\u5B58\u6642\u523B\u4E0D\u660E",
-  "Loading saved history\u2026": "\u4FDD\u5B58\u3055\u308C\u305F\u5C65\u6B74\u3092\u8AAD\u307F\u8FBC\u307F\u4E2D\u2026",
-  "Legacy saved history": "\u65E7\u5F62\u5F0F\u306E\u4FDD\u5B58\u5C65\u6B74",
-  "Viewing saved history from {v0}. Read-only \xB7 {v1}": "{v0} \u306B\u4FDD\u5B58\u3055\u308C\u305F\u5C65\u6B74\u3092\u8868\u793A\u4E2D\uFF08\u8AAD\u307F\u53D6\u308A\u5C02\u7528\uFF09\u30FB{v1}",
-  "This saved history version is no longer available.": "\u3053\u306E\u4FDD\u5B58\u5C65\u6B74\u306E\u7248\u306F\u5229\u7528\u3067\u304D\u306A\u304F\u306A\u308A\u307E\u3057\u305F\u3002",
-  "This saved tab no longer has a restorable URL.": "\u3053\u306E\u4FDD\u5B58\u7248\u306E\u30BF\u30D6\u306B\u306F\u5FA9\u5143\u3067\u304D\u308BURL\u304C\u3042\u308A\u307E\u305B\u3093\u3002",
-  "This saved visit is no longer available.": "\u3053\u306E\u4FDD\u5B58\u7248\u306E\u8A2A\u554F\u5C65\u6B74\u306F\u5229\u7528\u3067\u304D\u306A\u304F\u306A\u308A\u307E\u3057\u305F\u3002",
-  "Restore saved visit": "\u4FDD\u5B58\u7248\u306E\u8A2A\u554F\u3092\u5FA9\u5143",
-  "Load older history": "\u3055\u3089\u306B\u53E4\u3044\u5C65\u6B74\u3092\u8AAD\u307F\u8FBC\u3080",
-  "{v0} \xB7 {v1} visit{v2}": "{v0}\u30FB{v1}\u4EF6\u306E\u8A2A\u554F",
-  "No history matches these filters.": "\u3053\u306E\u6761\u4EF6\u306B\u4E00\u81F4\u3059\u308B\u5C65\u6B74\u306F\u3042\u308A\u307E\u305B\u3093\u3002",
-  "No matching visits": "\u4E00\u81F4\u3059\u308B\u8A2A\u554F\u304C\u3042\u308A\u307E\u305B\u3093",
-  "Try clearing one or more filters.": "\u7D5E\u308A\u8FBC\u307F\u6761\u4EF6\u3092\u6E1B\u3089\u3057\u3066\u307F\u3066\u304F\u3060\u3055\u3044\u3002",
-  "No vault files found": "Vault\u306E\u30D5\u30A1\u30A4\u30EB\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093",
-  "Visited web pages will appear here without creating artificial gaps for idle time.": "\u8A2A\u554F\u3057\u305F\u30A6\u30A7\u30D6\u30DA\u30FC\u30B8\u304C\u3053\u3053\u306B\u8868\u793A\u3055\u308C\u307E\u3059\u3002\u64CD\u4F5C\u3057\u3066\u3044\u306A\u3044\u6642\u9593\u306B\u3088\u308B\u4F59\u5206\u306A\u7A7A\u767D\u306F\u5165\u308A\u307E\u305B\u3093\u3002",
-  "Alternate path \xB7 {v0} visit{v1}": "\u5206\u5C90\u3057\u305F\u7D4C\u8DEF\u30FB{v0}\u4EF6\u306E\u8A2A\u554F",
-  "Show redirects and reloads": "\u30EA\u30C0\u30A4\u30EC\u30AF\u30C8\u3068\u518D\u8AAD\u307F\u8FBC\u307F\u3092\u8868\u793A",
-  "Show {v0} reload, redirect, or navigation event{v1}": "{v0}\u4EF6\u306E\u518D\u8AAD\u307F\u8FBC\u307F\u30FB\u30EA\u30C0\u30A4\u30EC\u30AF\u30C8\u30FB\u79FB\u52D5\u3092\u8868\u793A",
-  "{v0} visit{v1} across {v2} day{v3}{v4}{v5}": "{v2}\u65E5\u9593\u30FB{v0}\u4EF6\u306E\u8A2A\u554F{v4}{v5}",
-  "{v0} deleted histor{v1} retained to preserve navigation paths{v2}": "\u79FB\u52D5\u7D4C\u8DEF\u3092\u4FDD\u3064\u305F\u3081\u3001\u524A\u9664\u6E08\u307F\u5C65\u6B74{v0}\u4EF6\u3092\u4FDD\u6301{v2}",
-  "Keep recovery data": "\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u4FDD\u6301",
-  "Use normal recovery retention": "\u901A\u5E38\u306E\u4FDD\u5B58\u671F\u9593\u306B\u623B\u3059",
-  "Restore in original container": "\u5143\u306EContainer\u3067\u5FA9\u5143",
-  "Original container deleted": "\u5143\u306EContainer\u306F\u524A\u9664\u3055\u308C\u3066\u3044\u307E\u3059",
-  "Detailed recovery data for this tab will be kept until you remove it.": "\u3053\u306E\u30BF\u30D6\u306E\u8A73\u7D30\u306A\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u624B\u52D5\u3067\u524A\u9664\u3059\u308B\u307E\u3067\u4FDD\u6301\u3057\u307E\u3059\u3002",
-  "Detailed recovery data for this tab will use normal retention again.": "\u3053\u306E\u30BF\u30D6\u306E\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u901A\u5E38\u306E\u4FDD\u5B58\u671F\u9593\u306B\u623B\u3057\u307E\u3057\u305F\u3002",
-  "Old tabs will still reopen from durable URLs, but high-fidelity closed-tab restoration will be lost.": "\u53E4\u3044\u30BF\u30D6\u306FURL\u304B\u3089\u958B\u304D\u76F4\u305B\u307E\u3059\u304C\u3001\u8A73\u7D30\u306A\u72B6\u614B\u306E\u5FA9\u5143\u306F\u3067\u304D\u306A\u304F\u306A\u308A\u307E\u3059\u3002",
-  "Disabled for this site": "\u3053\u306E\u30B5\u30A4\u30C8\u3067\u306F\u7121\u52B9",
-  "Reset site": "\u30B5\u30A4\u30C8\u306E\u8A2D\u5B9A\u3092\u30EA\u30BB\u30C3\u30C8",
-  "Reset form recovery for site": "\u30B5\u30A4\u30C8\u306E\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u3092\u30EA\u30BB\u30C3\u30C8",
-  "Reset form recovery for {v0}? This also deletes saved form recovery data for this site.": "{v0}\u306E\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u8A2D\u5B9A\u3092\u30EA\u30BB\u30C3\u30C8\u3057\u307E\u3059\u304B\uFF1F\u4FDD\u5B58\u3057\u305F\u5165\u529B\u5185\u5BB9\u3082\u524A\u9664\u3057\u307E\u3059\u3002",
-  "No matching fields were found for the saved form values.": "\u4FDD\u5B58\u5185\u5BB9\u306B\u5BFE\u5FDC\u3059\u308B\u5165\u529B\u6B04\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3067\u3057\u305F\u3002",
-  "No matching saved value was found for this field.": "\u3053\u306E\u5165\u529B\u6B04\u306B\u5BFE\u5FDC\u3059\u308B\u4FDD\u5B58\u5185\u5BB9\u304C\u3042\u308A\u307E\u305B\u3093\u3002",
-  "Restored the previous value for this field.": "\u3053\u306E\u5165\u529B\u6B04\u306E\u524D\u56DE\u306E\u5185\u5BB9\u3092\u5FA9\u5143\u3057\u307E\u3057\u305F\u3002",
-  "Restored {v0} browser tab(s).": "{v0}\u500B\u306E\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u5FA9\u5143\u3057\u307E\u3057\u305F\u3002",
-  "Restored {v0} form field(s).{v1}": "{v0}\u500B\u306E\u5165\u529B\u6B04\u3092\u5FA9\u5143\u3057\u307E\u3057\u305F\u3002{v1}",
-  "{v0} excluded field(s)": "{v0}\u500B\u306E\u5165\u529B\u6B04\u3092\u9664\u5916",
-  "{v0} is requesting \u201C{v1}\u201D.": "{v0}\u304C\u300C{v1}\u300D\u306E\u8A31\u53EF\u3092\u6C42\u3081\u3066\u3044\u307E\u3059\u3002",
-  "Waiting\u2026": "\u5F85\u6A5F\u4E2D\u2026",
-  "Loaded": "\u8AAD\u307F\u8FBC\u307F\u5B8C\u4E86",
-  "Load failed": "\u8AAD\u307F\u8FBC\u307F\u5931\u6557",
-  "Stopped": "\u505C\u6B62",
-  "Restored": "\u5FA9\u5143\u6E08\u307F",
-  "Open link": "\u30EA\u30F3\u30AF\u3092\u958B\u304F",
-  "Open link in new tab": "\u30EA\u30F3\u30AF\u3092\u65B0\u3057\u3044\u30BF\u30D6\u3067\u958B\u304F",
-  "Open link in background tab": "\u30EA\u30F3\u30AF\u3092\u80CC\u9762\u306E\u30BF\u30D6\u3067\u958B\u304F",
-  "Open link in new window": "\u30EA\u30F3\u30AF\u3092\u65B0\u3057\u3044\u30A6\u30A3\u30F3\u30C9\u30A6\u3067\u958B\u304F",
-  "Copy link address": "\u30EA\u30F3\u30AF\u306E\u30A2\u30C9\u30EC\u30B9\u3092\u30B3\u30D4\u30FC",
-  "Bookmark link": "\u30EA\u30F3\u30AF\u3092\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
-  "Open image in new tab": "\u753B\u50CF\u3092\u65B0\u3057\u3044\u30BF\u30D6\u3067\u958B\u304F",
-  "Copy image": "\u753B\u50CF\u3092\u30B3\u30D4\u30FC",
-  "Copy image address": "\u753B\u50CF\u306E\u30A2\u30C9\u30EC\u30B9\u3092\u30B3\u30D4\u30FC",
-  "Save image": "\u753B\u50CF\u3092\u4FDD\u5B58",
-  "Save image as\u2026": "\u540D\u524D\u3092\u4ED8\u3051\u3066\u753B\u50CF\u3092\u4FDD\u5B58\u2026",
-  "Camera": "\u30AB\u30E1\u30E9",
-  "Microphone": "\u30DE\u30A4\u30AF",
-  "Camera and microphone": "\u30AB\u30E1\u30E9\u3068\u30DE\u30A4\u30AF",
-  "Location": "\u4F4D\u7F6E\u60C5\u5831",
-  "Notifications": "\u901A\u77E5",
-  "Screen capture": "\u753B\u9762\u5171\u6709",
-  "Read clipboard": "\u30AF\u30EA\u30C3\u30D7\u30DC\u30FC\u30C9\u306E\u8AAD\u307F\u53D6\u308A",
-  "Write clipboard": "\u30AF\u30EA\u30C3\u30D7\u30DC\u30FC\u30C9\u3078\u306E\u66F8\u304D\u8FBC\u307F",
-  "Pointer lock": "\u30DE\u30A6\u30B9\u30DD\u30A4\u30F3\u30BF\u30FC\u306E\u56FA\u5B9A",
-  "Full screen": "\u5168\u753B\u9762\u8868\u793A",
-  "Open external links": "\u5916\u90E8\u30EA\u30F3\u30AF\u3092\u958B\u304F",
-  "Site storage access": "\u30B5\u30A4\u30C8\u306E\u30B9\u30C8\u30EC\u30FC\u30B8\u3078\u306E\u30A2\u30AF\u30BB\u30B9",
-  "Top-level storage access": "\u6700\u4E0A\u4F4D\u30B5\u30A4\u30C8\u306E\u30B9\u30C8\u30EC\u30FC\u30B8\u3078\u306E\u30A2\u30AF\u30BB\u30B9",
-  "Audio output devices": "\u97F3\u58F0\u51FA\u529B\u30C7\u30D0\u30A4\u30B9",
-  "Keyboard lock": "\u30AD\u30FC\u30DC\u30FC\u30C9\u306E\u56FA\u5B9A",
-  "Add": "\u8FFD\u52A0",
-  "Clear": "\u6D88\u53BB",
-  "Search": "\u691C\u7D22",
-  "Settings": "\u8A2D\u5B9A",
-  "Restore": "\u5FA9\u5143",
-  "Reveal": "\u8868\u793A",
-  "Copy": "\u30B3\u30D4\u30FC",
-  "Cut": "\u5207\u308A\u53D6\u308A",
-  "Paste": "\u8CBC\u308A\u4ED8\u3051",
-  "Select all": "\u3059\u3079\u3066\u9078\u629E",
-  "Paste and go": "\u8CBC\u308A\u4ED8\u3051\u3066\u958B\u304F",
-  "Allow": "\u8A31\u53EF",
-  "Block": "\u62D2\u5426",
-  "Ask next time": "\u6B21\u56DE\u78BA\u8A8D",
-  "Not now": "\u4ECA\u56DE\u306F\u62D2\u5426",
-  "Dismiss": "\u9589\u3058\u308B",
-  "Address and search": "\u30A2\u30C9\u30EC\u30B9\u30FB\u691C\u7D22",
-  "Ready": "\u6E96\u5099\u5B8C\u4E86",
-  "Web": "\u30A6\u30A7\u30D6",
-  "Vault": "Vault",
-  "Vault files": "Vault\u306E\u30D5\u30A1\u30A4\u30EB",
-  "Browser startup": "\u30D6\u30E9\u30A6\u30B6\u306E\u8D77\u52D5",
-  "Browser back": "\u30D6\u30E9\u30A6\u30B6\u3067\u623B\u308B",
-  "Browser forward": "\u30D6\u30E9\u30A6\u30B6\u3067\u9032\u3080",
-  "Browser zoom in": "\u30D6\u30E9\u30A6\u30B6\u3092\u62E1\u5927",
-  "Browser zoom out": "\u30D6\u30E9\u30A6\u30B6\u3092\u7E2E\u5C0F",
-  "Reset browser zoom for site": "\u30B5\u30A4\u30C8\u306E\u30BA\u30FC\u30E0\u3092\u30EA\u30BB\u30C3\u30C8",
-  "Default Home search": "\u30DB\u30FC\u30E0\u306E\u65E2\u5B9A\u306E\u691C\u7D22",
-  "Home search mode": "\u30DB\u30FC\u30E0\u306E\u691C\u7D22\u65B9\u6CD5",
-  "Web search engine": "\u691C\u7D22\u30A8\u30F3\u30B8\u30F3",
-  "Custom": "\u30AB\u30B9\u30BF\u30E0",
-  "Use Browser Core tab layout": "Browser Core\u306E\u30BF\u30D6\u914D\u7F6E\u3092\u4F7F\u3046",
-  "Replace new empty tabs with Home": "\u7A7A\u306E\u65B0\u898F\u30BF\u30D6\u3092\u30DB\u30FC\u30E0\u306B\u7F6E\u304D\u63DB\u3048\u308B",
-  "Apply the selected browser tab style only to panes that contain Browser Core tabs.": "\u30D6\u30E9\u30A6\u30B6\u306E\u30BF\u30D6\u304C\u3042\u308B\u30DA\u30A4\u30F3\u306B\u3001\u9078\u3093\u3060\u30BF\u30D6\u30B9\u30BF\u30A4\u30EB\u3092\u9069\u7528\u3057\u307E\u3059\u3002",
-  "Firefox keeps a readable minimum tab width and overflows horizontally. Chrome compresses tabs more aggressively.": "Firefox\u306F\u8AAD\u307F\u3084\u3059\u3044\u5E45\u3092\u4FDD\u3061\u3001\u6A2A\u306B\u30B9\u30AF\u30ED\u30FC\u30EB\u3057\u307E\u3059\u3002Chrome\u306F\u30BF\u30D6\u5E45\u3092\u3088\u308A\u5C0F\u3055\u304F\u3057\u307E\u3059\u3002",
-  "A newly created empty Obsidian tab becomes the Browser Core Home surface.": "\u65B0\u3057\u304F\u4F5C\u6210\u3057\u305F\u7A7A\u306E\u30BF\u30D6\u306B\u3001Browser Core\u306E\u30DB\u30FC\u30E0\u3092\u8868\u793A\u3057\u307E\u3059\u3002",
-  "Vault searches files in this vault. Web searches the web or opens an address.": "Vault\u3067\u306FVault\u5185\u306E\u30D5\u30A1\u30A4\u30EB\u3092\u691C\u7D22\u3057\u307E\u3059\u3002\u30A6\u30A7\u30D6\u3067\u306F\u30A6\u30A7\u30D6\u691C\u7D22\u3084URL\u3092\u958B\u304D\u307E\u3059\u3002",
-  "Used when Browser Core treats text as a web search rather than an address.": "\u5165\u529B\u5185\u5BB9\u3092\u30A6\u30A7\u30D6\u691C\u7D22\u3059\u308B\u3068\u304D\u306B\u4F7F\u7528\u3057\u307E\u3059\u3002",
-  "Use {query} where the encoded search text should be inserted.": "\u691C\u7D22\u8A9E\u3092\u633F\u5165\u3059\u308B\u4F4D\u7F6E\u306B {query} \u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
-  "Uses Obsidian's recent-file list; Browser Core does not maintain a duplicate recent-file database.": "Obsidian\u306E\u6700\u8FD1\u4F7F\u3063\u305F\u30D5\u30A1\u30A4\u30EB\u306E\u4E00\u89A7\u3092\u5229\u7528\u3057\u307E\u3059\u3002",
-  "Reads file bookmarks from Obsidian's built-in Bookmarks plugin without mixing them with web bookmarks.": "Obsidian\u6A19\u6E96\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u304B\u3089\u3001\u30D5\u30A1\u30A4\u30EB\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u8AAD\u307F\u53D6\u308A\u307E\u3059\u3002",
-  "Choose what happens when Obsidian starts and no browser tabs are already open.": "Obsidian\u8D77\u52D5\u6642\u306B\u30D6\u30E9\u30A6\u30B6\u306E\u30BF\u30D6\u304C\u306A\u3044\u5834\u5408\u306E\u52D5\u4F5C\u3092\u9078\u3073\u307E\u3059\u3002",
-  "History & recovery": "\u5C65\u6B74\u3068\u5FA9\u5143",
-  "History retention (days)": "\u5C65\u6B74\u306E\u4FDD\u5B58\u65E5\u6570",
-  "Automatic history size limit": "\u5C65\u6B74\u306E\u81EA\u52D5\u6574\u7406\u4EF6\u6570",
-  "Advanced history and recovery storage": "\u5C65\u6B74\u30FB\u5FA9\u5143\u30C7\u30FC\u30BF\u306E\u8A73\u7D30\u8A2D\u5B9A",
-  "Detailed tab recovery retention (days)": "\u8A73\u7D30\u306A\u30BF\u30D6\u5FA9\u5143\u30C7\u30FC\u30BF\u306E\u4FDD\u5B58\u65E5\u6570",
-  "Detailed recovery storage limit (MB)": "\u8A73\u7D30\u306A\u5FA9\u5143\u30C7\u30FC\u30BF\u306E\u4FDD\u5B58\u5BB9\u91CF\uFF08MB\uFF09",
-  "Form recovery retention (days)": "\u30D5\u30A9\u30FC\u30E0\u306E\u4FDD\u5B58\u65E5\u6570",
-  "Saved form versions per page": "\u30DA\u30FC\u30B8\u3054\u3068\u306E\u30D5\u30A9\u30FC\u30E0\u4FDD\u5B58\u6570",
-  "Pages with saved form recovery": "\u30D5\u30A9\u30FC\u30E0\u3092\u4FDD\u5B58\u3059\u308B\u30DA\u30FC\u30B8\u6570",
-  "History day boundaries default to 04:00 so late-night work stays together.": "\u65E5\u4ED8\u306F\u65E2\u5B9A\u3067\u5348\u524D4\u6642\u306B\u5207\u308A\u66FF\u308F\u308A\u3001\u6DF1\u591C\u306E\u4F5C\u696D\u3092\u540C\u3058\u65E5\u306B\u307E\u3068\u3081\u307E\u3059\u3002",
-  "0 keeps browsing history until you delete it. Protected tab histories are not removed automatically.": "0\u306F\u7121\u671F\u9650\u4FDD\u5B58\u3067\u3059\u3002\u4FDD\u8B77\u3057\u305F\u30BF\u30D6\u306E\u5C65\u6B74\u306F\u81EA\u52D5\u524A\u9664\u3055\u308C\u307E\u305B\u3093\u3002",
-  "0 disables size-based cleanup. A positive value allows the oldest closed, unprotected tab histories to be removed when stored history grows past this limit.": "0\u306F\u4EF6\u6570\u306B\u3088\u308B\u6574\u7406\u3092\u7121\u52B9\u306B\u3057\u307E\u3059\u3002\u4E0A\u9650\u3092\u8D85\u3048\u308B\u3068\u3001\u9589\u3058\u305F\u672A\u4FDD\u8B77\u30BF\u30D6\u306E\u53E4\u3044\u5C65\u6B74\u304B\u3089\u6574\u7406\u3057\u307E\u3059\u3002",
-  "How long Browser Core should keep extra state that can restore recently closed tabs more accurately.": "\u9589\u3058\u305F\u30BF\u30D6\u3092\u8A73\u3057\u304F\u5FA9\u5143\u3059\u308B\u305F\u3081\u306E\u30C7\u30FC\u30BF\u3092\u4FDD\u5B58\u3059\u308B\u671F\u9593\u3067\u3059\u3002",
-  "When this budget is exceeded, older unprotected recovery data may fall back to URL-only reopening.": "\u5BB9\u91CF\u3092\u8D85\u3048\u308B\u3068\u3001\u53E4\u3044\u672A\u4FDD\u8B77\u306E\u5FA9\u5143\u30C7\u30FC\u30BF\u306FURL\u3060\u3051\u306E\u5FA9\u5143\u306B\u306A\u308B\u5834\u5408\u304C\u3042\u308A\u307E\u3059\u3002",
-  "Allow form recovery as a feature. Capture remains opt-in per site, and password/payment credentials are excluded.": "\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u6A5F\u80FD\u3092\u6709\u52B9\u306B\u3057\u307E\u3059\u3002\u4FDD\u5B58\u306F\u30B5\u30A4\u30C8\u3054\u3068\u306B\u8A31\u53EF\u3057\u3001\u30D1\u30B9\u30EF\u30FC\u30C9\u3084\u6C7A\u6E08\u60C5\u5831\u306F\u9664\u5916\u3057\u307E\u3059\u3002",
-  "How long saved non-credential form values are retained.": "\u8A8D\u8A3C\u60C5\u5831\u3092\u542B\u307E\u306A\u3044\u30D5\u30A9\u30FC\u30E0\u306E\u5165\u529B\u5185\u5BB9\u3092\u4FDD\u5B58\u3059\u308B\u671F\u9593\u3067\u3059\u3002",
-  "How many recent recovery versions to keep for one page. Multi-step forms can use values from several versions.": "1\u30DA\u30FC\u30B8\u306B\u4FDD\u5B58\u3059\u308B\u5165\u529B\u5185\u5BB9\u306E\u5C65\u6B74\u6570\u3067\u3059\u3002\u8907\u6570\u6BB5\u968E\u306E\u30D5\u30A9\u30FC\u30E0\u3067\u306F\u3001\u8907\u6570\u306E\u5C65\u6B74\u3092\u5229\u7528\u3067\u304D\u307E\u3059\u3002",
-  "Maximum number of distinct pages that may keep form recovery data.": "\u30D5\u30A9\u30FC\u30E0\u306E\u5165\u529B\u5185\u5BB9\u3092\u4FDD\u5B58\u3059\u308B\u30DA\u30FC\u30B8\u6570\u306E\u4E0A\u9650\u3067\u3059\u3002",
-  "Deletes all saved non-credential form values without changing which sites have form recovery enabled.": "\u30B5\u30A4\u30C8\u3054\u3068\u306E\u8A31\u53EF\u8A2D\u5B9A\u3092\u4FDD\u3063\u305F\u307E\u307E\u3001\u4FDD\u5B58\u3057\u305F\u30D5\u30A9\u30FC\u30E0\u306E\u5165\u529B\u5185\u5BB9\u3092\u3059\u3079\u3066\u6D88\u53BB\u3057\u307E\u3059\u3002",
-  "Deletes browsing history and detailed recovery data for closed tabs. Open tabs stay open.": "\u95B2\u89A7\u5C65\u6B74\u3068\u9589\u3058\u305F\u30BF\u30D6\u306E\u8A73\u7D30\u306A\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u6D88\u53BB\u3057\u307E\u3059\u3002\u958B\u3044\u3066\u3044\u308B\u30BF\u30D6\u306F\u9589\u3058\u307E\u305B\u3093\u3002",
-  "Keeps browsing history, but removes extra state used to restore recently closed tabs more accurately. Open tabs start collecting detailed recovery again after they are reopened.": "\u95B2\u89A7\u5C65\u6B74\u3092\u6B8B\u3057\u3066\u3001\u30BF\u30D6\u306E\u8A73\u7D30\u306A\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u6D88\u53BB\u3057\u307E\u3059\u3002\u30BF\u30D6\u3092\u958B\u304D\u76F4\u3059\u3068\u518D\u3073\u4FDD\u5B58\u3092\u59CB\u3081\u307E\u3059\u3002",
-  "Returns saved site permissions to Ask next time. Container cookies and site storage are not changed.": "\u30B5\u30A4\u30C8\u306E\u4FDD\u5B58\u6E08\u307F\u6A29\u9650\u3092\u300C\u6B21\u56DE\u78BA\u8A8D\u300D\u306B\u623B\u3057\u307E\u3059\u3002Cookie\u3068\u30B5\u30A4\u30C8\u30C7\u30FC\u30BF\u306F\u7DAD\u6301\u3057\u307E\u3059\u3002",
-  "Cover the web page while a new page starts loading. Off by default to avoid a full-page flash.": "\u65B0\u3057\u3044\u30DA\u30FC\u30B8\u306E\u8AAD\u307F\u8FBC\u307F\u958B\u59CB\u6642\u306B\u3001\u753B\u9762\u5168\u4F53\u3092\u8986\u3044\u307E\u3059\u3002\u753B\u9762\u306E\u3061\u3089\u3064\u304D\u3092\u6291\u3048\u308B\u305F\u3081\u65E2\u5B9A\u3067\u306F\u7121\u52B9\u3067\u3059\u3002",
-  "Avoid large transitions, slides and parallax in Browser Core UI.": "\u5927\u304D\u306A\u30A2\u30CB\u30E1\u30FC\u30B7\u30E7\u30F3\u3084\u30B9\u30E9\u30A4\u30C9\u52B9\u679C\u3092\u6E1B\u3089\u3057\u307E\u3059\u3002",
-  "Used by sites without a site-specific zoom override.": "\u30BA\u30FC\u30E0\u3092\u500B\u5225\u306B\u8A2D\u5B9A\u3057\u3066\u3044\u306A\u3044\u30B5\u30A4\u30C8\u306B\u4F7F\u7528\u3057\u307E\u3059\u3002",
-  "Off uses only the selected default container. Manual keeps other containers available without automatic site routing. Automatic also applies site default rules.": "\u7121\u52B9\u3067\u306F\u65E2\u5B9A\u306EContainer\u3060\u3051\u3092\u4F7F\u7528\u3057\u307E\u3059\u3002\u624B\u52D5\u3067\u306F\u81EA\u5206\u3067\u5207\u308A\u66FF\u3048\u3001\u81EA\u52D5\u3067\u306F\u30B5\u30A4\u30C8\u3054\u3068\u306E\u6307\u5B9A\u3082\u9069\u7528\u3057\u307E\u3059\u3002",
-  "Used for new browser tabs, including when container controls are off. Automatic mode may replace it with a site's default container.": "\u65B0\u3057\u3044\u30BF\u30D6\u306B\u4F7F\u7528\u3057\u307E\u3059\u3002Container\u64CD\u4F5C\u304C\u7121\u52B9\u3067\u3082\u9069\u7528\u3055\u308C\u3001\u81EA\u52D5\u30E2\u30FC\u30C9\u3067\u306F\u30B5\u30A4\u30C8\u306E\u6307\u5B9A\u304C\u512A\u5148\u3055\u308C\u307E\u3059\u3002",
-  "Separate persistent login and site data": "\u30ED\u30B0\u30A4\u30F3\u72B6\u614B\u3068\u30B5\u30A4\u30C8\u30C7\u30FC\u30BF\u3092\u5206\u3051\u3066\u4FDD\u5B58",
-  "Creates a separate persistent login and site data.": "\u30ED\u30B0\u30A4\u30F3\u72B6\u614B\u3068\u30B5\u30A4\u30C8\u30C7\u30FC\u30BF\u3092\u5206\u3051\u305FContainer\u3092\u4F5C\u6210\u3057\u307E\u3059\u3002",
-  "Box": "\u7BB1",
-  "Personal": "\u500B\u4EBA\u7528",
-  "Work": "\u4ED5\u4E8B",
-  "Study": "\u5B66\u7FD2",
-  "Organization": "\u7D44\u7E54",
-  "Protected": "\u4FDD\u8B77",
-  "Favorite": "\u304A\u6C17\u306B\u5165\u308A",
-  "Browsing data": "\u95B2\u89A7\u30C7\u30FC\u30BF",
-  "Site default containers": "\u30B5\u30A4\u30C8\u3054\u3068\u306EContainer",
-  "Site default container": "\u3053\u306E\u30B5\u30A4\u30C8\u306EContainer",
-  "All containers": "\u3059\u3079\u3066\u306EContainer",
-  "Container": "Container",
-  "Container\u2026": "Container\u2026",
-  "Reopen current page in": "\u3053\u306E\u30DA\u30FC\u30B8\u3092\u5225\u306EContainer\u3067\u958B\u304F",
-  "No default container for this site": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u6307\u5B9A\u306F\u3042\u308A\u307E\u305B\u3093",
-  "Automatic site defaults are off": "\u30B5\u30A4\u30C8\u3054\u3068\u306E\u81EA\u52D5\u5207\u308A\u66FF\u3048\u306F\u7121\u52B9\u3067\u3059",
-  "Forget site default container": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u6307\u5B9A\u3092\u89E3\u9664",
-  "Site defaults are only available for web pages": "\u30B5\u30A4\u30C8\u306E\u6307\u5B9A\u306F\u30A6\u30A7\u30D6\u30DA\u30FC\u30B8\u3067\u5229\u7528\u3067\u304D\u307E\u3059",
-  "Clear browsing history": "\u95B2\u89A7\u5C65\u6B74\u3092\u6D88\u53BB",
-  "Clear detailed tab recovery": "\u8A73\u7D30\u306A\u30BF\u30D6\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u6D88\u53BB",
-  "Clear recovery data": "\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u6D88\u53BB",
-  "Clear form data": "\u30D5\u30A9\u30FC\u30E0\u30C7\u30FC\u30BF\u3092\u6D88\u53BB",
-  "Clear form recovery data": "\u30D5\u30A9\u30FC\u30E0\u306E\u5FA9\u5143\u30C7\u30FC\u30BF\u3092\u6D88\u53BB",
-  "Clear all saved form recovery data": "\u4FDD\u5B58\u6E08\u307F\u30D5\u30A9\u30FC\u30E0\u30C7\u30FC\u30BF\u3092\u3059\u3079\u3066\u6D88\u53BB",
-  "Reset permissions": "\u6A29\u9650\u3092\u30EA\u30BB\u30C3\u30C8",
-  "Reset site permissions": "\u30B5\u30A4\u30C8\u306E\u6A29\u9650\u3092\u30EA\u30BB\u30C3\u30C8",
-  "Site permissions": "\u30B5\u30A4\u30C8\u306E\u6A29\u9650",
-  "Site permission": "\u30B5\u30A4\u30C8\u306E\u6A29\u9650",
-  "Site permissions are only available for web pages": "\u6A29\u9650\u306E\u8A2D\u5B9A\u306F\u30A6\u30A7\u30D6\u30DA\u30FC\u30B8\u3067\u5229\u7528\u3067\u304D\u307E\u3059",
-  "No saved permissions for this site": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u4FDD\u5B58\u6E08\u307F\u6A29\u9650\u306F\u3042\u308A\u307E\u305B\u3093",
-  "Form recovery by site": "\u30B5\u30A4\u30C8\u3054\u3068\u306E\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143",
-  "Form recovery is only available for web pages.": "\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u306F\u30A6\u30A7\u30D6\u30DA\u30FC\u30B8\u3067\u5229\u7528\u3067\u304D\u307E\u3059\u3002",
-  "Saved form values": "\u4FDD\u5B58\u3057\u305F\u5165\u529B\u5185\u5BB9",
-  "Restore form values": "\u5165\u529B\u5185\u5BB9\u3092\u5FA9\u5143",
-  "Restore saved form values": "\u4FDD\u5B58\u3057\u305F\u5165\u529B\u5185\u5BB9\u3092\u5FA9\u5143",
-  "Restore matching fields": "\u4E00\u81F4\u3059\u308B\u9805\u76EE\u3092\u5FA9\u5143",
-  "Reset form recovery for this site": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u3092\u30EA\u30BB\u30C3\u30C8",
-  "Saved form values are available for this page.": "\u3053\u306E\u30DA\u30FC\u30B8\u306B\u306F\u4FDD\u5B58\u3057\u305F\u5165\u529B\u5185\u5BB9\u304C\u3042\u308A\u307E\u3059\u3002",
-  "Dismiss recovery message": "\u5FA9\u5143\u30E1\u30C3\u30BB\u30FC\u30B8\u3092\u9589\u3058\u308B",
-  "No saved form value is available for this page.": "\u3053\u306E\u30DA\u30FC\u30B8\u306B\u306F\u4FDD\u5B58\u3057\u305F\u5165\u529B\u5185\u5BB9\u304C\u3042\u308A\u307E\u305B\u3093\u3002",
-  "No saved form values are available for this page.": "\u3053\u306E\u30DA\u30FC\u30B8\u306B\u306F\u4FDD\u5B58\u3057\u305F\u5165\u529B\u5185\u5BB9\u304C\u3042\u308A\u307E\u305B\u3093\u3002",
-  "No saved form values for this page.": "\u3053\u306E\u30DA\u30FC\u30B8\u306E\u4FDD\u5B58\u6E08\u307F\u5165\u529B\u5185\u5BB9\u306F\u3042\u308A\u307E\u305B\u3093\u3002",
-  "Text field": "\u5165\u529B\u6B04",
-  "Form recovery disabled and stored form values cleared for this site.": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u3092\u7121\u52B9\u306B\u3057\u3001\u4FDD\u5B58\u5185\u5BB9\u3092\u6D88\u53BB\u3057\u307E\u3057\u305F\u3002",
-  "Form recovery enabled for this site.": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u30D5\u30A9\u30FC\u30E0\u5FA9\u5143\u3092\u6709\u52B9\u306B\u3057\u307E\u3057\u305F\u3002",
-  "Could not identify the focused form field.": "\u9078\u629E\u4E2D\u306E\u5165\u529B\u6B04\u3092\u7279\u5B9A\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002",
-  "This form field is excluded from recovery on this site.": "\u3053\u306E\u5165\u529B\u6B04\u3092\u3001\u3053\u306E\u30B5\u30A4\u30C8\u306E\u5FA9\u5143\u5BFE\u8C61\u304B\u3089\u9664\u5916\u3057\u307E\u3057\u305F\u3002",
-  "These values were saved for this page. Browser Core restores only fields it can match confidently; ambiguous fields remain unchanged.": "\u3053\u306E\u30DA\u30FC\u30B8\u3067\u4FDD\u5B58\u3057\u305F\u5165\u529B\u5185\u5BB9\u3067\u3059\u3002\u78BA\u5B9F\u306B\u5BFE\u5FDC\u3059\u308B\u5165\u529B\u6B04\u3060\u3051\u3092\u5FA9\u5143\u3057\u307E\u3059\u3002",
-  "Allow and Block are remembered for this site in the current container. Not now denies this request without saving a decision.": "\u8A31\u53EF\u30FB\u62D2\u5426\u306F\u3001\u3053\u306EContainer\u5185\u306E\u30B5\u30A4\u30C8\u306B\u4FDD\u5B58\u3057\u307E\u3059\u3002\u300C\u4ECA\u56DE\u306F\u62D2\u5426\u300D\u3067\u306F\u5224\u65AD\u3092\u4FDD\u5B58\u3057\u307E\u305B\u3093\u3002",
-  "Browser Core does not save a full live copy of the page. Some page state can only be restored by the browser engine, while saved form values and the website's own drafts are recovered separately.": "\u30DA\u30FC\u30B8\u5168\u4F53\u306E\u52D5\u4F5C\u72B6\u614B\u306F\u4FDD\u5B58\u3055\u308C\u307E\u305B\u3093\u3002\u30D6\u30E9\u30A6\u30B6\u306E\u5FA9\u5143\u3001\u4FDD\u5B58\u6E08\u307F\u30D5\u30A9\u30FC\u30E0\u3001\u30B5\u30A4\u30C8\u5074\u306E\u4E0B\u66F8\u304D\u3092\u5229\u7528\u3057\u307E\u3059\u3002",
-  "Detailed tab recovery is not currently available; the page can still be reopened normally.": "\u8A73\u7D30\u306A\u5FA9\u5143\u30C7\u30FC\u30BF\u306F\u3042\u308A\u307E\u305B\u3093\u304C\u3001\u901A\u5E38\u306E\u30DA\u30FC\u30B8\u3068\u3057\u3066\u958B\u304D\u76F4\u305B\u307E\u3059\u3002",
-  "Close tab": "\u30BF\u30D6\u3092\u9589\u3058\u308B",
-  "Close browser tab": "\u30D6\u30E9\u30A6\u30B6\u306E\u30BF\u30D6\u3092\u9589\u3058\u308B",
-  "Close current browser tab": "\u73FE\u5728\u306E\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u9589\u3058\u308B",
-  "Close other browser tabs": "\u307B\u304B\u306E\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u9589\u3058\u308B",
-  "Close browser tabs to the left": "\u5DE6\u5074\u306E\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u9589\u3058\u308B",
-  "Close browser tabs to the right": "\u53F3\u5074\u306E\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u9589\u3058\u308B",
-  "Close unpinned browser tabs": "\u56FA\u5B9A\u3057\u3066\u3044\u306A\u3044\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u9589\u3058\u308B",
-  "Duplicate browser tab": "\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u8907\u88FD",
-  "Move to new window": "\u65B0\u3057\u3044\u30A6\u30A3\u30F3\u30C9\u30A6\u3078\u79FB\u52D5",
-  "Move browser tab to new window": "\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u65B0\u3057\u3044\u30A6\u30A3\u30F3\u30C9\u30A6\u3078\u79FB\u52D5",
-  "Next browser tab": "\u6B21\u306E\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6",
-  "Previous browser tab": "\u524D\u306E\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6",
-  "Focus browser address bar": "\u30A2\u30C9\u30EC\u30B9\u30D0\u30FC\u3078\u79FB\u52D5",
-  "Open browser container picker": "Container\u3092\u9078\u3076",
-  "Switch to tab": "\u3053\u306E\u30BF\u30D6\u306B\u5207\u308A\u66FF\u3048",
-  "Reopen closed tab": "\u9589\u3058\u305F\u30BF\u30D6\u3092\u958B\u304F",
-  "Recently closed browser tabs": "\u6700\u8FD1\u9589\u3058\u305F\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6",
-  "Restore previous browser session": "\u524D\u56DE\u306E\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u5FA9\u5143",
-  "Restore tab": "\u30BF\u30D6\u3092\u5FA9\u5143",
-  "Pin restored tab": "\u5FA9\u5143\u3057\u305F\u30BF\u30D6\u3092\u56FA\u5B9A",
-  "Restore from here": "\u3053\u3053\u304B\u3089\u5FA9\u5143",
-  "Retry restore": "\u5FA9\u5143\u3092\u518D\u8A66\u884C",
-  "Recovery details": "\u5FA9\u5143\u306E\u8A73\u7D30",
-  "Restore latest page from this path": "\u3053\u306E\u7D4C\u8DEF\u306E\u6700\u5F8C\u306E\u30DA\u30FC\u30B8\u3092\u5FA9\u5143",
-  "No recently closed browser tab.": "\u6700\u8FD1\u9589\u3058\u305F\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u306F\u3042\u308A\u307E\u305B\u3093\u3002",
-  "No previous browser session is available.": "\u524D\u56DE\u306E\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u306E\u8A18\u9332\u306F\u3042\u308A\u307E\u305B\u3093\u3002",
-  "The previous browser session is already restored.": "\u524D\u56DE\u306E\u30BF\u30D6\u306F\u3059\u3067\u306B\u5FA9\u5143\u3055\u308C\u3066\u3044\u307E\u3059\u3002",
-  "This tab has no restorable URL.": "\u3053\u306E\u30BF\u30D6\u306B\u306F\u5FA9\u5143\u3067\u304D\u308BURL\u304C\u3042\u308A\u307E\u305B\u3093\u3002",
-  "This Obsidian build cannot move the tab to a new window.": "\u3053\u306EObsidian\u3067\u306F\u5225\u30A6\u30A3\u30F3\u30C9\u30A6\u3078\u79FB\u52D5\u3067\u304D\u307E\u305B\u3093\u3002",
-  "Hard reload": "\u30AD\u30E3\u30C3\u30B7\u30E5\u3092\u4F7F\u308F\u305A\u518D\u8AAD\u307F\u8FBC\u307F",
-  "Reload normally": "\u901A\u5E38\u306E\u518D\u8AAD\u307F\u8FBC\u307F",
-  "Reload browser page": "\u30D6\u30E9\u30A6\u30B6\u306E\u30DA\u30FC\u30B8\u3092\u518D\u8AAD\u307F\u8FBC\u307F",
-  "Bookmark current browser page": "\u73FE\u5728\u306E\u30DA\u30FC\u30B8\u3092\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
-  "Bookmark all open browser tabs": "\u958B\u3044\u3066\u3044\u308B\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6\u3092\u3059\u3079\u3066\u4FDD\u5B58",
-  "There are no web pages to bookmark.": "\u4FDD\u5B58\u3067\u304D\u308B\u30A6\u30A7\u30D6\u30DA\u30FC\u30B8\u304C\u3042\u308A\u307E\u305B\u3093\u3002",
-  "All open web pages are already bookmarked.": "\u958B\u3044\u3066\u3044\u308B\u30DA\u30FC\u30B8\u306F\u3059\u3079\u3066\u4FDD\u5B58\u6E08\u307F\u3067\u3059\u3002",
-  "Added to favorites.": "\u9078\u629C\u30E1\u30F3\u30D0\u30FC\u306B\u8FFD\u52A0\u3057\u307E\u3057\u305F\u3002",
-  "That move would create an invalid bookmark-folder cycle.": "\u30D5\u30A9\u30EB\u30C0\u3092\u81EA\u8EAB\u3084\u5B50\u30D5\u30A9\u30EB\u30C0\u306E\u4E2D\u3078\u79FB\u52D5\u3059\u308B\u3053\u3068\u306F\u3067\u304D\u307E\u305B\u3093\u3002",
-  "Copy title": "\u540D\u524D\u3092\u30B3\u30D4\u30FC",
-  "Copy page title and URL": "\u540D\u524D\u3068URL\u3092\u30B3\u30D4\u30FC",
-  "Copy file path": "\u30D5\u30A1\u30A4\u30EB\u306E\u30D1\u30B9\u3092\u30B3\u30D4\u30FC",
-  "Copy event details": "\u30A4\u30D9\u30F3\u30C8\u306E\u8A73\u7D30\u3092\u30B3\u30D4\u30FC",
-  "Copy tab history": "\u30BF\u30D6\u306E\u5C65\u6B74\u3092\u30B3\u30D4\u30FC",
-  "Open history": "\u5C65\u6B74\u3092\u958B\u304F",
-  "Show history": "\u5C65\u6B74\u3092\u8868\u793A",
-  "Search history": "\u5C65\u6B74\u3092\u691C\u7D22",
-  "Search browser history": "\u30D6\u30E9\u30A6\u30B6\u5C65\u6B74\u3092\u691C\u7D22",
-  "History for this site": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u5C65\u6B74",
-  "Search title, URL, domain, or tab": "\u540D\u524D\u30FBURL\u30FB\u30C9\u30E1\u30A4\u30F3\u30FB\u30BF\u30D6\u3067\u691C\u7D22",
-  "Filter history by day": "\u65E5\u4ED8\u3067\u7D5E\u308A\u8FBC\u3080",
-  "Filter history by container": "Container\u3067\u7D5E\u308A\u8FBC\u3080",
-  "Clear filters": "\u7D5E\u308A\u8FBC\u307F\u3092\u89E3\u9664",
-  "Search within this day": "\u3053\u306E\u65E5\u306E\u5C65\u6B74\u3092\u691C\u7D22",
-  "Browse visits by day, tab, and alternate path. Filtering only changes what is shown.": "\u65E5\u4ED8\u3001\u30BF\u30D6\u3001\u5206\u5C90\u3057\u305F\u7D4C\u8DEF\u304B\u3089\u95B2\u89A7\u5C65\u6B74\u3092\u898B\u3089\u308C\u307E\u3059\u3002\u7D5E\u308A\u8FBC\u307F\u3067\u306F\u5C65\u6B74\u306F\u524A\u9664\u3055\u308C\u307E\u305B\u3093\u3002",
-  "Show alternate paths": "\u5206\u5C90\u3057\u305F\u7D4C\u8DEF\u3092\u8868\u793A",
-  "Show alternate path": "\u5206\u5C90\u3057\u305F\u7D4C\u8DEF\u3092\u8868\u793A",
-  "Show full tab history": "\u30BF\u30D6\u306E\u5168\u5C65\u6B74\u3092\u8868\u793A",
-  "Show in full history": "\u5168\u5C65\u6B74\u3067\u898B\u308B",
-  "Hide redirects and reloads": "\u30EA\u30C0\u30A4\u30EC\u30AF\u30C8\u3068\u518D\u8AAD\u307F\u8FBC\u307F\u3092\u96A0\u3059",
-  "Expand all alternate paths": "\u3059\u3079\u3066\u306E\u5206\u5C90\u3092\u5C55\u958B",
-  "Collapse all alternate paths": "\u3059\u3079\u3066\u306E\u5206\u5C90\u3092\u6298\u308A\u305F\u305F\u3080",
-  "Collapse alternate path": "\u5206\u5C90\u3092\u6298\u308A\u305F\u305F\u3080",
-  "Open current path in new tabs": "\u73FE\u5728\u306E\u7D4C\u8DEF\u3092\u65B0\u3057\u3044\u30BF\u30D6\u3067\u958B\u304F",
-  "Open this path in new tabs": "\u3053\u306E\u7D4C\u8DEF\u3092\u65B0\u3057\u3044\u30BF\u30D6\u3067\u958B\u304F",
-  "Open all tabs from this day": "\u3053\u306E\u65E5\u306E\u30BF\u30D6\u3092\u3059\u3079\u3066\u958B\u304F",
-  "Reveal this visit in its alternate path": "\u3053\u306E\u8A2A\u554F\u3092\u5206\u5C90\u7D4C\u8DEF\u3067\u8868\u793A",
-  "Open redirect source": "\u30EA\u30C0\u30A4\u30EC\u30AF\u30C8\u5143\u3092\u958B\u304F",
-  "Open redirect destination": "\u30EA\u30C0\u30A4\u30EC\u30AF\u30C8\u5148\u3092\u958B\u304F",
-  "Delete alternate path": "\u3053\u306E\u5206\u5C90\u3092\u524A\u9664",
-  "Delete history entry": "\u3053\u306E\u5C65\u6B74\u3092\u524A\u9664",
-  "Delete tab history": "\u30BF\u30D6\u306E\u5C65\u6B74\u3092\u524A\u9664",
-  "Delete this day's history": "\u3053\u306E\u65E5\u306E\u5C65\u6B74\u3092\u524A\u9664",
-  "Remove from history": "\u5C65\u6B74\u304B\u3089\u524A\u9664",
-  "Deleted history entry": "\u524A\u9664\u3055\u308C\u305F\u5C65\u6B74",
-  "Remove deleted entry marker": "\u524A\u9664\u6E08\u307F\u306E\u5370\u3092\u53D6\u308A\u9664\u304F",
-  "Recent files": "\u6700\u8FD1\u306E\u30D5\u30A1\u30A4\u30EB",
-  "Looking for a Vault file?": "Vault\u306E\u30D5\u30A1\u30A4\u30EB\u3092\u63A2\u3057\u307E\u3059\u304B\uFF1F",
-  "Quick Switcher": "\u30AF\u30A4\u30C3\u30AF\u30B9\u30A4\u30C3\u30C1\u30E3\u30FC",
-  "Try another name or switch to Web.": "\u5225\u306E\u540D\u524D\u3067\u63A2\u3059\u304B\u3001\u30A6\u30A7\u30D6\u691C\u7D22\u3078\u5207\u308A\u66FF\u3048\u3066\u304F\u3060\u3055\u3044\u3002",
-  "Use Obsidian's Quick Switcher for notes and files.": "\u30CE\u30FC\u30C8\u3084\u30D5\u30A1\u30A4\u30EB\u306FObsidian\u306E\u30AF\u30A4\u30C3\u30AF\u30B9\u30A4\u30C3\u30C1\u30E3\u30FC\u3067\u63A2\u305B\u307E\u3059\u3002",
-  "Search your vault, browse the web, or continue where you left off.": "Vault\u3092\u691C\u7D22\u3057\u305F\u308A\u3001\u30A6\u30A7\u30D6\u3092\u958B\u3044\u305F\u308A\u3001\u524D\u56DE\u306E\u7D9A\u304D\u3092\u59CB\u3081\u3089\u308C\u307E\u3059\u3002",
-  "Open Obsidian Quick Switcher": "Obsidian\u306E\u30AF\u30A4\u30C3\u30AF\u30B9\u30A4\u30C3\u30C1\u30E3\u30FC\u3092\u958B\u304F",
-  "Open Browser Core settings": "Browser Core\u306E\u8A2D\u5B9A\u3092\u958B\u304F",
-  "Open Obsidian Settings \u2192 Community plugins \u2192 Unified Browser Core.": "Obsidian\u306E\u8A2D\u5B9A \u2192 \u30B3\u30DF\u30E5\u30CB\u30C6\u30A3\u30D7\u30E9\u30B0\u30A4\u30F3 \u2192 Unified Browser Core\u3092\u958B\u3044\u3066\u304F\u3060\u3055\u3044\u3002",
-  "Obsidian Quick Switcher is not available.": "Obsidian\u306E\u30AF\u30A4\u30C3\u30AF\u30B9\u30A4\u30C3\u30C1\u30E3\u30FC\u3092\u5229\u7528\u3067\u304D\u307E\u305B\u3093\u3002",
-  "That file is no longer available.": "\u305D\u306E\u30D5\u30A1\u30A4\u30EB\u306F\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3002",
-  "Could not open that file.": "\u30D5\u30A1\u30A4\u30EB\u3092\u958B\u3051\u307E\u305B\u3093\u3067\u3057\u305F\u3002",
-  "Import web bookmarks from Obsidian Bookmarks": "Obsidian\u306E\u30A6\u30A7\u30D6\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u53D6\u308A\u8FBC\u3080",
-  "Obsidian Bookmarks is unavailable or has no readable bookmark data.": "Obsidian\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u5229\u7528\u3067\u304D\u306A\u3044\u304B\u3001\u8AAD\u307F\u53D6\u308C\u308B\u30C7\u30FC\u30BF\u304C\u3042\u308A\u307E\u305B\u3093\u3002",
-  "Web viewer Bookmarks has no readable data in this vault.": "\u3053\u306EVault\u306BWeb viewer Bookmarks\u306E\u8AAD\u307F\u53D6\u308C\u308B\u30C7\u30FC\u30BF\u304C\u3042\u308A\u307E\u305B\u3093\u3002",
-  "No Surfing data was found in this vault. Run migration before uninstalling Surfing.": "Surfing\u306E\u30C7\u30FC\u30BF\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3002Surfing\u3092\u30A2\u30F3\u30A4\u30F3\u30B9\u30C8\u30FC\u30EB\u3059\u308B\u524D\u306B\u79FB\u884C\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
-  "Surfing data could not be read safely. No changes were made.": "Surfing\u306E\u30C7\u30FC\u30BF\u3092\u5B89\u5168\u306B\u8AAD\u307F\u53D6\u308C\u307E\u305B\u3093\u3067\u3057\u305F\u3002\u5909\u66F4\u306F\u884C\u3063\u3066\u3044\u307E\u305B\u3093\u3002",
-  "Surfing migration stopped. Source data was not deleted; run the command again to resume.": "\u79FB\u884C\u3092\u4E2D\u65AD\u3057\u307E\u3057\u305F\u3002\u5143\u30C7\u30FC\u30BF\u306F\u524A\u9664\u3055\u308C\u3066\u3044\u307E\u305B\u3093\u3002\u3082\u3046\u4E00\u5EA6\u5B9F\u884C\u3059\u308B\u3068\u518D\u958B\u3067\u304D\u307E\u3059\u3002",
-  "Close or reopen tabs using this container before deleting it.": "\u524A\u9664\u3059\u308B\u524D\u306B\u3001\u3053\u306EContainer\u306E\u30BF\u30D6\u3092\u9589\u3058\u308B\u304B\u5225\u306EContainer\u3067\u958B\u3044\u3066\u304F\u3060\u3055\u3044\u3002",
-  "Could not clear this container's browsing data, so the container was not deleted.": "\u95B2\u89A7\u30C7\u30FC\u30BF\u3092\u6D88\u53BB\u3067\u304D\u306A\u304B\u3063\u305F\u305F\u3081\u3001Container\u3092\u524A\u9664\u3057\u3066\u3044\u307E\u305B\u3093\u3002",
-  "Open new tab in this container": "\u3053\u306EContainer\u3067\u65B0\u3057\u3044\u30BF\u30D6\u3092\u958B\u304F",
-  "Language": "\u8868\u793A\u8A00\u8A9E",
-  "Follow Obsidian": "Obsidian\u306B\u5408\u308F\u305B\u308B",
-  "English": "\u82F1\u8A9E",
-  "Japanese": "\u65E5\u672C\u8A9E",
-  "Choose the language used by Browser Core.": "Browser Core\u306E\u8868\u793A\u8A00\u8A9E\u3092\u9078\u3073\u307E\u3059\u3002",
-  "Bookmarks": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
-  "Bookmark": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
-  "Bookmark page": "\u3053\u306E\u30DA\u30FC\u30B8\u3092\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
-  "Bookmark this page": "\u3053\u306E\u30DA\u30FC\u30B8\u3092\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
-  "Edit bookmark": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u7DE8\u96C6",
-  "Bookmark saved": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u4FDD\u5B58\u3057\u307E\u3057\u305F",
-  "New bookmark": "\u65B0\u3057\u3044\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
-  "New folder": "\u65B0\u3057\u3044\u30D5\u30A9\u30EB\u30C0",
-  "Bookmark bar": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u30D0\u30FC",
-  "Selected members": "\u9078\u629C\u30E1\u30F3\u30D0\u30FC",
-  "Favorites bar": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u30D0\u30FC",
-  "Show bookmark bar": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u30D0\u30FC\u3092\u8868\u793A",
-  "Bookmark bar display": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u30D0\u30FC\u306E\u8868\u793A\u5185\u5BB9",
-  "Choose every bookmark and folder, or just the members you select.": "\u5168\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3068\u30D5\u30A9\u30EB\u30C0\u3001\u307E\u305F\u306F\u9078\u629C\u3057\u305F\u30E1\u30F3\u30D0\u30FC\u3092\u8868\u793A\u3057\u307E\u3059\u3002",
-  "All bookmarks": "\u3059\u3079\u3066\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
-  "Choose members": "\u30E1\u30F3\u30D0\u30FC\u3092\u9078\u3076",
-  "Show in selected members": "\u9078\u629C\u30E1\u30F3\u30D0\u30FC\u306B\u8868\u793A",
-  "Pick the pages you use every day from your bookmarks.": "\u6BCE\u65E5\u4F7F\u3046\u30DA\u30FC\u30B8\u3092\u3001\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u306E\u4E2D\u304B\u3089\u9078\u3093\u3067\u304F\u3060\u3055\u3044\u3002",
-  "Your everyday pages, one click away.": "\u3044\u3064\u3082\u306E\u30DA\u30FC\u30B8\u3078\u3001\u30EF\u30F3\u30AF\u30EA\u30C3\u30AF\u3002",
-  "Save freely. Find what you need by type or folder.": "\u6C17\u8EFD\u306B\u4FDD\u5B58\u3057\u3066\u3001\u7A2E\u985E\u3084\u30D5\u30A9\u30EB\u30C0\u304B\u3089\u898B\u3064\u3051\u307E\u3057\u3087\u3046\u3002",
-  "Organize by": "\u8868\u793A\u65B9\u6CD5",
-  "By type": "\u7A2E\u985E\u5225",
-  "By folder": "\u30D5\u30A9\u30EB\u30C0\u5225",
-  "Folders": "\u30D5\u30A9\u30EB\u30C0",
-  "References": "\u8CC7\u6599",
-  "Video": "\u52D5\u753B",
-  "Audio": "\u97F3\u58F0",
-  "Images": "\u753B\u50CF",
-  "Documents": "\u6587\u66F8\u30FB\u30D5\u30A1\u30A4\u30EB",
-  "Mail": "\u30E1\u30FC\u30EB",
-  "Blogs": "\u30D6\u30ED\u30B0",
-  "Forums": "\u63B2\u793A\u677F",
-  "Websites": "\u30A6\u30A7\u30D6\u30B5\u30A4\u30C8",
-  "Media type": "\u7A2E\u985E",
-  "Automatic": "\u81EA\u52D5",
-  "Automatic classification": "\u81EA\u52D5\u5206\u985E",
-  "Detected: {type}": "\u81EA\u52D5\u5224\u5B9A\uFF1A{type}",
-  "Change the type if automatic classification is incorrect.": "\u81EA\u52D5\u5206\u985E\u304C\u5408\u308F\u306A\u3044\u3068\u304D\u306F\u3001\u7A2E\u985E\u3092\u5909\u66F4\u3067\u304D\u307E\u3059\u3002",
-  "{count} bookmarks": "{count}\u4EF6\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
-  "{count} selected": "\u9078\u629C\u30E1\u30F3\u30D0\u30FC {count}\u4EF6",
-  "{count} folders": "{count}\u500B\u306E\u30D5\u30A9\u30EB\u30C0",
-  "{count} results": "{count}\u4EF6\u306E\u691C\u7D22\u7D50\u679C",
-  "No bookmarks yet": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u96C6\u3081\u307E\u3057\u3087\u3046",
-  "No matching bookmarks": "\u4E00\u81F4\u3059\u308B\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u304C\u3042\u308A\u307E\u305B\u3093",
-  "Save a page with the star in the toolbar, or add your first bookmark here.": "\u30C4\u30FC\u30EB\u30D0\u30FC\u306E\u661F\u304B\u3089\u30DA\u30FC\u30B8\u3092\u4FDD\u5B58\u3059\u308B\u304B\u3001\u3053\u3053\u304B\u3089\u6700\u521D\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u8FFD\u52A0\u3067\u304D\u307E\u3059\u3002",
-  "Try another title, URL, or folder name.": "\u5225\u306E\u540D\u524D\u3001URL\u3001\u30D5\u30A9\u30EB\u30C0\u540D\u3067\u691C\u7D22\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
-  "Search bookmarks": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u691C\u7D22",
-  "Name, URL, folder or tag": "\u540D\u524D\u30FBURL\u30FB\u30D5\u30A9\u30EB\u30C0\u30FB\u30BF\u30B0\u3067\u691C\u7D22",
-  "Import": "\u53D6\u308A\u8FBC\u3080",
-  "Import Obsidian Bookmarks": "Obsidian\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u53D6\u308A\u8FBC\u3080",
-  "Import Web viewer Bookmarks": "Web viewer Bookmarks\u304B\u3089\u53D6\u308A\u8FBC\u3080",
-  "Details": "\u8A73\u7D30",
-  "Title": "\u540D\u524D",
-  "Bookmark title": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u306E\u540D\u524D",
-  "Bookmark URL": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u306EURL",
-  "Description": "\u8AAC\u660E",
-  "Bookmark description": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u306E\u8AAC\u660E",
-  "Tags": "\u30BF\u30B0",
-  "Bookmark tags": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u306E\u30BF\u30B0",
-  "Separate tags with spaces": "\u30BF\u30B0\u3092\u7A7A\u767D\u3067\u533A\u5207\u308B",
-  "Save in": "\u4FDD\u5B58\u5148",
-  "Bookmarks root": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u306E\u4E00\u89A7",
-  "Choose bookmark folder": "\u4FDD\u5B58\u5148\u306E\u30D5\u30A9\u30EB\u30C0\u3092\u9078\u3076",
-  "New bookmark folder": "\u65B0\u3057\u3044\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u30D5\u30A9\u30EB\u30C0",
-  "Folder name": "\u30D5\u30A9\u30EB\u30C0\u540D",
-  "Bookmark image": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u306E\u30A2\u30A4\u30B3\u30F3",
-  "Bookmark image type": "\u30A2\u30A4\u30B3\u30F3\u306E\u7A2E\u985E",
-  "Website favicon": "\u30B5\u30A4\u30C8\u306E\u30A2\u30A4\u30B3\u30F3",
-  "Custom image": "\u753B\u50CF\u3092\u6307\u5B9A",
-  "Custom text": "\u6587\u5B57\u3092\u6307\u5B9A",
-  "Lucide icon": "Lucide\u30A2\u30A4\u30B3\u30F3",
-  "Custom value": "\u753B\u50CF\u30FB\u6587\u5B57\u30FB\u30A2\u30A4\u30B3\u30F3\u540D",
-  "Custom bookmark image or text": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u306E\u753B\u50CF\u3084\u6587\u5B57",
-  "Preview": "\u30D7\u30EC\u30D3\u30E5\u30FC",
-  "Save": "\u4FDD\u5B58",
-  "Cancel": "\u30AD\u30E3\u30F3\u30BB\u30EB",
-  "Done": "\u5B8C\u4E86",
-  "Close": "\u9589\u3058\u308B",
-  "Delete": "\u524A\u9664",
-  "Delete bookmark": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u524A\u9664",
-  "Remove bookmark": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u524A\u9664",
-  "Edit": "\u7DE8\u96C6",
-  "Move": "\u79FB\u52D5",
-  "Move to folder": "\u30D5\u30A9\u30EB\u30C0\u3078\u79FB\u52D5",
-  "Rename": "\u540D\u524D\u3092\u5909\u66F4",
-  "Rename bookmark folder": "\u30D5\u30A9\u30EB\u30C0\u306E\u540D\u524D\u3092\u5909\u66F4",
-  "Delete folder": "\u30D5\u30A9\u30EB\u30C0\u3092\u524A\u9664",
-  "Delete bookmark folder": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u30D5\u30A9\u30EB\u30C0\u3092\u524A\u9664",
-  "Delete \u201C{title}\u201D from your bookmarks?": "\u300C{title}\u300D\u3092\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u304B\u3089\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
-  "Open": "\u958B\u304F",
-  "Open in new tab": "\u65B0\u3057\u3044\u30BF\u30D6\u3067\u958B\u304F",
-  "Open all": "\u3059\u3079\u3066\u958B\u304F",
-  "Open all in new tabs": "\u65B0\u3057\u3044\u30BF\u30D6\u3067\u3059\u3079\u3066\u958B\u304F",
-  "Copy URL": "URL\u3092\u30B3\u30D4\u30FC",
-  "Copy page URL": "\u30DA\u30FC\u30B8\u306EURL\u3092\u30B3\u30D4\u30FC",
-  "URL copied.": "URL\u3092\u30B3\u30D4\u30FC\u3057\u307E\u3057\u305F\u3002",
-  "Show in history": "\u5C65\u6B74\u3067\u898B\u308B",
-  "View page in history": "\u3053\u306E\u30DA\u30FC\u30B8\u306E\u5C65\u6B74\u3092\u898B\u308B",
-  "Sort contents": "\u540D\u524D\u9806\u306B\u4E26\u3079\u308B",
-  "Add to favorites": "\u9078\u629C\u30E1\u30F3\u30D0\u30FC\u306B\u8FFD\u52A0",
-  "Remove from favorites": "\u9078\u629C\u30E1\u30F3\u30D0\u30FC\u304B\u3089\u5916\u3059",
-  "Show in favorites bar": "\u9078\u629C\u30E1\u30F3\u30D0\u30FC\u306B\u8868\u793A",
-  "Add current page to favorites": "\u3053\u306E\u30DA\u30FC\u30B8\u3092\u9078\u629C\u30E1\u30F3\u30D0\u30FC\u306B\u8FFD\u52A0",
-  "Hide favorites bar": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u30D0\u30FC\u3092\u975E\u8868\u793A",
-  "Open bookmarks": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u958B\u304F",
-  "Show bookmarks": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u8868\u793A",
-  "Initial background color override": "\u521D\u671F\u80CC\u666F\u8272\u306E\u4E0A\u66F8\u304D",
-  "Use the Obsidian theme background before a page is painted. Turn off to use the browser's own background.": "\u30DA\u30FC\u30B8\u63CF\u753B\u524D\u306E\u80CC\u666F\u306BObsidian\u306E\u30C6\u30FC\u30DE\u8272\u3092\u4F7F\u3044\u307E\u3059\u3002\u7121\u52B9\u306B\u3059\u308B\u3068\u30D6\u30E9\u30A6\u30B6\u672C\u6765\u306E\u80CC\u666F\u306B\u306A\u308A\u307E\u3059\u3002",
-  "Tab style": "\u30BF\u30D6\u306E\u30B9\u30BF\u30A4\u30EB",
-  "Integrate with Obsidian tab strips": "Obsidian\u306E\u30BF\u30D6\u30D0\u30FC\u3068\u7D71\u5408",
-  "Replace empty tabs with Home": "\u7A7A\u306E\u30BF\u30D6\u3092\u30DB\u30FC\u30E0\u306B\u7F6E\u304D\u63DB\u3048\u308B",
-  "Default search engine": "\u65E2\u5B9A\u306E\u691C\u7D22\u30A8\u30F3\u30B8\u30F3",
-  "Custom search URL": "\u691C\u7D22URL\u3092\u6307\u5B9A",
-  "Home": "\u30DB\u30FC\u30E0",
-  "History": "\u5C65\u6B74",
-  "Home search": "\u30DB\u30FC\u30E0\u306E\u691C\u7D22",
-  "Show recent Vault files on Home": "\u6700\u8FD1\u306EVault\u30D5\u30A1\u30A4\u30EB\u3092\u30DB\u30FC\u30E0\u306B\u8868\u793A",
-  "Show bookmarked Vault files on Home": "Vault\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u30DB\u30FC\u30E0\u306B\u8868\u793A",
-  "Migration": "\u79FB\u884C",
-  "Migrate from Surfing": "Surfing\u304B\u3089\u79FB\u884C",
-  "Preview and migrate": "\u5185\u5BB9\u3092\u78BA\u8A8D\u3057\u3066\u79FB\u884C",
-  "Resume migration": "\u79FB\u884C\u3092\u518D\u958B",
-  "Migrated": "\u79FB\u884C\u6E08\u307F",
-  "Startup": "\u8D77\u52D5\u6642",
-  "Startup behavior": "\u8D77\u52D5\u6642\u306E\u52D5\u4F5C",
-  "Restore previous session": "\u524D\u56DE\u306E\u30BF\u30D6\u3092\u5FA9\u5143",
-  "Open Home": "\u30DB\u30FC\u30E0\u3092\u958B\u304F",
-  "Do nothing": "\u4F55\u3082\u3057\u306A\u3044",
-  "None": "\u306A\u3057",
-  "Off": "\u7121\u52B9",
-  "Manual": "\u624B\u52D5",
-  "Containers": "Container",
-  "Container use": "Container\u306E\u5229\u7528",
-  "Default container": "\u65E2\u5B9A\u306EContainer",
-  "Add container": "Container\u3092\u8FFD\u52A0",
-  "Container name": "Container\u540D",
-  "Clear browsing data and saved permissions": "\u95B2\u89A7\u30C7\u30FC\u30BF\u3068\u4FDD\u5B58\u6E08\u307F\u6A29\u9650\u3092\u6D88\u53BB",
-  "Delete container": "Container\u3092\u524A\u9664",
-  "Clear browsing data": "\u95B2\u89A7\u30C7\u30FC\u30BF\u3092\u6D88\u53BB",
-  "Manage containers": "Container\u3092\u7BA1\u7406",
-  "Appearance": "\u8868\u793A",
-  "Reduced motion": "\u30A2\u30CB\u30E1\u30FC\u30B7\u30E7\u30F3\u3092\u6E1B\u3089\u3059",
-  "Default web content zoom": "\u30A6\u30A7\u30D6\u30DA\u30FC\u30B8\u306E\u65E2\u5B9A\u306E\u30BA\u30FC\u30E0",
-  "Full-page loading shield": "\u8AAD\u307F\u8FBC\u307F\u4E2D\u306E\u5168\u9762\u30B7\u30FC\u30EB\u30C9",
-  "Permissions": "\u6A29\u9650",
-  "Site permissions\u2026": "\u30B5\u30A4\u30C8\u306E\u6A29\u9650\u2026",
-  "Form recovery": "\u30D5\u30A9\u30FC\u30E0\u306E\u5FA9\u5143",
-  "Enable form recovery": "\u30D5\u30A9\u30FC\u30E0\u306E\u5FA9\u5143\u3092\u6709\u52B9\u306B\u3059\u308B",
-  "History retention": "\u5C65\u6B74\u306E\u4FDD\u5B58",
-  "History day starts at": "\u5C65\u6B74\u306E\u65E5\u4ED8\u306E\u5207\u308A\u66FF\u3048\u6642\u523B",
-  "History retention days": "\u5C65\u6B74\u306E\u4FDD\u5B58\u65E5\u6570",
-  "History node limit": "\u5C65\u6B74\u306E\u4FDD\u5B58\u4EF6\u6570",
-  "Closed-tab recovery": "\u9589\u3058\u305F\u30BF\u30D6\u306E\u5FA9\u5143",
-  "Recovery retention days": "\u5FA9\u5143\u30C7\u30FC\u30BF\u306E\u4FDD\u5B58\u65E5\u6570",
-  "Recovery storage limit": "\u5FA9\u5143\u30C7\u30FC\u30BF\u306E\u4FDD\u5B58\u5BB9\u91CF",
-  "Clear history": "\u5C65\u6B74\u3092\u6D88\u53BB",
-  "Back": "\u623B\u308B",
-  "Forward": "\u9032\u3080",
-  "Reload": "\u518D\u8AAD\u307F\u8FBC\u307F",
-  "Stop loading": "\u8AAD\u307F\u8FBC\u307F\u3092\u505C\u6B62",
-  "Open home": "\u30DB\u30FC\u30E0\u3092\u958B\u304F",
-  "Search browser tabs": "\u30D6\u30E9\u30A6\u30B6\u306E\u30BF\u30D6\u3092\u691C\u7D22",
-  "Open Quick Switcher": "\u30AF\u30A4\u30C3\u30AF\u30B9\u30A4\u30C3\u30C1\u30E3\u30FC\u3092\u958B\u304F",
-  "Zoom in": "\u62E1\u5927",
-  "Zoom out": "\u7E2E\u5C0F",
-  "Reset site zoom": "\u3053\u306E\u30B5\u30A4\u30C8\u306E\u30BA\u30FC\u30E0\u3092\u30EA\u30BB\u30C3\u30C8",
-  "Inspect page": "\u958B\u767A\u8005\u30C4\u30FC\u30EB\u3092\u958B\u304F",
-  "Browser menu": "\u30D6\u30E9\u30A6\u30B6\u30E1\u30CB\u30E5\u30FC",
-  "New browser tab": "\u65B0\u3057\u3044\u30D6\u30E9\u30A6\u30B6\u30BF\u30D6",
-  "Search the web": "\u30A6\u30A7\u30D6\u3092\u691C\u7D22",
-  "Search Vault": "Vault\u3092\u691C\u7D22",
-  "Web bookmarks": "\u30A6\u30A7\u30D6\u306E\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF",
-  "Recently opened files": "\u6700\u8FD1\u958B\u3044\u305F\u30D5\u30A1\u30A4\u30EB",
-  "Bookmarked files": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3057\u305F\u30D5\u30A1\u30A4\u30EB",
-  "Loading\u2026": "\u8AAD\u307F\u8FBC\u307F\u4E2D\u2026",
-  "Offline": "\u30AA\u30D5\u30E9\u30A4\u30F3",
-  "Page could not be loaded": "\u30DA\u30FC\u30B8\u3092\u8AAD\u307F\u8FBC\u3081\u307E\u305B\u3093\u3067\u3057\u305F",
-  "Open browser": "\u30D6\u30E9\u30A6\u30B6\u3092\u958B\u304F",
-  "Open browser history": "\u30D6\u30E9\u30A6\u30B6\u306E\u5C65\u6B74\u3092\u958B\u304F",
-  "Open browser bookmarks": "\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u958B\u304F",
-  "Migrate browsing data from Surfing": "Surfing\u306E\u95B2\u89A7\u30C7\u30FC\u30BF\u3092\u79FB\u884C",
-  "Import bookmarks from Web viewer Bookmarks": "Web viewer Bookmarks\u304B\u3089\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF\u3092\u53D6\u308A\u8FBC\u3080",
-  "Reopen last closed browser tab": "\u6700\u5F8C\u306B\u9589\u3058\u305F\u30BF\u30D6\u3092\u958B\u304F",
-  "Bookmark current page": "\u73FE\u5728\u306E\u30DA\u30FC\u30B8\u3092\u30D6\u30C3\u30AF\u30DE\u30FC\u30AF"
-};
-
 // src/core/session-restore.ts
 function cloneSessionCheckpoint(checkpoint) {
   return {
@@ -4017,14 +5650,14 @@ function resolveTabLayoutPolicy(style) {
 }
 
 // src/settings/settings-tab.ts
-var import_obsidian3 = require("obsidian");
+var import_obsidian13 = require("obsidian");
 
 // src/ui/confirm-modal.ts
-var import_obsidian2 = require("obsidian");
+var import_obsidian12 = require("obsidian");
 function confirmAction(app, title, message, confirmLabel = "Delete") {
   return new Promise((resolve) => new ConfirmActionModal(app, title, message, confirmLabel, resolve).open());
 }
-var ConfirmActionModal = class extends import_obsidian2.Modal {
+var ConfirmActionModal = class extends import_obsidian12.Modal {
   constructor(app, titleText, message, confirmLabel, resolveResult) {
     super(app);
     this.titleText = titleText;
@@ -4095,8 +5728,38 @@ function permissionDecisionLabel(decision) {
   return t("Ask next time");
 }
 
+// src/settings/section-navigation.ts
+function renderSettingsSectionNavigation(container) {
+  const headings = Array.from(container.querySelectorAll(".setting-item-heading"));
+  if (headings.length <= 1) return;
+  const rootHeading = headings[0];
+  if (!rootHeading) return;
+  const nav = container.createEl("nav", {
+    cls: "ubc-settings-section-nav",
+    attr: { "aria-label": t("Settings sections") }
+  });
+  const destinationCount = headings.length - 1;
+  headings.slice(1).forEach((heading, index) => {
+    const name = heading.querySelector(".setting-item-name")?.textContent?.trim();
+    if (!name) return;
+    heading.id = `ubc-settings-section-${index}`;
+    heading.addClass("ubc-settings-section-target");
+    const button2 = nav.createEl("button", {
+      text: name,
+      attr: { type: "button", "aria-controls": heading.id, title: name }
+    });
+    button2.addEventListener("click", () => {
+      heading.scrollIntoView({ block: "start", behavior: "auto" });
+      heading.setAttribute("tabindex", "-1");
+      heading.focus({ preventScroll: true });
+    });
+  });
+  if (destinationCount > 0) rootHeading.after(nav);
+  else nav.remove();
+}
+
 // src/settings/settings-tab.ts
-var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
+var BrowserSettingTab = class extends import_obsidian13.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -4104,27 +5767,27 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian3.Setting(containerEl).setName(t("Unified Browser Core")).setHeading();
-    new import_obsidian3.Setting(containerEl).setName(t("Language")).setDesc(t("Choose the language used by Browser Core.")).addDropdown((dropdown) => dropdown.addOption("auto", t("Follow Obsidian")).addOption("en", t("English")).addOption("ja", "\u65E5\u672C\u8A9E").setValue(this.plugin.core.settings().language).onChange((value) => {
+    new import_obsidian13.Setting(containerEl).setName(t("Unified Browser Core")).setHeading();
+    new import_obsidian13.Setting(containerEl).setName(t("Language")).setDesc(t("Choose the language used by Browser Core.")).addDropdown((dropdown) => dropdown.addOption("auto", t("Follow Obsidian")).addOption("en", t("English")).addOption("ja", "\u65E5\u672C\u8A9E").setValue(this.plugin.core.settings().language).onChange((value) => {
       const language2 = value;
       this.plugin.core.updateSettings({ language: language2 });
       setLanguage(language2);
       this.plugin.refreshLanguage();
       this.display();
     }));
-    new import_obsidian3.Setting(containerEl).setName(t("Playback and authentication")).setHeading();
-    new import_obsidian3.Setting(containerEl).setName(t("Password manager")).setDesc(t("Manage the encrypted vault, Windows Hello, recovery keys, backups, and automatic locking.")).addButton((button2) => button2.setButtonText(t("Open password vault")).onClick(() => void this.plugin.openBrowser({ url: "browser://passwords" })));
-    new import_obsidian3.Setting(containerEl).setName(t("Autoplay")).setDesc(t("Block audible autoplay until you interact with the page. Muted videos may still play. Reopen tabs after changing this setting.")).addDropdown((dropdown) => dropdown.addOption("block-audible", t("Block audible autoplay")).addOption("allow", t("Allow autoplay")).setValue(this.plugin.core.settings().autoplayPolicy).onChange((value) => {
+    new import_obsidian13.Setting(containerEl).setName(t("Playback and authentication")).setHeading();
+    new import_obsidian13.Setting(containerEl).setName(t("Password manager")).setDesc(t("Manage the encrypted vault, Windows Hello, recovery keys, backups, and automatic locking.")).addButton((button2) => button2.setButtonText(t("Open password vault")).onClick(() => void this.plugin.openBrowser({ url: "browser://passwords" })));
+    new import_obsidian13.Setting(containerEl).setName(t("Autoplay")).setDesc(t("Block audible autoplay until you interact with the page. Muted videos may still play. Reopen tabs after changing this setting.")).addDropdown((dropdown) => dropdown.addOption("block-audible", t("Block audible autoplay")).addOption("allow", t("Allow autoplay")).setValue(this.plugin.core.settings().autoplayPolicy).onChange((value) => {
       if (value === "allow" || value === "block-audible") this.plugin.core.updateSettings({ autoplayPolicy: value });
     }));
-    new import_obsidian3.Setting(containerEl).setName(t("Block passkey requests")).setDesc(t("Prevent sites from requesting or creating passkeys, including requests you start yourself. Turn off to sign in with a passkey. Reload pages after changing this setting.")).addToggle((toggle) => toggle.setValue(this.plugin.core.settings().blockPasskeyRequests).onChange((value) => this.plugin.core.updateSettings({ blockPasskeyRequests: value })));
-    new import_obsidian3.Setting(containerEl).setName(t("Tab style")).setDesc(t("Firefox keeps a readable minimum tab width and overflows horizontally. Chrome compresses tabs more aggressively.")).addDropdown(
+    new import_obsidian13.Setting(containerEl).setName(t("Block passkey requests")).setDesc(t("Prevent sites from requesting or creating passkeys, including requests you start yourself. Turn off to sign in with a passkey. Reload pages after changing this setting.")).addToggle((toggle) => toggle.setValue(this.plugin.core.settings().blockPasskeyRequests).onChange((value) => this.plugin.core.updateSettings({ blockPasskeyRequests: value })));
+    new import_obsidian13.Setting(containerEl).setName(t("Tab style")).setDesc(t("Firefox keeps a readable minimum tab width and overflows horizontally. Chrome compresses tabs more aggressively.")).addDropdown(
       (dropdown) => dropdown.addOption("firefox", t("Firefox")).addOption("chrome", t("Chrome")).setValue(this.plugin.core.settings().tabStyle).onChange((value) => {
         this.plugin.core.updateSettings({ tabStyle: value });
         this.plugin.applyTabStyle();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName(t("Use Browser Core tab layout")).setDesc(t("Apply the selected browser tab style only to panes that contain Browser Core tabs.")).addToggle(
+    new import_obsidian13.Setting(containerEl).setName(t("Use Browser Core tab layout")).setDesc(t("Apply the selected browser tab style only to panes that contain Browser Core tabs.")).addToggle(
       (toggle) => toggle.setValue(this.plugin.core.settings().tabStripIntegrationEnabled).onChange((value) => {
         this.plugin.core.updateSettings({ tabStripIntegrationEnabled: value });
         this.plugin.applyTabStyle();
@@ -4133,7 +5796,7 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
     const currentSearchTemplate = this.plugin.core.settings().searchUrlTemplate;
     const currentSearchPreset = searchPresetForTemplate(currentSearchTemplate);
     let customSearchSetting;
-    const searchEngineSetting = new import_obsidian3.Setting(containerEl).setName(t("Web search engine")).setDesc(t("Used when Browser Core treats text as a web search rather than an address."));
+    const searchEngineSetting = new import_obsidian13.Setting(containerEl).setName(t("Web search engine")).setDesc(t("Used when Browser Core treats text as a web search rather than an address."));
     searchEngineSetting.addDropdown((dropdown) => {
       for (const preset of SEARCH_PRESETS) dropdown.addOption(preset.id, preset.name);
       dropdown.addOption("custom", t("Custom"));
@@ -4145,55 +5808,121 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
         }
       });
     });
-    customSearchSetting = new import_obsidian3.Setting(containerEl).setName(t("Custom search URL")).setDesc(t("Use {query} where the encoded search text should be inserted.")).addText(
+    customSearchSetting = new import_obsidian13.Setting(containerEl).setName(t("Custom search URL")).setDesc(t("Use {query} where the encoded search text should be inserted.")).addText(
       (text) => text.setPlaceholder("https://search.example/?q={query}").setValue(currentSearchTemplate).onChange((value) => {
         const template = value.trim();
         if (template.includes("{query}")) this.plugin.core.updateSettings({ searchUrlTemplate: template });
       })
     );
     customSearchSetting.settingEl.style.display = currentSearchPreset ? "none" : "";
-    new import_obsidian3.Setting(containerEl).setName(t("Migration")).setHeading();
+    new import_obsidian13.Setting(containerEl).setName(t("Migration")).setHeading();
+    new import_obsidian13.Setting(containerEl).setName(t("Sync bookmarks with Vault notes")).setDesc(t("Optional two-way sync in the dedicated UBC Bookmarks folder. Removing a managed note removes its linked UBC bookmark; Surfing files are never modified.")).addToggle((toggle) => toggle.setValue(this.plugin.vaultBookmarkMirror.enabled).onChange(async (enabled) => {
+      await this.plugin.vaultBookmarkMirror.setEnabled(enabled);
+      this.display();
+    }));
     const surfingMigration = this.plugin.core.state.surfingMigration;
-    new import_obsidian3.Setting(containerEl).setName(t("Migrate from Surfing")).setDesc(surfingMigration?.completedAt ? t("Completed. Original Surfing data was kept. Backup: {v0}", { v0: surfingMigration.backupPath }) : t("Adopt Surfing's persistent login session, import bookmarks and compatible settings, and copy open tabs. Existing Browser Core data and Surfing source files are kept.")).addButton((button2) => button2.setButtonText(t(surfingMigration?.completedAt ? "Migrated" : surfingMigration ? "Resume migration" : "Preview and migrate")).setDisabled(Boolean(surfingMigration?.completedAt)).onClick(async () => {
+    new import_obsidian13.Setting(containerEl).setName(t("Migrate from Surfing")).setDesc(surfingMigration?.completedAt ? t("Completed. Original Surfing data was kept. Backup: {v0}", { v0: surfingMigration.backupPath }) : t("Adopt Surfing's persistent login session, import bookmarks and compatible settings, and copy open tabs. Existing Browser Core data and Surfing source files are kept.")).addButton((button2) => button2.setButtonText(t(surfingMigration?.completedAt ? "Migrated" : surfingMigration ? "Resume migration" : "Preview and migrate")).setDisabled(Boolean(surfingMigration?.completedAt)).onClick(async () => {
       await this.plugin.migrateFromSurfing();
       this.display();
     }));
-    new import_obsidian3.Setting(containerEl).setName(t("Home")).setHeading();
-    new import_obsidian3.Setting(containerEl).setName(t("Replace new empty tabs with Home")).setDesc(t("A newly created empty Obsidian tab becomes the Browser Core Home surface.")).addToggle(
+    new import_obsidian13.Setting(containerEl).setName(t("Home")).setHeading();
+    new import_obsidian13.Setting(containerEl).setName(t("Replace new empty tabs with Home")).setDesc(t("A newly created empty Obsidian tab becomes the Browser Core Home surface.")).addToggle(
       (toggle) => toggle.setValue(this.plugin.core.settings().replaceEmptyTabsWithHome).onChange((value) => {
         this.plugin.core.updateSettings({ replaceEmptyTabsWithHome: value });
         if (value) void this.plugin.replaceMostRecentEmptyLeafWithHome();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName(t("Default Home search")).setDesc(t("Vault searches files in this vault. Web searches the web or opens an address.")).addDropdown(
-      (dropdown) => dropdown.addOption("vault", t("Vault files")).addOption("web", t("Web")).setValue(this.plugin.core.settings().homeSearchMode).onChange((value) => {
-        if (value === "vault" || value === "web") {
+    const hasOmnisearch = this.plugin.homeAdapter.hasOmnisearch();
+    new import_obsidian13.Setting(containerEl).setName(t("Default Home search")).setDesc(t("Vault searches files in this vault. Web searches the web or opens an address.") + (hasOmnisearch ? "" : " " + t("Omnisearch is not enabled."))).addDropdown((dropdown) => {
+      dropdown.addOption("vault", t("Vault files")).addOption("web", t("Web"));
+      if (hasOmnisearch) dropdown.addOption("omnisearch", "Omnisearch");
+      dropdown.setValue(!hasOmnisearch && this.plugin.core.settings().homeSearchMode === "omnisearch" ? "vault" : this.plugin.core.settings().homeSearchMode).onChange((value) => {
+        if (value === "vault" || value === "web" || value === "omnisearch" && hasOmnisearch) {
           this.plugin.core.updateSettings({ homeSearchMode: value });
           this.plugin.refreshBrowserViews();
         }
-      })
-    );
-    new import_obsidian3.Setting(containerEl).setName(t("Show bookmarked Vault files on Home")).setDesc(t("Reads file bookmarks from Obsidian's built-in Bookmarks plugin without mixing them with web bookmarks.")).addToggle(
+      });
+    });
+    const homeToggle = (title, description, key) => {
+      new import_obsidian13.Setting(containerEl).setName(t(title)).setDesc(t(description)).addToggle((toggle) => toggle.setValue(this.plugin.core.settings()[key]).onChange((value) => {
+        this.plugin.core.updateSettings({ [key]: value });
+        this.plugin.refreshBrowserViews();
+      }));
+    };
+    const homeCount = (title, key, upper = 25) => {
+      new import_obsidian13.Setting(containerEl).setName(t(title)).addSlider((slider) => slider.setLimits(1, upper, 1).setDynamicTooltip().setValue(this.plugin.core.settings()[key]).onChange((value) => {
+        this.plugin.core.updateSettings({ [key]: value });
+        this.plugin.refreshBrowserViews();
+      }));
+    };
+    homeToggle("Search only Markdown files", "When enabled, Vault search excludes attachments.", "homeMarkdownOnly");
+    homeToggle("Show uncreated linked notes", "Include unresolved Markdown links in Vault search results.", "homeShowUnresolvedLinks");
+    homeToggle("Show file paths in search", "Show each result's path or matched alias.", "homeShowFilePaths");
+    homeToggle("Show search shortcuts", "Show keyboard guidance below Home search.", "homeShowShortcuts");
+    if (hasOmnisearch) homeToggle("Show Omnisearch excerpts", "Display a text excerpt for Omnisearch results.", "homeShowOmnisearchExcerpts");
+    homeCount("Search result count", "homeMaxSearchResults");
+    new import_obsidian13.Setting(containerEl).setName(t("Search delay (ms)")).setDesc(t("Delay between typing and updating suggestions.")).addSlider((slider) => slider.setLimits(0, 500, 10).setDynamicTooltip().setValue(this.plugin.core.settings().homeSearchDelayMs).onChange((value) => this.plugin.core.updateSettings({ homeSearchDelayMs: value })));
+    new import_obsidian13.Setting(containerEl).setName(t("Show bookmarked Vault files on Home")).setDesc(t("Reads file bookmarks from Obsidian's built-in Bookmarks plugin without mixing them with web bookmarks.")).addToggle(
       (toggle) => toggle.setValue(this.plugin.core.settings().showVaultBookmarksOnHome).onChange((value) => {
         this.plugin.core.updateSettings({ showVaultBookmarksOnHome: value });
         this.plugin.refreshBrowserViews();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName(t("Show recent Vault files on Home")).setDesc(t("Uses Obsidian's recent-file list; Browser Core does not maintain a duplicate recent-file database.")).addToggle(
+    new import_obsidian13.Setting(containerEl).setName(t("Show recent Vault files on Home")).setDesc(t("Uses Obsidian's recent-file list; Browser Core does not maintain a duplicate recent-file database.")).addToggle(
       (toggle) => toggle.setValue(this.plugin.core.settings().showRecentVaultFilesOnHome).onChange((value) => {
         this.plugin.core.updateSettings({ showRecentVaultFilesOnHome: value });
         this.plugin.refreshBrowserViews();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName(t("Browser startup")).setDesc(t("Choose what happens when Obsidian starts and no browser tabs are already open.")).addDropdown(
+    homeCount("Bookmarked file count", "homeMaxBookmarkedFiles");
+    homeCount("Recent file count", "homeMaxRecentFiles");
+    new import_obsidian13.Setting(containerEl).setName(t("Restore hidden recent files")).setDesc(t("Make files hidden from the Home recent list visible again.")).addButton((button2) => button2.setButtonText(t("Restore")).onClick(() => {
+      this.plugin.core.updateSettings({ homeHiddenRecentPaths: [] });
+      this.plugin.refreshBrowserViews();
+    }));
+    new import_obsidian13.Setting(containerEl).setName(t("Home appearance")).setHeading();
+    new import_obsidian13.Setting(containerEl).setName(t("Home title")).addText((text) => text.setValue(this.plugin.core.settings().homeTitle).onChange((value) => {
+      this.plugin.core.updateSettings({ homeTitle: value });
+      this.plugin.refreshBrowserViews();
+    }));
+    new import_obsidian13.Setting(containerEl).setName(t("Home logo")).setDesc(t("Lucide icon name, Vault image path, HTTPS image URL, or blank.")).addText((text) => text.setValue(this.plugin.core.settings().homeLogo).onChange((value) => {
+      this.plugin.core.updateSettings({ homeLogo: value.trim() });
+      this.plugin.refreshBrowserViews();
+    }));
+    new import_obsidian13.Setting(containerEl).setName(t("Home title font size")).addText((text) => text.setValue(this.plugin.core.settings().homeTitleFontSize).onChange((value) => {
+      if (CSS.supports("font-size", value)) {
+        this.plugin.core.updateSettings({ homeTitleFontSize: value });
+        this.plugin.refreshBrowserViews();
+      }
+    }));
+    new import_obsidian13.Setting(containerEl).setName(t("Home title weight")).addSlider((slider) => slider.setLimits(100, 900, 100).setDynamicTooltip().setValue(this.plugin.core.settings().homeTitleFontWeight).onChange((value) => {
+      this.plugin.core.updateSettings({ homeTitleFontWeight: value });
+      this.plugin.refreshBrowserViews();
+    }));
+    new import_obsidian13.Setting(containerEl).setName(t("Home title font family")).addText((text) => text.setPlaceholder(t("Default theme font")).setValue(this.plugin.core.settings().homeTitleFontFamily).onChange((value) => {
+      this.plugin.core.updateSettings({ homeTitleFontFamily: value });
+      this.plugin.refreshBrowserViews();
+    }));
+    new import_obsidian13.Setting(containerEl).setName(t("Home title color")).addText((text) => text.setPlaceholder(t("Theme color (blank)")).setValue(this.plugin.core.settings().homeTitleColor).onChange((value) => {
+      if (!value || CSS.supports("color", value)) {
+        this.plugin.core.updateSettings({ homeTitleColor: value });
+        this.plugin.refreshBrowserViews();
+      }
+    }));
+    homeToggle("Accent selected search result", "Use the theme accent color for the active suggestion.", "homeSelectionAccent");
+    new import_obsidian13.Setting(containerEl).setName(t("Home on Obsidian startup")).setDesc(t("Choose whether to focus a Home tab on startup, optionally closing other workspace tabs.")).addDropdown((dropdown) => dropdown.addOption("normal", t("Use browser startup behavior")).addOption("focus-or-open", t("Focus or open Home")).addOption("home-only", t("Home only (close other workspace tabs)")).setValue(this.plugin.core.settings().homeStartupMode).onChange((value) => {
+      if (value === "normal" || value === "focus-or-open" || value === "home-only")
+        this.plugin.core.updateSettings({ homeStartupMode: value });
+    }));
+    new import_obsidian13.Setting(containerEl).setName(t("Browser startup")).setDesc(t("Choose what happens when Obsidian starts and no browser tabs are already open.")).addDropdown(
       (dropdown) => dropdown.addOption("restore", t("Restore previous browser session")).addOption("home", t("Open Home")).addOption("none", t("Do nothing")).setValue(this.plugin.core.settings().startupBehavior).onChange((value) => {
         if (value === "restore" || value === "home" || value === "none") {
           this.plugin.core.updateSettings({ startupBehavior: value });
         }
       })
     );
-    new import_obsidian3.Setting(containerEl).setName(t("History & recovery")).setHeading();
-    new import_obsidian3.Setting(containerEl).setName(t("History day starts at")).setDesc(t("History day boundaries default to 04:00 so late-night work stays together.")).addText((text) => {
+    new import_obsidian13.Setting(containerEl).setName(t("History & recovery")).setHeading();
+    new import_obsidian13.Setting(containerEl).setName(t("History day starts at")).setDesc(t("History day boundaries default to 04:00 so late-night work stays together.")).addText((text) => {
       text.inputEl.type = "time";
       text.setValue(formatDayStart(this.plugin.core.settings().historyDayStartMinutes));
       text.onChange((value) => {
@@ -4201,7 +5930,7 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
         if (minutes !== void 0) this.plugin.core.updateSettings({ historyDayStartMinutes: minutes });
       });
     });
-    new import_obsidian3.Setting(containerEl).setName(t("History retention (days)")).setDesc(t("0 keeps browsing history until you delete it. Protected tab histories are not removed automatically.")).addText(
+    new import_obsidian13.Setting(containerEl).setName(t("History retention (days)")).setDesc(t("0 keeps browsing history until you delete it. Protected tab histories are not removed automatically.")).addText(
       (text) => text.setValue(String(this.plugin.core.settings().historyRetentionDays)).onChange((value) => {
         const days = Number(value);
         if (Number.isFinite(days) && days >= 0) this.plugin.core.updateSettings({ historyRetentionDays: days });
@@ -4210,7 +5939,7 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
     const advancedStorage = containerEl.createEl("details", { cls: "ubc-settings-advanced" });
     advancedStorage.createEl("summary", { text: t("Advanced history and recovery storage") });
     const advancedStorageEl = advancedStorage.createDiv({ cls: "ubc-settings-advanced-content" });
-    new import_obsidian3.Setting(advancedStorageEl).setName(t("Automatic history size limit")).setDesc(t("0 disables size-based cleanup. A positive value allows the oldest closed, unprotected tab histories to be removed when stored history grows past this limit.")).addText(
+    new import_obsidian13.Setting(advancedStorageEl).setName(t("Automatic history size limit")).setDesc(t("0 disables size-based cleanup. A positive value allows the oldest closed, unprotected tab histories to be removed when stored history grows past this limit.")).addText(
       (text) => text.setValue(String(this.plugin.core.settings().historyMaxNodes)).onChange((value) => {
         const count = Number(value);
         if (Number.isFinite(count) && (count === 0 || count >= 1e3)) {
@@ -4218,37 +5947,37 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
         }
       })
     );
-    new import_obsidian3.Setting(containerEl).setName(t("Detailed tab recovery retention (days)")).setDesc(t("How long Browser Core should keep extra state that can restore recently closed tabs more accurately.")).addText(
+    new import_obsidian13.Setting(containerEl).setName(t("Detailed tab recovery retention (days)")).setDesc(t("How long Browser Core should keep extra state that can restore recently closed tabs more accurately.")).addText(
       (text) => text.setValue(String(this.plugin.core.settings().restoreRetentionDays)).onChange((value) => {
         const days = Number(value);
         if (Number.isFinite(days) && days >= 0) this.plugin.core.updateSettings({ restoreRetentionDays: days });
       })
     );
-    new import_obsidian3.Setting(advancedStorageEl).setName(t("Detailed recovery storage limit (MB)")).setDesc(t("When this budget is exceeded, older unprotected recovery data may fall back to URL-only reopening.")).addText(
+    new import_obsidian13.Setting(advancedStorageEl).setName(t("Detailed recovery storage limit (MB)")).setDesc(t("When this budget is exceeded, older unprotected recovery data may fall back to URL-only reopening.")).addText(
       (text) => text.setValue(String(this.plugin.core.settings().restoreStorageLimitMb)).onChange((value) => {
         const mb = Number(value);
         if (Number.isFinite(mb) && mb >= 16) this.plugin.core.updateSettings({ restoreStorageLimitMb: mb });
       })
     );
-    new import_obsidian3.Setting(containerEl).setName(t("Form recovery")).setDesc(t("Allow form recovery as a feature. Capture remains opt-in per site, and password/payment credentials are excluded.")).addToggle(
+    new import_obsidian13.Setting(containerEl).setName(t("Form recovery")).setDesc(t("Allow form recovery as a feature. Capture remains opt-in per site, and password/payment credentials are excluded.")).addToggle(
       (toggle) => toggle.setValue(this.plugin.core.settings().formRecoveryEnabled).onChange((value) => {
         this.plugin.core.updateSettings({ formRecoveryEnabled: value });
         this.plugin.refreshFormRecoveryInstrumentation();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName(t("Form recovery retention (days)")).setDesc(t("How long saved non-credential form values are retained.")).addText(
+    new import_obsidian13.Setting(containerEl).setName(t("Form recovery retention (days)")).setDesc(t("How long saved non-credential form values are retained.")).addText(
       (text) => text.setValue(String(this.plugin.core.settings().formRecoveryRetentionDays)).onChange((value) => {
         const days = Number(value);
         if (Number.isFinite(days) && days >= 0) this.plugin.core.updateSettings({ formRecoveryRetentionDays: days });
       })
     );
-    new import_obsidian3.Setting(advancedStorageEl).setName(t("Saved form versions per page")).setDesc(t("How many recent recovery versions to keep for one page. Multi-step forms can use values from several versions.")).addText(
+    new import_obsidian13.Setting(advancedStorageEl).setName(t("Saved form versions per page")).setDesc(t("How many recent recovery versions to keep for one page. Multi-step forms can use values from several versions.")).addText(
       (text) => text.setValue(String(this.plugin.core.settings().formRecoveryMaxSnapshotsPerUrl)).onChange((value) => {
         const count = Number(value);
         if (Number.isFinite(count) && count >= 1) this.plugin.core.updateSettings({ formRecoveryMaxSnapshotsPerUrl: Math.floor(count) });
       })
     );
-    new import_obsidian3.Setting(advancedStorageEl).setName(t("Pages with saved form recovery")).setDesc(t("Maximum number of distinct pages that may keep form recovery data.")).addText(
+    new import_obsidian13.Setting(advancedStorageEl).setName(t("Pages with saved form recovery")).setDesc(t("Maximum number of distinct pages that may keep form recovery data.")).addText(
       (text) => text.setValue(String(this.plugin.core.settings().formRecoveryMaxUrls)).onChange((value) => {
         const count = Number(value);
         if (Number.isFinite(count) && count >= 1) this.plugin.core.updateSettings({ formRecoveryMaxUrls: Math.floor(count) });
@@ -4267,9 +5996,9 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
     );
     const recoveryPolicies = this.plugin.core.formRecovery.policies();
     if (recoveryPolicies.length) {
-      new import_obsidian3.Setting(containerEl).setName(t("Form recovery by site")).setHeading();
+      new import_obsidian13.Setting(containerEl).setName(t("Form recovery by site")).setHeading();
       for (const policy of recoveryPolicies) {
-        new import_obsidian3.Setting(containerEl).setName(`${this.plugin.core.containers.nameFor(policy.containerId)} \xB7 ${policy.origin}`).setDesc(
+        new import_obsidian13.Setting(containerEl).setName(`${this.plugin.core.containers.nameFor(policy.containerId)} \xB7 ${policy.origin}`).setDesc(
           policy.disabled ? t("Disabled for this site") : t("{v0} excluded field(s)", { v0: policy.excludedFieldKeys.length })
         ).addExtraButton(
           (button2) => button2.setIcon("rotate-ccw").setTooltip(t("Reset form recovery for this site")).onClick(async () => {
@@ -4287,8 +6016,8 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
         );
       }
     }
-    new import_obsidian3.Setting(containerEl).setName(t("Browsing data")).setHeading();
-    new import_obsidian3.Setting(containerEl).setName(t("Clear browsing history")).setDesc(t("Deletes browsing history and detailed recovery data for closed tabs. Open tabs stay open.")).addButton(
+    new import_obsidian13.Setting(containerEl).setName(t("Browsing data")).setHeading();
+    new import_obsidian13.Setting(containerEl).setName(t("Clear browsing history")).setDesc(t("Deletes browsing history and detailed recovery data for closed tabs. Open tabs stay open.")).addButton(
       (button2) => button2.setButtonText(t("Clear history")).setWarning().onClick(async () => {
         const confirmed = await confirmAction(
           this.app,
@@ -4301,7 +6030,7 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.display();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName(t("Clear detailed tab recovery")).setDesc(t("Keeps browsing history, but removes extra state used to restore recently closed tabs more accurately. Open tabs start collecting detailed recovery again after they are reopened.")).addButton(
+    new import_obsidian13.Setting(containerEl).setName(t("Clear detailed tab recovery")).setDesc(t("Keeps browsing history, but removes extra state used to restore recently closed tabs more accurately. Open tabs start collecting detailed recovery again after they are reopened.")).addButton(
       (button2) => button2.setButtonText(t("Clear recovery data")).setWarning().onClick(async () => {
         const confirmed = await confirmAction(
           this.app,
@@ -4313,7 +6042,7 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.plugin.clearRichRestoreData();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName(t("Clear form recovery data")).setDesc(t("Deletes all saved non-credential form values without changing which sites have form recovery enabled.")).addButton(
+    new import_obsidian13.Setting(containerEl).setName(t("Clear form recovery data")).setDesc(t("Deletes all saved non-credential form values without changing which sites have form recovery enabled.")).addButton(
       (button2) => button2.setButtonText(t("Clear form data")).setWarning().onClick(async () => {
         const confirmed = await confirmAction(
           this.app,
@@ -4325,7 +6054,7 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.plugin.clearFormRecoveryData();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName(t("Reset site permissions")).setDesc(t("Returns saved site permissions to Ask next time. Container cookies and site storage are not changed.")).addButton(
+    new import_obsidian13.Setting(containerEl).setName(t("Reset site permissions")).setDesc(t("Returns saved site permissions to Ask next time. Container cookies and site storage are not changed.")).addButton(
       (button2) => button2.setButtonText(t("Reset permissions")).setWarning().onClick(async () => {
         const confirmed = await confirmAction(
           this.app,
@@ -4338,62 +6067,62 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.display();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName(t("Appearance")).setHeading();
-    new import_obsidian3.Setting(containerEl).setName(t("Initial background color override")).setDesc(t("Choose the background before the site paints. The site's own colors remain in control once painted.")).addDropdown((dropdown) => dropdown.addOption("none", t("No override")).addOption("theme", t("Follow theme")).addOption("custom", t("Custom color")).setValue(this.plugin.core.settings().initialBackgroundOverride ? this.plugin.core.settings().initialBackgroundSource : "none").onChange((value) => {
+    new import_obsidian13.Setting(containerEl).setName(t("Appearance")).setHeading();
+    new import_obsidian13.Setting(containerEl).setName(t("Initial background color override")).setDesc(t("Choose the background before the site paints. The site's own colors remain in control once painted.")).addDropdown((dropdown) => dropdown.addOption("none", t("No override")).addOption("theme", t("Follow theme")).addOption("custom", t("Custom color")).setValue(this.plugin.core.settings().initialBackgroundOverride ? this.plugin.core.settings().initialBackgroundSource : "none").onChange((value) => {
       this.plugin.core.updateSettings({ initialBackgroundOverride: value !== "none", initialBackgroundSource: value === "custom" ? "custom" : "theme" });
       this.plugin.refreshBrowserViews();
       this.display();
     }));
     if (this.plugin.core.settings().initialBackgroundOverride && this.plugin.core.settings().initialBackgroundSource === "custom") {
-      new import_obsidian3.Setting(containerEl).setName(t("Initial background color")).addColorPicker((picker) => picker.setValue(this.plugin.core.settings().initialBackgroundColor).onChange((value) => {
+      new import_obsidian13.Setting(containerEl).setName(t("Initial background color")).addColorPicker((picker) => picker.setValue(this.plugin.core.settings().initialBackgroundColor).onChange((value) => {
         this.plugin.core.updateSettings({ initialBackgroundColor: value });
         this.plugin.refreshBrowserViews();
       }));
     }
-    new import_obsidian3.Setting(containerEl).setName(t("Full-page loading shield")).setDesc(t("Cover the web page while a new page starts loading. Off by default to avoid a full-page flash.")).addToggle(
+    new import_obsidian13.Setting(containerEl).setName(t("Full-page loading shield")).setDesc(t("Cover the web page while a new page starts loading. Off by default to avoid a full-page flash.")).addToggle(
       (toggle) => toggle.setValue(this.plugin.core.settings().fullPageLoadingShield).onChange((value) => {
         this.plugin.core.updateSettings({ fullPageLoadingShield: value });
         this.plugin.refreshLoadingShields();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName(t("Reduced motion")).setDesc(t("Avoid large transitions, slides and parallax in Browser Core UI.")).addToggle(
+    new import_obsidian13.Setting(containerEl).setName(t("Reduced motion")).setDesc(t("Avoid large transitions, slides and parallax in Browser Core UI.")).addToggle(
       (toggle) => toggle.setValue(this.plugin.core.settings().reducedMotion).onChange((value) => {
         this.plugin.core.updateSettings({ reducedMotion: value });
         this.plugin.applyAccessibilityClasses();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName(t("Default web content zoom")).setDesc(t("Relative to this Obsidian window. Used by sites without a site-specific zoom override.")).addSlider(
+    new import_obsidian13.Setting(containerEl).setName(t("Default web content zoom")).setDesc(t("Relative to this Obsidian window. Used by sites without a site-specific zoom override.")).addSlider(
       (slider) => slider.setLimits(50, 200, 10).setDynamicTooltip().setValue(Math.round(this.plugin.core.settings().defaultZoomFactor * 100)).onChange((value) => {
         this.plugin.core.updateSettings({ defaultZoomFactor: value / 100 });
         this.plugin.refreshBrowserZoom();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName(t("Show bookmark bar")).setDesc(t("Your everyday pages, one click away.")).addToggle(
+    new import_obsidian13.Setting(containerEl).setName(t("Show bookmark bar")).setDesc(t("Your everyday pages, one click away.")).addToggle(
       (toggle) => toggle.setValue(this.plugin.core.settings().showFavoritesBar).onChange((value) => {
         this.plugin.core.updateSettings({ showFavoritesBar: value });
         this.plugin.refreshBrowserViews();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName(t("Bookmark bar display")).setDesc(t("Choose every bookmark and folder, or just the members you select.")).addDropdown((dropdown) => dropdown.addOption("all", t("Bookmark bar")).addOption("selected", t("Selected members")).setValue(this.plugin.core.settings().bookmarkBarMode).onChange((value) => {
+    new import_obsidian13.Setting(containerEl).setName(t("Bookmark bar display")).setDesc(t("Choose every bookmark and folder, or just the members you select.")).addDropdown((dropdown) => dropdown.addOption("all", t("Bookmark bar")).addOption("selected", t("Selected members")).setValue(this.plugin.core.settings().bookmarkBarMode).onChange((value) => {
       this.plugin.core.updateSettings({ bookmarkBarMode: value });
       this.plugin.refreshBrowserViews();
-    })).addButton((button2) => button2.setButtonText(t("Choose members")).onClick(() => void this.plugin.openBrowser({ url: "browser://bookmarks", state: { bookmarkLayout: "selected" } })));
-    new import_obsidian3.Setting(containerEl).setName(t("Containers")).setHeading();
-    new import_obsidian3.Setting(containerEl).setName(t("Container use")).setDesc(t("Off uses only the selected default container. Manual keeps other containers available without automatic site routing. Automatic also applies site default rules.")).addDropdown(
+    })).addButton((button2) => button2.setButtonText(t("Choose members")).onClick(() => void this.plugin.openBrowser({ url: "browser://bookmarks", state: { bookmarkLayout: "manage" } })));
+    new import_obsidian13.Setting(containerEl).setName(t("Containers")).setHeading();
+    new import_obsidian13.Setting(containerEl).setName(t("Container use")).setDesc(t("Off uses only the selected default container. Manual keeps other containers available without automatic site routing. Automatic also applies site default rules.")).addDropdown(
       (dropdown) => dropdown.addOption("off", t("Off")).addOption("manual", t("Manual")).addOption("automatic", t("Automatic")).setValue(this.plugin.core.settings().containerMode).onChange((value) => {
         this.plugin.core.updateSettings({ containerMode: value });
         this.plugin.refreshContainerPresentation();
         this.display();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName(t("Default container")).setDesc(t("Used for new browser tabs, including when container controls are off. Automatic mode may replace it with a site's default container.")).addDropdown((dropdown) => {
+    new import_obsidian13.Setting(containerEl).setName(t("Default container")).setDesc(t("Used for new browser tabs, including when container controls are off. Automatic mode may replace it with a site's default container.")).addDropdown((dropdown) => {
       for (const container of this.plugin.core.containers.list()) {
         dropdown.addOption(container.id, container.name);
       }
       dropdown.setValue(this.plugin.core.settings().defaultContainerId).onChange((value) => this.plugin.core.updateSettings({ defaultContainerId: value }));
     });
     for (const container of this.plugin.core.containers.list()) {
-      const row = new import_obsidian3.Setting(containerEl).setName(container.name).setDesc(t("Separate persistent login and site data")).addText(
+      const row = new import_obsidian13.Setting(containerEl).setName(container.name).setDesc(t("Separate persistent login and site data")).addText(
         (text) => text.setPlaceholder(t("Container name")).setValue(container.name).onChange((value) => {
           const next = value.trim();
           if (!next) return;
@@ -4443,7 +6172,7 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
       });
       row.settingEl.dataset.containerId = container.id;
     }
-    new import_obsidian3.Setting(containerEl).setName(t("Add container")).setDesc(t("Creates a separate persistent login and site data.")).addButton(
+    new import_obsidian13.Setting(containerEl).setName(t("Add container")).setDesc(t("Creates a separate persistent login and site data.")).addButton(
       (button2) => button2.setButtonText(t("Add")).onClick(() => {
         this.plugin.core.containers.create("Container");
         this.plugin.core.scheduleSave();
@@ -4452,9 +6181,9 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
     );
     const assignments = this.plugin.core.containers.assignments();
     if (assignments.length) {
-      new import_obsidian3.Setting(containerEl).setName(t("Site default containers")).setDesc(this.plugin.core.settings().containerMode === "automatic" ? t("Applied automatically when an independent navigation opens a matching site.") : t("Saved for later, but currently paused because automatic container routing is off.")).setHeading();
+      new import_obsidian13.Setting(containerEl).setName(t("Site default containers")).setDesc(this.plugin.core.settings().containerMode === "automatic" ? t("Applied automatically when an independent navigation opens a matching site.") : t("Saved for later, but currently paused because automatic container routing is off.")).setHeading();
       for (const rule of assignments) {
-        new import_obsidian3.Setting(containerEl).setName(rule.originPattern).setDesc(this.plugin.core.containers.nameFor(rule.containerId)).addExtraButton(
+        new import_obsidian13.Setting(containerEl).setName(rule.originPattern).setDesc(this.plugin.core.containers.nameFor(rule.containerId)).addExtraButton(
           (button2) => button2.setIcon("x").setTooltip(t("Forget site default container")).onClick(() => {
             this.plugin.core.containers.unassignOrigin(rule.originPattern);
             this.plugin.core.scheduleSave();
@@ -4465,9 +6194,9 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
     }
     const permissions = this.plugin.core.permissions.list();
     if (permissions.length) {
-      new import_obsidian3.Setting(containerEl).setName(t("Site permissions")).setHeading();
+      new import_obsidian13.Setting(containerEl).setName(t("Site permissions")).setHeading();
       for (const record of permissions) {
-        new import_obsidian3.Setting(containerEl).setName(permissionLabel(record.permission)).setDesc(`${record.origin} \xB7 ${this.plugin.core.containers.nameFor(record.containerId)} \xB7 ${permissionDecisionLabel(record.decision)}`).addDropdown(
+        new import_obsidian13.Setting(containerEl).setName(permissionLabel(record.permission)).setDesc(`${record.origin} \xB7 ${this.plugin.core.containers.nameFor(record.containerId)} \xB7 ${permissionDecisionLabel(record.decision)}`).addDropdown(
           (dropdown) => dropdown.addOption("ask", t("Ask next time")).addOption("allow", t("Allow")).addOption("block", t("Block")).setValue(record.decision).onChange((value) => {
             if (value === "ask") {
               this.plugin.core.permissions.remove(record.containerId, record.origin, record.permission);
@@ -4484,6 +6213,7 @@ var BrowserSettingTab = class extends import_obsidian3.PluginSettingTab {
         );
       }
     }
+    renderSettingsSectionNavigation(containerEl);
   }
 };
 function formatDayStart(totalMinutes) {
@@ -4685,7 +6415,7 @@ function bindAddressSuggestions(input, core, navigate) {
 }
 
 // src/passwords/ui.ts
-var import_obsidian4 = require("obsidian");
+var import_obsidian14 = require("obsidian");
 var import_promises = require("node:fs/promises");
 
 // src/passwords/crypto.ts
@@ -4750,7 +6480,7 @@ function button(parent, label2, action, primary = false) {
     try {
       await action();
     } catch {
-      new import_obsidian4.Notice(t("Password operation failed. Check the recovery key, OS keyring, and file access."));
+      new import_obsidian14.Notice(t("Password operation failed. Check the recovery key, OS keyring, and file access."));
     } finally {
       el.disabled = false;
     }
@@ -4764,7 +6494,7 @@ function field(parent, label2, value = "", type = "text") {
   input.value = value;
   return input;
 }
-var SensitiveModal = class extends import_obsidian4.Modal {
+var SensitiveModal = class extends import_obsidian14.Modal {
   constructor(app, vault, requireUnlocked = true) {
     super(app);
     this.vault = vault;
@@ -4924,7 +6654,7 @@ function renderPasswordPage(parent, app, vault) {
       idle.min = "1";
       idle.max = "60";
       idle.addEventListener("change", () => {
-        void vault.setIdleMinutes(Number(idle.value)).catch(() => new import_obsidian4.Notice(t("Enter a value from 1 to 60.")));
+        void vault.setIdleMinutes(Number(idle.value)).catch(() => new import_obsidian14.Notice(t("Enter a value from 1 to 60.")));
       });
       const search = field(page, "Search passwords", query, "search");
       const list = page.createDiv({ cls: "ubc-password-list" });
@@ -5163,8 +6893,206 @@ function observeGuestInteraction(webview, dismiss) {
   };
 }
 
+// src/adapters/guest-keyboard.ts
+function guestBrowserShortcut(input, findOpen) {
+  if (input.type !== "keyDown") return null;
+  const key = input.key?.toLowerCase();
+  if ((input.meta || input.control) && !input.alt) {
+    if (key === "f") return "find";
+    if (key === "l") return "address";
+    if (key === "g" && findOpen) return input.shift ? "find-previous" : "find-next";
+  }
+  if (!input.control && !input.meta && !input.alt && key === "f3" && findOpen) {
+    return input.shift ? "find-previous" : "find-next";
+  }
+  return null;
+}
+function bindGuestBrowserShortcuts(webview, findOpen, active, handle) {
+  const contents = resolveGuestWebContents(webview);
+  if (!contents?.on || !contents.removeListener) return void 0;
+  const listener = (event, input) => {
+    if (!active()) return;
+    const shortcut = guestBrowserShortcut(input, findOpen());
+    if (!shortcut) return;
+    event.preventDefault?.();
+    handle(shortcut);
+  };
+  contents.on("before-input-event", listener);
+  return () => {
+    try {
+      contents.removeListener("before-input-event", listener);
+    } catch {
+    }
+  };
+}
+
+// src/ui/browser-find.ts
+var import_obsidian15 = require("obsidian");
+var BrowserFindBar = class {
+  element;
+  input;
+  results;
+  prev;
+  next;
+  contents;
+  webview = null;
+  query = "";
+  requestId;
+  timer;
+  constructor(parent) {
+    const root = parent.createDiv({ cls: "ubc-find-bar is-hidden", attr: { role: "search", "aria-label": t("Find in page") } });
+    this.element = root;
+    this.input = root.createEl("input", {
+      cls: "ubc-find-input",
+      attr: { type: "search", "aria-label": t("Find in page"), placeholder: t("Find in page"), autocomplete: "off" }
+    });
+    this.results = root.createSpan({ cls: "ubc-find-results", attr: { role: "status", "aria-live": "polite" } });
+    const button2 = (icon, title, action) => {
+      const el = root.createEl("button", { cls: "ubc-find-button clickable-icon", attr: { type: "button", title, "aria-label": title } });
+      (0, import_obsidian15.setIcon)(el, icon);
+      el.addEventListener("click", action);
+      return el;
+    };
+    this.prev = button2("chevron-up", t("Previous match"), () => this.step(false));
+    this.next = button2("chevron-down", t("Next match"), () => this.step(true));
+    button2("x", t("Close find"), () => this.close());
+    this.input.addEventListener("input", () => {
+      this.cancelPending();
+      this.timer = setTimeout(() => {
+        this.timer = void 0;
+        this.search(true);
+      }, 120);
+    });
+    this.input.addEventListener("keydown", (event) => {
+      if (event.isComposing) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.close();
+        return;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        this.step(!event.shiftKey);
+      }
+    });
+    this.updateStatus();
+  }
+  get isOpen() {
+    return !this.element.hasClass("is-hidden");
+  }
+  attach(webview) {
+    if (this.webview === webview && this.contents) return;
+    this.detachGuest();
+    this.webview = webview;
+    const guest = resolveGuestWebContents(webview);
+    if (!guest?.findInPage || !guest.stopFindInPage || !guest.on || !guest.removeListener) return;
+    this.contents = guest;
+    guest.on("found-in-page", this.found);
+    if (this.isOpen && this.input.value) this.search(true);
+  }
+  open() {
+    this.element.removeClass("is-hidden");
+    this.input.focus();
+    this.input.select();
+    if (this.input.value && this.contents) this.search(true);
+  }
+  step(forward) {
+    this.cancelPending();
+    this.search(forward);
+  }
+  close() {
+    this.cancelPending();
+    this.element.addClass("is-hidden");
+    this.clearFind();
+    this.webview?.focus();
+  }
+  navigate() {
+    this.cancelPending();
+    this.element.addClass("is-hidden");
+    this.clearFind();
+  }
+  dispose() {
+    this.navigate();
+    this.detachGuest();
+    this.element.remove();
+  }
+  cancelPending() {
+    if (this.timer !== void 0) clearTimeout(this.timer);
+    this.timer = void 0;
+  }
+  search(forward) {
+    if (!this.isOpen) return;
+    const query = this.input.value;
+    if (!query) {
+      this.clearFind();
+      return;
+    }
+    if (this.query !== query) {
+      try {
+        this.contents?.stopFindInPage("clearSelection");
+      } catch {
+      }
+      this.query = query;
+    }
+    try {
+      this.requestId = this.contents?.findInPage(query, { forward, findNext: true });
+      this.updateStatus(void 0, void 0);
+    } catch {
+      this.results.textContent = t("Find unavailable");
+    }
+  }
+  clearFind() {
+    try {
+      this.contents?.stopFindInPage("clearSelection");
+    } catch {
+    }
+    this.query = "";
+    this.requestId = void 0;
+    this.updateStatus();
+  }
+  found = (_event, result) => {
+    if (!this.isOpen || !this.query) return;
+    if (this.requestId !== void 0 && result.requestId !== void 0 && result.requestId !== this.requestId) return;
+    this.updateStatus(result.activeMatchOrdinal ?? 0, result.matches ?? 0);
+  };
+  updateStatus(active, matches) {
+    const empty = !this.query;
+    this.results.textContent = empty ? "" : matches === void 0 ? t("Searching\u2026") : `${active ?? 0}/${matches}`;
+    this.prev.disabled = empty;
+    this.next.disabled = empty;
+  }
+  detachGuest() {
+    if (this.contents) {
+      try {
+        this.contents.removeListener("found-in-page", this.found);
+      } catch {
+      }
+    }
+    this.contents = void 0;
+    this.webview = null;
+    this.requestId = void 0;
+  }
+};
+
 // src/ui/browser-view.ts
-var import_obsidian14 = require("obsidian");
+var import_obsidian24 = require("obsidian");
+
+// src/adapters/guest-link-hover.ts
+function bindGuestLinkHover(webview, show) {
+  const contents = resolveGuestWebContents(webview);
+  if (!contents?.on || !contents.removeListener) return void 0;
+  const listener = (_event, url) => {
+    show(typeof url === "string" ? url.slice(0, 2048) : "");
+  };
+  contents.on("update-target-url", listener);
+  return () => {
+    try {
+      contents.removeListener("update-target-url", listener);
+    } catch {
+    }
+    show("");
+  };
+}
 
 // src/adapters/electron-zoom.ts
 function hostZoomFactor(doc) {
@@ -5273,10 +7201,10 @@ function classifyInPageNavigation(previousIndex, nextIndex, intent) {
 }
 
 // src/ui/context-menus.ts
-var import_obsidian10 = require("obsidian");
+var import_obsidian20 = require("obsidian");
 
 // src/ui/bookmark-editor.ts
-var import_obsidian6 = require("obsidian");
+var import_obsidian17 = require("obsidian");
 
 // src/bookmarks/bookmark-media.ts
 var BOOKMARK_MEDIA = [
@@ -5320,12 +7248,12 @@ function inferBookmarkMedia(rawUrl) {
 }
 
 // src/ui/bookmark-visual.ts
-var import_obsidian5 = require("obsidian");
+var import_obsidian16 = require("obsidian");
 function renderBookmarkVisual(parent, bookmark, className = "ubc-bookmark-visual", app) {
   const host = parent.createSpan({ cls: className, attr: { "aria-hidden": "true" } });
   const fallback = () => {
     host.empty();
-    (0, import_obsidian5.setIcon)(host, "bookmark");
+    (0, import_obsidian16.setIcon)(host, "bookmark");
   };
   if (bookmark.visualKind === "text") {
     const value = bookmark.visualValue?.trim();
@@ -5338,7 +7266,7 @@ function renderBookmarkVisual(parent, bookmark, className = "ubc-bookmark-visual
     return host;
   }
   if (bookmark.visualKind === "icon") {
-    (0, import_obsidian5.setIcon)(host, bookmark.visualValue?.trim() || "bookmark");
+    (0, import_obsidian16.setIcon)(host, bookmark.visualValue?.trim() || "bookmark");
     if (!host.firstElementChild) fallback();
     return host;
   }
@@ -5359,7 +7287,7 @@ function resolveCustomImage(value, app) {
   if (!source3) return void 0;
   if (/^(?:https?:|data:image\/|app:|file:)/i.test(source3)) return source3;
   const file = app?.vault.getAbstractFileByPath(source3);
-  return file instanceof import_obsidian5.TFile ? app.vault.getResourcePath(file) : source3;
+  return file instanceof import_obsidian16.TFile ? app.vault.getResourcePath(file) : source3;
 }
 function fallbackFaviconUrl(url) {
   try {
@@ -5377,7 +7305,7 @@ function editBookmark(app, title, url, heading = "Edit bookmark", options = {}) 
     new BookmarkEditorModal(app, title, url, heading, options, resolve).open();
   });
 }
-var BookmarkEditorModal = class extends import_obsidian6.Modal {
+var BookmarkEditorModal = class extends import_obsidian17.Modal {
   constructor(app, initialTitle, initialUrl, heading, options, resolveDraft) {
     super(app);
     this.initialTitle = initialTitle;
@@ -5541,21 +7469,21 @@ var BookmarkEditorModal = class extends import_obsidian6.Modal {
 };
 
 // src/bookmarks/bookmark-url.ts
-var import_obsidian7 = require("obsidian");
+var import_obsidian18 = require("obsidian");
 function resolveBookmarkUrl(url, app) {
   if (!/{{\s*selection\s*}}/.test(url)) return url;
-  const selection = app.workspace.getActiveViewOfType(import_obsidian7.MarkdownView)?.editor?.getSelection().trim() || "";
+  const selection = app.workspace.getActiveViewOfType(import_obsidian18.MarkdownView)?.editor?.getSelection().trim() || "";
   return url.replace(/{{\s*selection\s*}}/g, encodeURIComponent(selection));
 }
 
 // src/ui/folder-picker-modal.ts
-var import_obsidian8 = require("obsidian");
+var import_obsidian19 = require("obsidian");
 function pickBookmarkFolder(app, store, options = {}) {
   return new Promise((resolve) => {
     new BookmarkFolderPickerModal(app, store, options.excludeFolderId, resolve).open();
   });
 }
-var BookmarkFolderPickerModal = class extends import_obsidian8.FuzzySuggestModal {
+var BookmarkFolderPickerModal = class extends import_obsidian19.FuzzySuggestModal {
   constructor(app, store, excludeFolderId, resolveChoice) {
     super(app);
     this.store = store;
@@ -5584,71 +7512,6 @@ var BookmarkFolderPickerModal = class extends import_obsidian8.FuzzySuggestModal
     window.setTimeout(() => {
       if (!this.chosen) this.resolveChoice(void 0);
     }, 0);
-  }
-};
-
-// src/ui/text-prompt.ts
-var import_obsidian9 = require("obsidian");
-function promptText(app, title, initialValue = "", placeholder = "") {
-  return new Promise((resolve) => {
-    new TextPromptModal(app, title, initialValue, placeholder, resolve).open();
-  });
-}
-var TextPromptModal = class extends import_obsidian9.Modal {
-  constructor(app, promptTitle, initialValue, placeholder, resolveValue) {
-    super(app);
-    this.promptTitle = promptTitle;
-    this.initialValue = initialValue;
-    this.placeholder = placeholder;
-    this.resolveValue = resolveValue;
-  }
-  settled = false;
-  onOpen() {
-    this.contentEl.createEl("h2", { text: this.promptTitle });
-    const field2 = this.contentEl.createEl("label", { cls: "ubc-prompt-field" });
-    if (this.placeholder) field2.createSpan({ cls: "ubc-prompt-label", text: this.placeholder });
-    const input = field2.createEl("input", {
-      attr: {
-        type: "text",
-        placeholder: this.placeholder,
-        "aria-label": this.placeholder || this.promptTitle
-      }
-    });
-    input.value = this.initialValue;
-    input.addClass("ubc-prompt-input");
-    const actions = this.contentEl.createDiv({ cls: "ubc-modal-actions" });
-    actions.createEl("button", { text: t("Cancel") }).addEventListener("click", () => this.finish(void 0));
-    const save = actions.createEl("button", { text: t("Save") });
-    const submit = () => {
-      const value = input.value.trim();
-      if (!value) return;
-      this.finish(value);
-    };
-    const syncSave = () => {
-      const enabled = Boolean(input.value.trim());
-      save.disabled = !enabled;
-      save.toggleClass("mod-cta", enabled);
-    };
-    save.addEventListener("click", submit);
-    input.addEventListener("input", syncSave);
-    input.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" || save.disabled) return;
-      event.preventDefault();
-      submit();
-    });
-    syncSave();
-    input.focus();
-    input.select();
-  }
-  onClose() {
-    this.contentEl.empty();
-    if (!this.settled) this.resolveValue(void 0);
-  }
-  finish(value) {
-    if (this.settled) return;
-    this.settled = true;
-    this.resolveValue(value);
-    this.close();
   }
 };
 
@@ -5702,6 +7565,8 @@ function buildWebContentMenuEntries(plugin, view, params) {
     const shown = selection.slice(0, 40) + (selection.length > 40 ? "\u2026" : "");
     add(t("Search \u201C{query}\u201D", { query: shown }), () => void plugin.openBrowser({ url: plugin.core.searchUrl(selection) }), { icon: "search" });
     add("Copy selected text", () => void navigator.clipboard.writeText(selection), { icon: "copy" });
+    add("Save selection as Markdown note", () => void view.saveSelectionAsMarkdown(selection), { icon: "file-plus" });
+    add("Copy link to highlighted text", () => void view.copySelectionHighlightUrl(selection), { icon: "link" });
     separator();
   }
   if (params.isEditable) {
@@ -5749,6 +7614,10 @@ function buildWebContentMenuEntries(plugin, view, params) {
       icon: currentPageBookmarked ? "bookmark-check" : "bookmark"
     });
     add("Copy page URL", () => void navigator.clipboard.writeText(view.currentUrl()), { icon: "copy" });
+    add("Find in page", () => view.openFindInPage(), { icon: "search" });
+    add("Copy viewport as image", () => void view.copyViewportImage(), { icon: "image" });
+    add("Save page as Markdown", () => void view.savePageAsMarkdown(), { icon: "file-text" });
+    add("Open page in external browser", () => view.openInExternalBrowser(), { icon: "globe" });
     add("View page in history", () => view.showHistoryQuery(view.currentUrl()), { icon: "history" });
     if (containerMode !== "off") {
       add("Reopen in container\u2026", () => view.openContainerPicker(), { icon: "boxes" });
@@ -5800,7 +7669,7 @@ function dismissOpenMenus(doc = document) {
 
 // src/ui/context-menus.ts
 function showPageMenu(plugin, view, event) {
-  const menu = new import_obsidian10.Menu();
+  const menu = new import_obsidian20.Menu();
   menu.addItem(
     (item) => item.setTitle(t("Back")).setIcon("arrow-left").setDisabled(!view.canGoBack()).onClick(() => view.goBack())
   );
@@ -5818,8 +7687,14 @@ function showPageMenu(plugin, view, event) {
   );
   menu.addItem((item) => item.setTitle(t("Copy page URL")).setIcon("copy").onClick(async () => {
     await navigator.clipboard.writeText(view.currentUrl());
-    new import_obsidian10.Notice(t("URL copied."));
+    new import_obsidian20.Notice(t("URL copied."));
   }));
+  menu.addItem((item) => item.setTitle(t("Find in page")).setIcon("search").onClick(() => view.openFindInPage()));
+  menu.addItem((item) => item.setTitle(t("Copy viewport as image")).setIcon("image").onClick(() => void view.copyViewportImage()));
+  menu.addItem((item) => item.setTitle(t("Save page as Markdown")).setIcon("file-text").onClick(() => void view.savePageAsMarkdown()));
+  menu.addItem((item) => item.setTitle(t("Save selection as Markdown note")).setIcon("file-plus").onClick(() => void view.saveSelectionAsMarkdown()));
+  menu.addItem((item) => item.setTitle(t("Copy link to highlighted text")).setIcon("link").onClick(() => void view.copySelectionHighlightUrl()));
+  menu.addItem((item) => item.setTitle(t("Open page in external browser")).setIcon("globe").onClick(() => view.openInExternalBrowser()));
   menu.addItem(
     (item) => item.setTitle(t("View page in history")).setIcon("history").onClick(() => view.showHistoryQuery(view.currentUrl()))
   );
@@ -5842,7 +7717,7 @@ function showPageMenu(plugin, view, event) {
   showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), event.currentTarget instanceof HTMLElement ? event.currentTarget.ownerDocument : document);
 }
 function showWebContentMenu(plugin, view, params, position) {
-  const menu = new import_obsidian10.Menu();
+  const menu = new import_obsidian20.Menu();
   for (const entry of buildWebContentMenuEntries(plugin, view, params)) {
     if (entry.kind === "separator") {
       menu.addSeparator();
@@ -5858,7 +7733,7 @@ function showWebContentMenu(plugin, view, params, position) {
   showDismissibleMenu(menu, () => menu.showAtPosition(position));
 }
 function showBookmarkMenu(plugin, view, bookmark, event) {
-  const menu = new import_obsidian10.Menu();
+  const menu = new import_obsidian20.Menu();
   menu.addItem((item) => item.setTitle(t("Open")).setIcon("external-link").onClick(() => view.navigate(resolveBookmarkUrl(bookmark.url, plugin.app))));
   menu.addItem((item) => item.setTitle(t("Open in new tab")).setIcon("plus").onClick(() => plugin.openBrowser({ url: resolveBookmarkUrl(bookmark.url, plugin.app) })));
   if (plugin.core.settings().containerMode !== "off") {
@@ -5921,7 +7796,7 @@ function showBookmarkMenu(plugin, view, bookmark, event) {
   showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), event.currentTarget instanceof HTMLElement ? event.currentTarget.ownerDocument : document);
 }
 function showBookmarkFolderMenu(plugin, view, folder, event) {
-  const menu = new import_obsidian10.Menu();
+  const menu = new import_obsidian20.Menu();
   const bookmarks = plugin.core.bookmarks.descendantBookmarks(folder.id);
   menu.addItem(
     (item) => item.setTitle(t("Open all")).setDisabled(bookmarks.length === 0).onClick(() => view.openBookmarkSet(bookmarks, void 0, true))
@@ -5963,7 +7838,7 @@ function showBookmarkFolderMenu(plugin, view, folder, event) {
     const parentId = await pickBookmarkFolder(plugin.app, plugin.core.bookmarks, { excludeFolderId: folder.id });
     if (parentId === void 0) return;
     if (!plugin.core.bookmarks.moveFolder(folder.id, parentId)) {
-      new import_obsidian10.Notice(t("That move would create an invalid bookmark-folder cycle."));
+      new import_obsidian20.Notice(t("That move would create an invalid bookmark-folder cycle."));
       return;
     }
     plugin.core.scheduleSave();
@@ -5992,7 +7867,7 @@ function showBookmarkFolderMenu(plugin, view, folder, event) {
   showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), event.currentTarget instanceof HTMLElement ? event.currentTarget.ownerDocument : document);
 }
 function showFavoritesBarMenu(plugin, view, event) {
-  const menu = new import_obsidian10.Menu();
+  const menu = new import_obsidian20.Menu();
   if (!view.currentUrl().startsWith("browser://")) {
     menu.addItem((item) => item.setTitle(t("Add current page to favorites")).setIcon("star").onClick(() => view.favoriteCurrentPage()));
   }
@@ -6006,11 +7881,11 @@ function showFavoritesBarMenu(plugin, view, event) {
 }
 
 // src/ui/recovery-details-modal.ts
-var import_obsidian11 = require("obsidian");
+var import_obsidian21 = require("obsidian");
 function showRecoveryDetails(app, details) {
   new RecoveryDetailsModal(app, details).open();
 }
-var RecoveryDetailsModal = class extends import_obsidian11.Modal {
+var RecoveryDetailsModal = class extends import_obsidian21.Modal {
   constructor(app, details) {
     super(app);
     this.details = details;
@@ -6051,11 +7926,11 @@ function addRow(parent, term, value) {
 }
 
 // src/ui/form-recovery-candidates-modal.ts
-var import_obsidian12 = require("obsidian");
+var import_obsidian22 = require("obsidian");
 function showFormRecoveryCandidates(app, fields, restoreSafeMatches) {
   new FormRecoveryCandidatesModal(app, fields, restoreSafeMatches).open();
 }
-var FormRecoveryCandidatesModal = class extends import_obsidian12.Modal {
+var FormRecoveryCandidatesModal = class extends import_obsidian22.Modal {
   constructor(app, fields, restoreSafeMatches) {
     super(app);
     this.fields = fields;
@@ -6177,50 +8052,8 @@ function gateLeafDetach(leaf, prepare, reportFailure = console.warn) {
   };
 }
 
-// src/navigation/address-normalizer.ts
-function normalizeBrowserAddress(value, searchUrl) {
-  const trimmed = value.trim();
-  if (!trimmed) return "browser://home";
-  if (/^browser:\/\//i.test(trimmed)) {
-    return "browser://" + trimmed.slice("browser://".length).toLowerCase();
-  }
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) return trimmed;
-  const inferred = inferWebAddress(trimmed);
-  return inferred ?? searchUrl(trimmed);
-}
-function inferWebAddress(value) {
-  if (/\s/.test(value) || value.includes("@")) return void 0;
-  let parsed;
-  try {
-    parsed = new URL("https://" + value);
-  } catch {
-    return void 0;
-  }
-  const hostname = parsed.hostname;
-  if (!hostname) return void 0;
-  if (hostname === "localhost" || isIpv4(hostname) || isBracketedIpv6(value)) {
-    return "http://" + value;
-  }
-  const labels = hostname.split(".");
-  if (labels.length < 2 || labels.some((label2) => !label2)) return void 0;
-  const suffix = labels.at(-1) ?? "";
-  if (!/^(?:[a-z]{2,}|xn--[a-z0-9-]+)$/i.test(suffix)) return void 0;
-  return "https://" + value;
-}
-function isIpv4(hostname) {
-  const parts = hostname.split(".");
-  return parts.length === 4 && parts.every((part) => {
-    if (!/^\d{1,3}$/.test(part)) return false;
-    const value = Number(part);
-    return value >= 0 && value <= 255;
-  });
-}
-function isBracketedIpv6(value) {
-  return /^\[[0-9a-f:.]+\](?::\d+)?(?:[/?#]|$)/i.test(value);
-}
-
 // src/ui/bookmark-popover.ts
-var import_obsidian13 = require("obsidian");
+var import_obsidian23 = require("obsidian");
 function showBookmarkPopover(plugin, bookmark, anchor, content, onClose) {
   const doc = anchor.ownerDocument;
   const win = doc.defaultView ?? window;
@@ -6289,7 +8122,7 @@ function showBookmarkPopover(plugin, bookmark, anchor, content, onClose) {
     save();
   });
   const newFolder = folderRow.createEl("button", { attr: { type: "button", title: t("New folder"), "aria-label": t("New folder") } });
-  (0, import_obsidian13.setIcon)(newFolder, "folder-plus");
+  (0, import_obsidian23.setIcon)(newFolder, "folder-plus");
   newFolder.addEventListener("click", async () => {
     const title = await promptText(plugin.app, t("New bookmark folder"), "", t("Folder name"));
     if (!title?.trim() || !plugin.core.bookmarks.getBookmark(bookmark.id)) return;
@@ -6349,9 +8182,41 @@ function showBookmarkPopover(plugin, bookmark, anchor, content, onClose) {
   return close;
 }
 
+// src/bookmarks/bookmark-presentation.ts
+function bookmarksForPresentation(bookmarks, mode) {
+  if (mode === "selected") return bookmarks.filter((bookmark) => bookmark.favorite).sort((a, b) => (a.favoriteOrder ?? a.order) - (b.favoriteOrder ?? b.order));
+  if (mode === "manage") return [...bookmarks].sort((a, b) => Number(b.favorite) - Number(a.favorite) || (a.favoriteOrder ?? a.order) - (b.favoriteOrder ?? b.order));
+  return [...bookmarks];
+}
+function partitionBookmarkChildren(children, descendantCount) {
+  const main = [];
+  const empty = [];
+  for (const item of children) {
+    if (item.kind === "folder" && descendantCount(item.id) === 0) empty.push(item);
+    else main.push(item);
+  }
+  return { main, empty };
+}
+
+// src/ui/menu-groups.ts
+function addHierarchicalMenuSection(menu, title, icon, appendCommands) {
+  let submenu;
+  menu.addItem((entry) => {
+    entry.setTitle(title).setIcon(icon);
+    const withSubmenu = entry;
+    if (typeof withSubmenu.setSubmenu === "function") {
+      submenu = withSubmenu.setSubmenu();
+    } else {
+      entry.setIsLabel(true);
+    }
+  });
+  if (!submenu) menu.addSeparator();
+  appendCommands(submenu ?? menu);
+}
+
 // src/ui/browser-view.ts
 var BROWSER_VIEW_TYPE = "unified-browser-core-view";
-var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
+var BrowserView = class _BrowserView extends import_obsidian24.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -6407,6 +8272,10 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
   checkpointTimer;
   popupDisposer;
   contextMenuDisposer;
+  guestKeyboardDisposer;
+  guestHoverDisposer;
+  hoverStatusEl;
+  findBar;
   formRecoveryWatchEnabled = false;
   richRestoreAttempted = false;
   restoreIntentGeneration = 0;
@@ -6431,6 +8300,7 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
   bookmarkSearchQuery = "";
   bookmarkLayout = "type";
   bookmarkPopoverClose;
+  homeSearchWidget;
   recoveryInteractionDisposer;
   popupInteractionDisposer;
   navigationHistoryAdapter = new ElectronNavigationHistoryAdapter();
@@ -6464,6 +8334,18 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
     this.rootEl.empty();
     this.rootEl.addClass("ubc-browser-view");
     this.applyAccessibility();
+    this.registerDomEvent(this.rootEl.ownerDocument, "keydown", (event) => {
+      if (this.plugin.app.workspace.activeLeaf !== this.leaf || event.isComposing) return;
+      if (event.target instanceof Node && !this.rootEl.contains(event.target) && !this.toolbarEl.contains(event.target)) return;
+      const ctrl = (event.metaKey || event.ctrlKey) && !event.altKey;
+      if (ctrl && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        this.openFindInPage();
+      } else if (ctrl && event.key.toLowerCase() === "l") {
+        event.preventDefault();
+        this.focusAddressBar();
+      }
+    }, { capture: true });
     this.registerDomEvent(this.rootEl.ownerDocument, "pointerdown", (event) => {
       const target = event.target;
       if (target instanceof Element && target.closest(".menu")) return;
@@ -6485,6 +8367,10 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
     }
   }
   async onClose() {
+    this.findBar?.dispose();
+    this.findBar = void 0;
+    this.homeSearchWidget?.dispose();
+    this.homeSearchWidget = void 0;
     this.releaseLeafDetachGate?.();
     this.releaseLeafDetachGate = void 0;
     this.passwordPageDispose?.();
@@ -6657,6 +8543,132 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
   inspectPage() {
     this.readyWebview()?.openDevTools?.();
   }
+  openFindInPage() {
+    if (this.internalSurface || !this.webview) return;
+    this.findBar?.attach(this.webview);
+    this.findBar?.open();
+  }
+  async copyViewportImage() {
+    const webview = this.readyWebview();
+    if (!webview) return;
+    const contents = resolveGuestWebContents(webview);
+    const clipboard = resolveElectronRenderer()?.clipboard;
+    if (!contents?.capturePage || !clipboard?.writeImage) return;
+    try {
+      clipboard.writeImage(await contents.capturePage());
+      new import_obsidian24.Notice(t("Viewport copied as image"));
+    } catch (error) {
+      console.warn("Unified Browser Core: screenshot capture failed", error);
+      new import_obsidian24.Notice(t("Could not copy viewport"));
+    }
+  }
+  openInExternalBrowser() {
+    if (/^https?:\/\//i.test(this.currentUrlValue)) window.open(this.currentUrlValue, "_external");
+  }
+  async savePageAsMarkdown() {
+    const webview = this.readyWebview();
+    const pageUrl = this.currentUrlValue;
+    if (!webview?.executeJavaScript || !/^https?:\/\//i.test(pageUrl) && !/^file:\/\//i.test(pageUrl)) return;
+    try {
+      const raw = await webview.executeJavaScript("document.documentElement.outerHTML");
+      if (!raw || this.webview !== webview) return;
+      const parsed = new DOMParser().parseFromString(raw, "text/html");
+      parsed.querySelectorAll("script,style,noscript,template,iframe").forEach((el) => el.remove());
+      for (const [selector, attr] of [["a[href]", "href"], ["img[src]", "src"]]) {
+        parsed.querySelectorAll(selector).forEach((el) => {
+          const value = el.getAttribute(attr);
+          if (!value) return;
+          try {
+            const absolute = new URL(value, pageUrl);
+            if (/^https?:$/.test(absolute.protocol)) el.setAttribute(attr, absolute.href);
+          } catch {
+          }
+        });
+      }
+      const markdown = (0, import_obsidian24.htmlToMarkdown)(parsed.body).trim();
+      if (!markdown) {
+        new import_obsidian24.Notice(t("No readable page content"));
+        return;
+      }
+      const title = (this.currentTitle || parsed.title || "Web page").trim();
+      const baseName = title.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "-").slice(0, 100).trim() || "Web page";
+      const vault = this.plugin.app.vault;
+      const folder = "Web Clippings";
+      if (!vault.getAbstractFileByPath(folder)) await vault.createFolder(folder);
+      let path = `${folder}/${baseName}.md`;
+      for (let i = 2; vault.getAbstractFileByPath(path); i++) path = `${folder}/${baseName} (${i}).md`;
+      const frontmatter = `---
+title: ${JSON.stringify(title)}
+source: ${JSON.stringify(pageUrl)}
+---
+
+`;
+      const note = await vault.create(path, frontmatter + markdown + "\n");
+      await this.plugin.app.workspace.openLinkText(note.path, "", true);
+      new import_obsidian24.Notice(t("Page saved as Markdown"));
+    } catch (error) {
+      console.warn("Unified Browser Core: page clipping failed", error);
+      new import_obsidian24.Notice(t("Could not save page as Markdown"));
+    }
+  }
+  async copySelectionHighlightUrl(selected) {
+    const url = this.currentUrlValue;
+    let text = selected?.trim();
+    if (!text) text = (await this.readyWebview()?.executeJavaScript?.(
+      "window.getSelection()?.toString() || ''"
+    ))?.trim();
+    const link = webTextFragmentUrl(url, text ?? "");
+    if (!link) {
+      new import_obsidian24.Notice(t("Select text on an HTTP(S) page to copy its highlight link."));
+      return false;
+    }
+    await navigator.clipboard.writeText(link);
+    new import_obsidian24.Notice(t("Highlight link copied"));
+    return true;
+  }
+  async saveSelectionAsMarkdown(selected) {
+    const url = this.currentUrlValue;
+    let text = selected?.trim();
+    if (!text) text = (await this.readyWebview()?.executeJavaScript?.(
+      "window.getSelection()?.toString() || ''"
+    ))?.trim();
+    if (!text) {
+      new import_obsidian24.Notice(t("Select web page text to create a note."));
+      return false;
+    }
+    try {
+      const { baseName, markdown } = selectionNoteContent({
+        text,
+        title: this.currentTitle || url,
+        url
+      });
+      const vault = this.plugin.app.vault;
+      const folder = "Web Clippings";
+      if (!vault.getAbstractFileByPath(folder)) await vault.createFolder(folder);
+      let path = `${folder}/${baseName}.md`;
+      for (let count = 2; vault.getAbstractFileByPath(path); count++) path = `${folder}/${baseName} (${count}).md`;
+      const file = await vault.create(path, markdown);
+      await this.plugin.app.workspace.openLinkText(file.path, "", true);
+      new import_obsidian24.Notice(t("Selected text saved as a Markdown note"));
+      return true;
+    } catch (error) {
+      console.warn("Unified Browser Core: selection clipping failed", error);
+      new import_obsidian24.Notice(t("Could not save selected text"));
+      return false;
+    }
+  }
+  async currentVideoTimestampLink() {
+    const guest = this.readyWebview();
+    if (!guest?.executeJavaScript) return null;
+    try {
+      const seconds = await guest.executeJavaScript(
+        "(() => { const video = document.querySelector('video'); return video && Number.isFinite(video.currentTime) ? video.currentTime : null; })()"
+      );
+      return seconds === null || this.webview !== guest ? null : videoTimestampLink(this.currentUrlValue, seconds);
+    } catch {
+      return null;
+    }
+  }
   executeWebEdit(command) {
     this.readyWebview()?.[command]?.();
   }
@@ -6703,12 +8715,12 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
     );
     const webViews = views.filter((view) => !view.currentUrl().startsWith("browser://"));
     if (!webViews.length) {
-      new import_obsidian14.Notice(t("There are no web pages to bookmark."));
+      new import_obsidian24.Notice(t("There are no web pages to bookmark."));
       return;
     }
     const newViews = webViews.filter((view) => !this.plugin.core.bookmarks.isBookmarked(view.currentUrl()));
     if (!newViews.length) {
-      new import_obsidian14.Notice(t("All open web pages are already bookmarked."));
+      new import_obsidian24.Notice(t("All open web pages are already bookmarked."));
       return;
     }
     const folder = this.plugin.core.bookmarks.addFolder(
@@ -6723,7 +8735,7 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
     }
     this.plugin.core.scheduleSave();
     this.refreshBookmarks();
-    new import_obsidian14.Notice("Bookmarked " + newViews.length + " open browser tab(s)." + (newViews.length < webViews.length ? " Existing bookmarks were skipped." : ""));
+    new import_obsidian24.Notice("Bookmarked " + newViews.length + " open browser tab(s)." + (newViews.length < webViews.length ? " Existing bookmarks were skipped." : ""));
   }
   currentPageBookmarked() {
     return !this.currentUrlValue.startsWith("browser://") && this.plugin.core.bookmarks.isBookmarked(this.currentUrlValue);
@@ -6786,17 +8798,17 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
   }
   enableFormRecoveryForSite() {
     if (!this.plugin.core.formRecovery.enableSite(this.containerId, this.currentUrlValue)) {
-      new import_obsidian14.Notice(t("Form recovery is only available for web pages."));
+      new import_obsidian24.Notice(t("Form recovery is only available for web pages."));
       return;
     }
     this.plugin.core.scheduleSave();
     void this.syncFormRecoveryInstrumentation();
-    new import_obsidian14.Notice(t("Form recovery enabled for this site."));
+    new import_obsidian24.Notice(t("Form recovery enabled for this site."));
   }
   showRecoveryCandidates() {
     const fields = this.plugin.core.formRecovery.recoveryFieldsForDocument(this.containerId, this.currentUrlValue);
     if (!fields.length) {
-      new import_obsidian14.Notice(t("No saved form values are available for this page."));
+      new import_obsidian24.Notice(t("No saved form values are available for this page."));
       return;
     }
     showFormRecoveryCandidates(
@@ -6807,13 +8819,13 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
   }
   disableFormRecoveryForSite() {
     if (!this.plugin.core.formRecovery.disableSite(this.containerId, this.currentUrlValue, true)) {
-      new import_obsidian14.Notice(t("Form recovery is only available for web pages."));
+      new import_obsidian24.Notice(t("Form recovery is only available for web pages."));
       return;
     }
     this.formRecoveryWatchEnabled = false;
     this.plugin.core.scheduleSave();
     void this.syncFormRecoveryInstrumentation();
-    new import_obsidian14.Notice(t("Form recovery disabled and stored form values cleared for this site."));
+    new import_obsidian24.Notice(t("Form recovery disabled and stored form values cleared for this site."));
   }
   async syncFormRecoveryInstrumentation() {
     const webview = this.readyWebview();
@@ -6841,17 +8853,17 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
   async disableFocusedFormRecoveryField() {
     const field2 = await this.focusedFormField();
     if (!field2 || !this.plugin.core.formRecovery.excludeField(this.containerId, this.currentUrlValue, field2)) {
-      new import_obsidian14.Notice(t("Could not identify the focused form field."));
+      new import_obsidian24.Notice(t("Could not identify the focused form field."));
       return;
     }
     this.plugin.core.scheduleSave();
-    new import_obsidian14.Notice(t("This form field is excluded from recovery on this site."));
+    new import_obsidian24.Notice(t("This form field is excluded from recovery on this site."));
   }
   async restoreFocusedFormValue() {
     const saved = this.plugin.core.formRecovery.recoveryFieldsForDocument(this.containerId, this.currentUrlValue);
     const webview = this.readyWebview();
     if (!saved.length || !webview?.executeJavaScript) {
-      new import_obsidian14.Notice(t("No saved form value is available for this page."));
+      new import_obsidian24.Notice(t("No saved form value is available for this page."));
       return;
     }
     const payload = JSON.stringify(saved);
@@ -6890,13 +8902,13 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
       el.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
     })()`);
-    new import_obsidian14.Notice(restored ? t("Restored the previous value for this field.") : t("No matching saved value was found for this field."));
+    new import_obsidian24.Notice(restored ? t("Restored the previous value for this field.") : t("No matching saved value was found for this field."));
   }
   async restoreFormValues(options = {}) {
     const recoveryFields = this.plugin.core.formRecovery.recoveryFieldsForDocument(this.containerId, this.currentUrlValue);
     const webview = this.readyWebview();
     if (!recoveryFields.length || !webview?.executeJavaScript) {
-      if (!options.silent) new import_obsidian14.Notice(t("No saved form values for this page."));
+      if (!options.silent) new import_obsidian24.Notice(t("No saved form values for this page."));
       return;
     }
     const watchNextSteps = options.watchNextSteps ?? true;
@@ -6976,7 +8988,7 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
       return initialCount;
     })()`);
     if (!options.silent) {
-      new import_obsidian14.Notice(
+      new import_obsidian24.Notice(
         restored > 0 ? t("Restored {v0} form field(s).{v1}", { v0: restored, v1: watchNextSteps ? " Matching fields in later form steps will also be restored when they appear." : "" }) : t("No matching fields were found for the saved form values.")
       );
     }
@@ -6989,101 +9001,73 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
     menu.addItem((item) => item.setTitle(t("History")).setIcon("history").onClick(() => this.showInternal("history")));
     menu.addItem((item) => item.setTitle(t("Bookmarks")).setIcon("book-open").onClick(() => this.showInternal("bookmarks")));
     menu.addItem((item) => item.setTitle(t("Passwords")).setIcon("key-round").onClick(() => this.showInternal("passwords")));
-    if (!this.internalSurface) menu.addItem((item) => item.setTitle(t("Fill password")).setIcon("key-round").onClick(() => void this.openPasswordSuggestions()));
-    if (!this.internalSurface) menu.addItem((item) => item.setTitle(t("Save password for this site")).setIcon("save").onClick(() => void this.savePasswordForCurrentSite()));
-    if (this.plugin.passwords.unlocked) menu.addItem((item) => item.setTitle(t("Lock password vault")).setIcon("lock").onClick(() => this.plugin.passwords.lock()));
     const closed = this.plugin.core.history.recentlyClosed(1)[0];
     menu.addItem((item) => item.setTitle(t("Reopen closed tab")).setIcon("rotate-ccw").setDisabled(!closed).onClick(() => {
       if (closed) void this.plugin.restoreLeaf(closed.id);
     }));
-    menu.addSeparator();
-    menu.addItem((item) => item.setTitle(t("Site permissions\u2026")).setIcon("shield-check").onClick((event) => this.showPermissionMenu(event)));
-    menu.addItem((item) => item.setTitle(t("Zoom in")).setIcon("zoom-in").onClick(() => this.zoomIn()));
-    menu.addItem((item) => item.setTitle(t("Zoom out")).setIcon("zoom-out").onClick(() => this.zoomOut()));
-    menu.addItem((item) => item.setTitle(t("Reset site zoom")).onClick(() => this.resetZoom()));
-    menu.addItem((item) => item.setTitle(t("Settings")).setIcon("settings").onClick(() => this.plugin.openSettings()));
-    menu.addItem((item) => item.setTitle(t("Inspect page")).setIcon("code").onClick(() => this.inspectPage()));
-    menu.addSeparator();
-    menu.addItem(
-      (item) => item.setTitle(t("Reload")).setIcon("rotate-cw").onClick(() => this.reload())
-    );
-    const pinned = this.pinned;
-    menu.addItem(
-      (item) => item.setTitle(pinned ? t("Unpin browser tab") : t("Pin browser tab")).setIcon("pin").onClick(() => {
+    menu.addItem((item) => item.setTitle(t("Reload")).setIcon("rotate-cw").onClick(() => this.reload()));
+    menu.addItem((item) => item.setTitle(t("Search browser tabs")).setIcon("search").onClick(() => this.plugin.openBrowserTabSearch()));
+    menu.addItem((item) => item.setTitle(t("Open Quick Switcher")).setIcon("file-search-2").onClick(() => this.plugin.openQuickSwitcher()));
+    addHierarchicalMenuSection(menu, t("Page tools"), "sliders-horizontal", (tools) => {
+      if (!this.internalSurface) tools.addItem((item) => item.setTitle(t("Fill password")).setIcon("key-round").onClick(() => void this.openPasswordSuggestions()));
+      if (!this.internalSurface) tools.addItem((item) => item.setTitle(t("Save password for this site")).setIcon("save").onClick(() => void this.savePasswordForCurrentSite()));
+      if (this.plugin.passwords.unlocked) tools.addItem((item) => item.setTitle(t("Lock password vault")).setIcon("lock").onClick(() => this.plugin.passwords.lock()));
+      tools.addItem((item) => item.setTitle(t("Site permissions\u2026")).setIcon("shield-check").onClick((event) => this.showPermissionMenu(event)));
+      tools.addItem((item) => item.setTitle(t("Zoom in")).setIcon("zoom-in").onClick(() => this.zoomIn()));
+      tools.addItem((item) => item.setTitle(t("Zoom out")).setIcon("zoom-out").onClick(() => this.zoomOut()));
+      tools.addItem((item) => item.setTitle(t("Reset site zoom")).onClick(() => this.resetZoom()));
+      tools.addItem((item) => item.setTitle(t("Inspect page")).setIcon("code").onClick(() => this.inspectPage()));
+      if (!this.currentUrlValue.startsWith("browser://")) {
+        tools.addItem((item) => item.setTitle(t("Bookmark current page")).setIcon("bookmark").onClick(() => this.bookmarkCurrentPage()));
+        tools.addItem((item) => item.setTitle(t("Copy page URL")).setIcon("copy").onClick(() => void navigator.clipboard.writeText(this.currentUrlValue)));
+      }
+    });
+    addHierarchicalMenuSection(menu, t("Tab tools"), "panels-top-left", (tools) => {
+      const pinned = this.pinned;
+      tools.addItem((item) => item.setTitle(pinned ? t("Unpin browser tab") : t("Pin browser tab")).setIcon("pin").onClick(() => {
         this.leaf.setPinned(!pinned);
         this.plugin.core.history.touchLeaf(this.leafId(), { pinned: !pinned });
         this.plugin.core.scheduleSave();
-      })
-    );
-    menu.addItem(
-      (item) => item.setTitle(this.manualRetention === "preserve" ? t("Use normal recovery retention") : t("Keep recovery data")).setIcon("archive-restore").onClick(() => {
+      }));
+      tools.addItem((item) => item.setTitle(this.manualRetention === "preserve" ? t("Use normal recovery retention") : t("Keep recovery data")).setIcon("archive-restore").onClick(() => {
         this.manualRetention = this.manualRetention === "preserve" ? "default" : "preserve";
         this.plugin.core.history.touchLeaf(this.leafId(), { manualRetention: this.manualRetention });
         this.plugin.core.scheduleSave();
         this.plugin.scheduleSessionCheckpoint();
-      })
-    );
-    menu.addItem(
-      (item) => item.setTitle(t("Duplicate browser tab")).setIcon("copy").onClick(() => this.plugin.openBrowser({ url: this.currentUrlValue, containerId: this.containerId }))
-    );
-    menu.addItem(
-      (item) => item.setTitle(t("Move browser tab to new window")).setIcon("picture-in-picture").onClick(() => {
+      }));
+      tools.addItem((item) => item.setTitle(t("Duplicate browser tab")).setIcon("copy").onClick(() => this.plugin.openBrowser({ url: this.currentUrlValue, containerId: this.containerId })));
+      tools.addItem((item) => item.setTitle(t("Move browser tab to new window")).setIcon("picture-in-picture").onClick(() => {
         try {
           this.plugin.app.workspace.moveLeafToPopout(this.leaf);
         } catch {
-          new import_obsidian14.Notice(t("This Obsidian build cannot move the tab to a new window."));
+          new import_obsidian24.Notice(t("This Obsidian build cannot move the tab to a new window."));
         }
-      })
-    );
-    for (const container of this.plugin.core.containers.list()) {
-      if (container.id === this.containerId) continue;
-      menu.addItem(
-        (item) => item.setTitle(t("Reopen in {v0}", { v0: container.name })).setIcon("box").onClick(() => this.reopenInContainer(container.id))
-      );
-    }
-    if (!this.currentUrlValue.startsWith("browser://")) {
-      menu.addItem(
-        (item) => item.setTitle(t("Bookmark current page")).setIcon("bookmark").onClick(() => this.bookmarkCurrentPage())
-      );
-      menu.addItem(
-        (item) => item.setTitle(t("Copy page URL")).setIcon("copy").onClick(() => void navigator.clipboard.writeText(this.currentUrlValue))
-      );
-    }
-    menu.addSeparator();
-    menu.addItem(
-      (item) => item.setTitle(t("Search browser tabs")).setIcon("search").onClick(() => this.plugin.openBrowserTabSearch())
-    );
-    menu.addItem(
-      (item) => item.setTitle(t("Open Quick Switcher")).setIcon("file-search-2").onClick(() => this.plugin.openQuickSwitcher())
-    );
-    menu.addSeparator();
-    const siblings = this.plugin.tabStripAdapter.leavesInSameGroup(this.leaf).filter((leaf) => leaf.view instanceof _BrowserView);
-    const selfIndex = siblings.indexOf(this.leaf);
-    menu.addItem(
-      (item) => item.setTitle(t("Close browser tabs to the left")).setIcon("panel-left-close").setDisabled(selfIndex <= 0).onClick(() => {
+      }));
+      for (const container of this.plugin.core.containers.list()) {
+        if (container.id === this.containerId) continue;
+        tools.addItem((item) => item.setTitle(t("Reopen in {v0}", { v0: container.name })).setIcon("box").onClick(() => this.reopenInContainer(container.id)));
+      }
+    });
+    addHierarchicalMenuSection(menu, t("Close tabs"), "panel-top-close", (tools) => {
+      const siblings = this.plugin.tabStripAdapter.leavesInSameGroup(this.leaf).filter((leaf) => leaf.view instanceof _BrowserView);
+      const selfIndex = siblings.indexOf(this.leaf);
+      tools.addItem((item) => item.setTitle(t("Close browser tabs to the left")).setIcon("panel-left-close").setDisabled(selfIndex <= 0).onClick(() => {
         for (const leaf of siblings.slice(0, selfIndex)) leaf.detach();
-      })
-    );
-    menu.addItem(
-      (item) => item.setTitle(t("Close browser tabs to the right")).setIcon("panel-right-close").setDisabled(selfIndex < 0 || selfIndex >= siblings.length - 1).onClick(() => {
+      }));
+      tools.addItem((item) => item.setTitle(t("Close browser tabs to the right")).setIcon("panel-right-close").setDisabled(selfIndex < 0 || selfIndex >= siblings.length - 1).onClick(() => {
         for (const leaf of siblings.slice(selfIndex + 1)) leaf.detach();
-      })
-    );
-    menu.addItem(
-      (item) => item.setTitle(t("Close other browser tabs")).setIcon("x").onClick(() => {
+      }));
+      tools.addItem((item) => item.setTitle(t("Close other browser tabs")).setIcon("x").onClick(() => {
         for (const leaf of siblings) if (leaf !== this.leaf) leaf.detach();
-      })
-    );
-    menu.addItem(
-      (item) => item.setTitle(t("Close unpinned browser tabs")).setIcon("x-circle").onClick(() => {
+      }));
+      tools.addItem((item) => item.setTitle(t("Close unpinned browser tabs")).setIcon("x-circle").onClick(() => {
         for (const leaf of siblings) {
           if (leaf.view instanceof _BrowserView && !leaf.view.getState().pinned) leaf.detach();
         }
-      })
-    );
-    menu.addItem(
-      (item) => item.setTitle(t("Close browser tab")).setIcon("x").onClick(() => this.leaf.detach())
-    );
+      }));
+      tools.addItem((item) => item.setTitle(t("Close browser tab")).setIcon("x").onClick(() => this.leaf.detach()));
+    });
+    menu.addItem((item) => item.setTitle(t("Settings")).setIcon("settings").onClick(() => this.plugin.openSettings()));
   }
   buildChrome() {
     const privateTitleContainer = this.titleContainerEl;
@@ -7096,6 +9080,22 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
       this.browserHeaderEl?.addClass("ubc-browser-view-header");
     }
     this.toolbarEl = toolbarHost.createDiv({ cls: "ubc-toolbar" });
+    const dragLink = this.toolbarEl.createEl("button", {
+      cls: "ubc-drag-markdown-link clickable-icon",
+      attr: { type: "button", draggable: "true", title: "Drag page link into an Obsidian note", "aria-label": "Drag Markdown link to note" }
+    });
+    (0, import_obsidian24.setIcon)(dragLink, "grip");
+    dragLink.addEventListener("dragstart", (event) => {
+      if (!event.dataTransfer || !/^https?:\/\//i.test(this.currentUrlValue)) {
+        event.preventDefault();
+        return;
+      }
+      const url = this.currentUrlValue;
+      const markdown = formatBrowserTabsMarkdown([{ title: this.currentTitle || url, url }]).replace(/^- /, "");
+      event.dataTransfer.setData("text/plain", markdown);
+      event.dataTransfer.setData("text/uri-list", url);
+      event.dataTransfer.effectAllowed = "copy";
+    });
     this.backButtonEl = this.addToolbarButton("arrow-left", t("Back"), () => this.goBack());
     this.backButtonEl.addEventListener("contextmenu", (event) => {
       event.preventDefault();
@@ -7112,7 +9112,7 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
     });
     this.reloadButtonEl.addEventListener("contextmenu", (event) => {
       event.preventDefault();
-      const menu = new import_obsidian14.Menu();
+      const menu = new import_obsidian24.Menu();
       menu.addItem((item) => item.setTitle(t("Reload")).setIcon("rotate-cw").onClick(() => this.reload()));
       menu.addItem((item) => item.setTitle(t("Hard reload")).onClick(() => this.hardReload()));
       menu.addItem((item) => item.setTitle(t("Stop loading")).onClick(() => this.stopLoading()));
@@ -7173,6 +9173,8 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
       }, { capture: true, passive: true });
     }
     this.webLayerEl = this.browserContentEl.createDiv({ cls: "ubc-web-layer is-hidden" });
+    this.findBar = new BrowserFindBar(this.webLayerEl);
+    this.hoverStatusEl = this.webLayerEl.createDiv({ cls: "ubc-link-hover-status is-hidden", attr: { role: "status" } });
     this.loadingShieldEl = this.webLayerEl.createDiv({
       cls: "ubc-loading-shield is-hidden",
       attr: { "aria-hidden": "true" }
@@ -7193,7 +9195,7 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
       cls: "ubc-toolbar-button clickable-icon",
       attr: { "aria-label": label2, title: label2 }
     });
-    (0, import_obsidian14.setIcon)(button2, icon);
+    (0, import_obsidian24.setIcon)(button2, icon);
     button2.addEventListener("click", callback);
     return button2;
   }
@@ -7222,7 +9224,7 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
     }
     if (this.reloadButtonEl) {
       const loading = status === "waiting" || status === "loading";
-      (0, import_obsidian14.setIcon)(this.reloadButtonEl, loading ? "x" : "rotate-cw");
+      (0, import_obsidian24.setIcon)(this.reloadButtonEl, loading ? "x" : "rotate-cw");
       const actionLabel = t(loading ? "Stop loading" : "Reload");
       this.reloadButtonEl.setAttribute("aria-label", actionLabel);
       this.reloadButtonEl.title = actionLabel;
@@ -7242,22 +9244,22 @@ var BrowserView = class _BrowserView extends import_obsidian14.ItemView {
     this.favoritesBarEl.toggleClass("is-hidden", !visible);
     if (!visible) return;
     const library = this.favoritesBarEl.createEl("button", { cls: "ubc-favorite-item ubc-bar-library", attr: { title: t("Open bookmarks"), "aria-label": t("Open bookmarks") } });
-    (0, import_obsidian14.setIcon)(library, "book-open");
+    (0, import_obsidian24.setIcon)(library, "book-open");
     library.addEventListener("click", () => this.showInternal("bookmarks"));
     if (!favorites.length && this.plugin.core.settings().bookmarkBarMode === "selected") {
       const choose = this.favoritesBarEl.createEl("button", { cls: "ubc-favorite-item", text: t("Choose members") });
       choose.addEventListener("click", () => {
-        this.bookmarkLayout = "selected";
+        this.bookmarkLayout = "manage";
         this.showInternal("bookmarks");
       });
     }
     for (const item of favorites) {
       if (item.kind === "folder") {
         const folder = this.favoritesBarEl.createEl("button", { cls: "ubc-favorite-item" });
-        (0, import_obsidian14.setIcon)(folder.createSpan(), "folder");
+        (0, import_obsidian24.setIcon)(folder.createSpan(), "folder");
         folder.createSpan({ text: item.title });
         folder.addEventListener("click", () => {
-          const menu = new import_obsidian14.Menu();
+          const menu = new import_obsidian24.Menu();
           const append = (parentId, target) => {
             for (const child of this.plugin.core.bookmarks.children(parentId)) {
               target.addItem((entry) => {
@@ -7327,6 +9329,8 @@ ${item.url}` }
     this.showLoadingShield();
     this.currentUrlValue = url;
     this.addressEl.value = url;
+    this.homeSearchWidget?.dispose();
+    this.homeSearchWidget = void 0;
     this.internalLayerEl.addClass("is-hidden");
     this.webLayerEl.removeClass("is-hidden");
     this.ensureWebview(url);
@@ -7351,6 +9355,8 @@ ${item.url}` }
     this.webLayerEl.addClass("is-hidden");
     this.hideLoadingShield();
     this.internalLayerEl.removeClass("is-hidden");
+    this.homeSearchWidget?.dispose();
+    this.homeSearchWidget = void 0;
     this.internalLayerEl.empty();
     if (resolvedSurface === "history") this.renderHistory();
     else if (resolvedSurface === "bookmarks") this.renderBookmarks();
@@ -7446,12 +9452,12 @@ ${item.url}` }
     this.plugin.core.bookmarks.setFavorite(bookmark.id, true);
     this.plugin.core.scheduleSave();
     this.refreshBookmarks();
-    new import_obsidian14.Notice(t("Added to favorites."));
+    new import_obsidian24.Notice(t("Added to favorites."));
   }
   updateBookmarkButton() {
     if (!this.bookmarkButtonEl) return;
     const bookmark = !this.currentUrlValue.startsWith("browser://") ? this.plugin.core.bookmarks.findByUrl(this.currentUrlValue) : void 0;
-    (0, import_obsidian14.setIcon)(this.bookmarkButtonEl, "star");
+    (0, import_obsidian24.setIcon)(this.bookmarkButtonEl, "star");
     const label2 = bookmark ? t("Edit bookmark") : t("Bookmark page");
     this.bookmarkButtonEl.setAttribute("aria-label", label2);
     this.bookmarkButtonEl.title = label2;
@@ -7511,6 +9517,8 @@ ${item.url}` }
       if (this.webview !== webview || this.plugin.isUnloading() || this.preparingLeafClose) return;
       const event = rawEvent;
       if (event.isMainFrame === false) return;
+      this.findBar?.navigate();
+      this.showLinkHover("");
       const url = event.url || this.safeWebviewUrl(webview) || this.currentUrlValue;
       if (this.ignoreBootstrapAboutBlank && url === "about:blank") return;
       if (url !== "about:blank") this.ignoreBootstrapAboutBlank = false;
@@ -7525,6 +9533,8 @@ ${item.url}` }
       if (this.webview !== webview || this.plugin.isUnloading() || this.preparingLeafClose) return;
       const event = rawEvent;
       if (event.isMainFrame === false) return;
+      this.findBar?.navigate();
+      this.showLinkHover("");
       const url = event.url || this.safeWebviewUrl(webview) || this.currentUrlValue;
       const previousUrl = this.currentUrlValue;
       const currentTransient = this.transientHistory[this.transientIndex];
@@ -7718,12 +9728,35 @@ ${item.url}` }
       this.plugin.core.settings().blockPasskeyRequests
     );
     this.plugin.managedWebviewBackend.browserApis.enablePasswordCapture(webview, this.plugin.passwords.exists);
+    this.findBar?.attach(webview);
+    if (!this.guestHoverDisposer) {
+      this.guestHoverDisposer = bindGuestLinkHover(webview, (url) => {
+        if (this.webview === webview) this.showLinkHover(url);
+      });
+    }
+    if (!this.guestKeyboardDisposer) {
+      this.guestKeyboardDisposer = bindGuestBrowserShortcuts(
+        webview,
+        () => this.findBar?.isOpen ?? false,
+        () => this.webview === webview && !this.internalSurface && this.plugin.app.workspace.getMostRecentLeaf(this.leaf.getContainer()) === this.leaf,
+        (shortcut) => {
+          if (shortcut === "find") this.openFindInPage();
+          else if (shortcut === "address") this.focusAddressBar();
+          else if (shortcut === "find-next") this.findBar?.step(true);
+          else this.findBar?.step(false);
+        }
+      );
+    }
     if (!this.popupInteractionDisposer) {
       this.popupInteractionDisposer = observeGuestInteraction(webview, () => {
         this.dismissTransientPopups();
         this.bookmarkPopoverClose?.();
         this.passwordPopoverClose?.();
       });
+    }
+    if (finalAttempt) {
+      this.popupDisposer?.();
+      this.popupDisposer = void 0;
     }
     if (!this.popupDisposer) {
       this.popupDisposer = this.plugin.windowOpenAdapter.bind(webview, (url, disposition) => {
@@ -7821,7 +9854,7 @@ ${item.url}` }
       if (this.formRecoveryWatchEnabled) {
         await this.restoreFormValues({ silent: true, watchNextSteps: true });
       } else {
-        new import_obsidian14.Notice(t("Saved form values are available for this page."));
+        new import_obsidian24.Notice(t("Saved form values are available for this page."));
       }
     }
     if (this.checkpointTimer === void 0) {
@@ -7927,7 +9960,7 @@ ${item.url}` }
       this.plugin.scheduleSessionCheckpoint();
       const preserving = this.manualRetention === "preserve";
       retention.setText(preserving ? t("Use normal recovery retention") : t("Keep recovery data"));
-      new import_obsidian14.Notice(
+      new import_obsidian24.Notice(
         preserving ? t("Detailed recovery data for this tab will be kept until you remove it.") : t("Detailed recovery data for this tab will use normal retention again.")
       );
     });
@@ -7960,7 +9993,7 @@ ${item.url}` }
     if (!webview || !this.restoredFromLeafId) return;
     const capsule = this.plugin.core.restore.get(this.restoredFromLeafId);
     if (!capsule || !await this.navigationHistoryAdapter.restore(webview, capsule)) {
-      new import_obsidian14.Notice(t("Detailed tab recovery is not currently available; the page can still be reopened normally."));
+      new import_obsidian24.Notice(t("Detailed tab recovery is not currently available; the page can still be reopened normally."));
       return;
     }
     this.setNavigationStatus("restored", "Restored tab state");
@@ -8177,6 +10210,12 @@ ${item.url}` }
       this.checkpointTimer = void 0;
     }
     if (!this.webview) return;
+    this.findBar?.navigate();
+    this.guestHoverDisposer?.();
+    this.guestHoverDisposer = void 0;
+    this.showLinkHover("");
+    this.guestKeyboardDisposer?.();
+    this.guestKeyboardDisposer = void 0;
     const guest = this.webview;
     this.webview = null;
     this.webviewDomReady = false;
@@ -8193,6 +10232,12 @@ ${item.url}` }
     const doc = this.containerEl.ownerDocument;
     dismissOpenMenus(doc);
     this.activeContainerMenu?.hide();
+  }
+  showLinkHover(url) {
+    if (!this.hoverStatusEl) return;
+    this.hoverStatusEl.textContent = url;
+    this.hoverStatusEl.toggleClass("is-hidden", !url);
+    this.hoverStatusEl.title = url;
   }
   showLoadingShield() {
     if (!this.plugin.core.settings().fullPageLoadingShield) return;
@@ -8283,7 +10328,7 @@ ${item.url}` }
       off = this.plugin.passwords.subscribe(close);
       this.passwordPopoverClose = close;
     } catch {
-      new import_obsidian14.Notice(t("Password input is unavailable on this page. Use an HTTPS page with a visible login form."));
+      new import_obsidian24.Notice(t("Password input is unavailable on this page. Use an HTTPS page with a visible login form."));
     }
   }
   async savePasswordForCurrentSite() {
@@ -8292,7 +10337,7 @@ ${item.url}` }
     try {
       origin = passwordOrigin(this.currentUrlValue);
     } catch {
-      new import_obsidian14.Notice(t("Passwords require a secure website."));
+      new import_obsidian24.Notice(t("Passwords require a secure website."));
       return;
     }
     if (!this.plugin.passwords.exists) {
@@ -8309,17 +10354,17 @@ ${item.url}` }
         return;
       }
       if (!event) {
-        new import_obsidian14.Notice(t("No filled-in password on this page. Open the login form and enter your password before choosing Save password for this site."));
+        new import_obsidian24.Notice(t("No filled-in password on this page. Open the login form and enter your password before choosing Save password for this site."));
         return;
       }
       if (this.plugin.passwords.excluded(origin)) {
         event.password = "";
-        new import_obsidian14.Notice(t("Password saving is disabled for this site. Allow save suggestions in Passwords settings."));
+        new import_obsidian24.Notice(t("Password saving is disabled for this site. Allow save suggestions in Passwords settings."));
         return;
       }
       this.showPasswordSave(event);
     } catch {
-      new import_obsidian14.Notice(t("The filled-in password could not be read from this page."));
+      new import_obsidian24.Notice(t("The filled-in password could not be read from this page."));
     }
   }
   showPasswordSave(event) {
@@ -8408,7 +10453,7 @@ ${item.url}` }
       const target = event.target;
       if (target instanceof HTMLElement && target.closest("button, input, a")) return;
       event.preventDefault();
-      const menu = new import_obsidian14.Menu();
+      const menu = new import_obsidian24.Menu();
       menu.addItem((item) => item.setTitle(t("New browser tab")).setIcon("plus").onClick(() => void this.plugin.openBrowser()));
       for (const container of this.plugin.core.containers.list()) {
         menu.addItem((item) => item.setTitle("New tab in " + container.name).setIcon("box").onClick(() => void this.plugin.openBrowser({ url: "browser://home", containerId: container.id })));
@@ -8428,83 +10473,54 @@ ${item.url}` }
       menu.addItem((item) => item.setTitle(t("Show bookmarks")).setIcon("book-open").onClick(() => this.showInternal("bookmarks")));
       showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
     });
-    page.createEl("h1", { text: t("Home") });
+    const title = page.createEl("h1", { cls: "ubc-home-title" });
+    const titleIcon = title.createSpan({ cls: "ubc-home-title-icon" });
+    const logoName = this.plugin.core.settings().homeLogo.trim();
+    const localLogo = this.plugin.app.vault.getAbstractFileByPath(logoName);
+    if (logoName.startsWith("https://")) {
+      titleIcon.createEl("img", { attr: { alt: "", src: logoName } });
+    } else if (localLogo instanceof import_obsidian24.TFile && /^(png|jpe?g|gif|svg|webp|avif)$/i.test(localLogo.extension)) {
+      titleIcon.createEl("img", { attr: { alt: "", src: this.plugin.app.vault.getResourcePath(localLogo) } });
+    } else if (logoName && (0, import_obsidian24.getIcon)(logoName)) {
+      (0, import_obsidian24.setIcon)(titleIcon, logoName);
+    } else {
+      titleIcon.addClass("is-hidden");
+    }
+    title.createSpan({ text: this.plugin.core.settings().homeTitle || t("Home") });
+    const appearance = this.plugin.core.settings();
+    title.style.fontSize = appearance.homeTitleFontSize;
+    title.style.fontWeight = String(appearance.homeTitleFontWeight);
+    if (appearance.homeTitleFontFamily) title.style.fontFamily = appearance.homeTitleFontFamily;
+    if (appearance.homeTitleColor) title.style.color = appearance.homeTitleColor;
+    page.toggleClass("ubc-home-accent-selection", appearance.homeSelectionAccent);
     page.createEl("p", {
       cls: "ubc-surface-description",
       text: t("Search your vault, browse the web, or continue where you left off.")
     });
-    const searchMode = { value: this.plugin.core.settings().homeSearchMode };
-    const modePicker = page.createDiv({ cls: "ubc-home-search-modes", attr: { role: "group", "aria-label": t("Home search mode") } });
-    const vaultMode = modePicker.createEl("button", { text: t("Vault"), attr: { type: "button" } });
-    const webMode = modePicker.createEl("button", { text: t("Web"), attr: { type: "button" } });
-    const search = page.createEl("input", {
-      cls: "ubc-home-search",
-      attr: { "aria-label": t("Home search") }
-    });
-    const searchResults = page.createDiv({ cls: "ubc-home-search-results" });
     const homeSections = page.createDiv({ cls: "ubc-home-sections" });
-    let currentVaultResults = [];
-    const renderVaultSearch = () => {
-      searchResults.empty();
-      const query = search.value.trim();
-      if (!query) {
-        currentVaultResults = [];
-        homeSections.removeClass("is-hidden");
-        return;
-      }
-      currentVaultResults = this.plugin.homeAdapter.searchFiles(query, 10);
-      homeSections.addClass("is-hidden");
-      const heading = searchResults.createDiv({ cls: "ubc-home-results-heading" });
-      heading.createEl("strong", {
-        text: currentVaultResults.length ? String(currentVaultResults.length) + " vault result" + (currentVaultResults.length === 1 ? "" : "s") : t("No vault files found")
-      });
-      if (!currentVaultResults.length) {
-        heading.createSpan({ text: t("Try another name or switch to Web."), cls: "ubc-card-subtitle" });
-        return;
-      }
-      this.renderVaultFileCards(searchResults, currentVaultResults);
-    };
-    const setMode = (mode, persist = true) => {
-      searchMode.value = mode;
-      vaultMode.toggleClass("is-active", mode === "vault");
-      webMode.toggleClass("is-active", mode === "web");
-      vaultMode.setAttribute("aria-pressed", String(mode === "vault"));
-      webMode.setAttribute("aria-pressed", String(mode === "web"));
-      search.placeholder = mode === "vault" ? t("Search files in your vault") : t("Search the web or enter an address");
-      searchResults.empty();
-      homeSections.removeClass("is-hidden");
-      if (persist && this.plugin.core.settings().homeSearchMode !== mode) {
-        this.plugin.core.updateSettings({ homeSearchMode: mode });
-      }
-      if (mode === "vault") renderVaultSearch();
-      search.focus();
-    };
-    vaultMode.addEventListener("click", () => setMode("vault"));
-    webMode.addEventListener("click", () => setMode("web"));
-    search.addEventListener("input", () => {
-      if (searchMode.value === "vault") renderVaultSearch();
-    });
-    search.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter") return;
-      if (searchMode.value === "web") {
-        this.navigate(this.normalizeAddress(search.value));
-        return;
-      }
-      const first = currentVaultResults[0];
-      if (first) void this.openVaultHomeFile(first.path, event.metaKey || event.ctrlKey);
-    });
+    this.homeSearchWidget = mountHomeSearch(page, {
+      app: this.plugin.app,
+      core: this.plugin.core,
+      home: this.plugin.homeAdapter,
+      openFile: (path, newTab) => this.openVaultHomeFile(path, newTab),
+      webSearch: (query) => this.navigate(this.normalizeAddress(query))
+    }, homeSections);
+    page.insertBefore(this.homeSearchWidget.input.closest(".ubc-home-search-widget"), homeSections);
     if (this.plugin.core.settings().showVaultBookmarksOnHome) {
-      const bookmarked = this.plugin.homeAdapter.bookmarkedFiles(8);
+      const bookmarked = this.plugin.homeAdapter.bookmarkedFiles(this.plugin.core.settings().homeMaxBookmarkedFiles);
       if (bookmarked.length) {
         homeSections.createEl("h2", { text: t("Bookmarked files") });
-        this.renderVaultFileCards(homeSections, bookmarked);
+        this.renderVaultFileCards(homeSections, bookmarked, "bookmarked");
       }
     }
     if (this.plugin.core.settings().showRecentVaultFilesOnHome) {
-      const files = this.plugin.homeAdapter.recentFiles(8);
+      const files = this.plugin.homeAdapter.recentFiles(
+        this.plugin.core.settings().homeMaxRecentFiles,
+        this.plugin.core.settings().homeHiddenRecentPaths
+      );
       if (files.length) {
         homeSections.createEl("h2", { text: t("Recent files") });
-        this.renderVaultFileCards(homeSections, files);
+        this.renderVaultFileCards(homeSections, files, "recent");
       }
     }
     const webBookmarks = this.plugin.core.bookmarks.allBookmarks().slice(0, 8);
@@ -8545,7 +10561,7 @@ ${item.url}` }
         button2.addEventListener("click", () => this.plugin.restoreLeaf(leaf.id));
         button2.addEventListener("contextmenu", (event) => {
           event.preventDefault();
-          const menu = new import_obsidian14.Menu();
+          const menu = new import_obsidian24.Menu();
           menu.addItem((item) => item.setTitle(t("Restore")).setIcon("rotate-ccw").onClick(() => this.plugin.restoreLeaf(leaf.id)));
           for (const container of this.plugin.core.containers.list()) {
             menu.addItem(
@@ -8575,24 +10591,34 @@ ${item.url}` }
         });
       }
     }
-    setMode(searchMode.value, false);
   }
-  renderVaultFileCards(parent, files) {
+  renderVaultFileCards(parent, files, kind = "bookmarked") {
     const list = parent.createDiv({ cls: "ubc-card-list ubc-vault-file-list" });
     for (const file of files) {
       const button2 = list.createEl("button", {
         cls: "ubc-card ubc-vault-file-card",
-        text: file.name,
         attr: { "aria-label": "Open " + file.path }
       });
+      const iconName = kind === "bookmarked" ? this.plugin.core.settings().homeBookmarkIcons[file.path] : void 0;
+      if (iconName) {
+        const visual = button2.createSpan({ cls: "ubc-home-bookmark-icon" });
+        (0, import_obsidian24.setIcon)(visual, iconName);
+      }
+      button2.createSpan({ text: file.name });
       button2.createSpan({
         cls: "ubc-card-subtitle",
         text: file.matchedAlias ? "Alias: " + file.matchedAlias + " \xB7 " + file.path : file.path
       });
-      button2.addEventListener("click", () => void this.openVaultHomeFile(file.path));
+      button2.addEventListener("click", (event) => void this.openVaultHomeFile(file.path, event.metaKey || event.ctrlKey));
+      button2.addEventListener("auxclick", (event) => {
+        if (event.button === 1) {
+          event.preventDefault();
+          void this.openVaultHomeFile(file.path, true);
+        }
+      });
       button2.addEventListener("contextmenu", (event) => {
         event.preventDefault();
-        const menu = new import_obsidian14.Menu();
+        const menu = new import_obsidian24.Menu();
         menu.addItem(
           (item) => item.setTitle(t("Open")).setIcon("file").onClick(() => void this.openVaultHomeFile(file.path))
         );
@@ -8602,6 +10628,20 @@ ${item.url}` }
         menu.addItem(
           (item) => item.setTitle(t("Copy file path")).setIcon("copy").onClick(() => void navigator.clipboard.writeText(file.path))
         );
+        if (kind === "recent") {
+          menu.addItem((item) => item.setTitle(t("Hide recent file")).setIcon("eye-off").onClick(() => {
+            const old = this.plugin.core.settings().homeHiddenRecentPaths;
+            this.plugin.core.updateSettings({ homeHiddenRecentPaths: [.../* @__PURE__ */ new Set([...old, file.path])] });
+            this.showInternal("home", false);
+          }));
+        } else {
+          menu.addItem((item) => item.setTitle(t("Set custom icon")).setIcon("smile").onClick(() => {
+            void this.plugin.chooseHomeBookmarkIcon(file.path, () => this.showInternal("home", false));
+          }));
+          menu.addItem((item) => item.setTitle(t("Remove bookmark")).setIcon("bookmark-minus").onClick(() => {
+            if (this.plugin.homeAdapter.removeBookmark(file.path)) this.showInternal("home", false);
+          }));
+        }
         showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), this.containerEl.ownerDocument);
       });
     }
@@ -8612,18 +10652,18 @@ ${item.url}` }
       const opened = await this.plugin.homeAdapter.openFile(this.leaf, path, newTab);
       if (!opened) {
         if (!newTab) this.closeReasonOverride = void 0;
-        new import_obsidian14.Notice(t("That file is no longer available."));
+        new import_obsidian24.Notice(t("That file is no longer available."));
       }
     } catch (error) {
       if (!newTab) this.closeReasonOverride = void 0;
       console.error("Unified Browser Core: failed to open Home file", error);
-      new import_obsidian14.Notice(t("Could not open that file."));
+      new import_obsidian24.Notice(t("Could not open that file."));
     }
   }
   renderBookmarks() {
     const page = this.internalLayerEl.createDiv({ cls: "ubc-surface ubc-bookmarks" });
     const hero = page.createDiv({ cls: "ubc-bookmark-hero" });
-    (0, import_obsidian14.setIcon)(hero.createDiv({ cls: "ubc-bookmark-hero-icon" }), "library-big");
+    (0, import_obsidian24.setIcon)(hero.createDiv({ cls: "ubc-bookmark-hero-icon" }), "library-big");
     const heading = hero.createDiv();
     heading.createEl("h1", { text: t("Bookmarks") });
     heading.createEl("p", { text: t("Save freely. Find what you need by type or folder.") });
@@ -8645,7 +10685,7 @@ ${item.url}` }
     });
     const imports = actions.createEl("button", { text: t("Import") });
     imports.addEventListener("click", () => {
-      const menu = new import_obsidian14.Menu();
+      const menu = new import_obsidian24.Menu();
       menu.addItem((item) => item.setTitle(t("Import Obsidian Bookmarks")).setIcon("book-open").onClick(async () => {
         await this.plugin.importObsidianBookmarks();
         this.refreshBookmarks();
@@ -8668,7 +10708,7 @@ ${item.url}` }
     const choices = [["type", "By type", "shapes"], ["folder", "By folder", "folder"], ["selected", "Selected members", "star"]];
     for (const [mode, label2, icon] of choices) {
       const button2 = modes.createEl("button", { attr: { "aria-pressed": String(this.bookmarkLayout === mode) } });
-      (0, import_obsidian14.setIcon)(button2.createSpan(), icon);
+      (0, import_obsidian24.setIcon)(button2.createSpan(), icon);
       button2.createSpan({ text: t(label2) });
       button2.toggleClass("is-active", this.bookmarkLayout === mode);
       button2.addEventListener("click", () => {
@@ -8676,6 +10716,15 @@ ${item.url}` }
         this.showInternal("bookmarks", false);
       });
     }
+    const manage = controls.createEl("button", {
+      cls: "ubc-bookmark-manage-toggle",
+      text: t(this.bookmarkLayout === "manage" ? "Done selecting" : "Manage selected members"),
+      attr: { type: "button", "aria-pressed": String(this.bookmarkLayout === "manage") }
+    });
+    manage.addEventListener("click", () => {
+      this.bookmarkLayout = this.bookmarkLayout === "manage" ? "selected" : "manage";
+      this.showInternal("bookmarks", false);
+    });
     const summary = page.createDiv({ cls: "ubc-bookmark-summary", attr: { "aria-live": "polite" } });
     const list = page.createDiv({ cls: "ubc-bookmark-manager" });
     const render = () => {
@@ -8683,23 +10732,25 @@ ${item.url}` }
       const needle = this.bookmarkSearchQuery.toLowerCase().trim();
       const all = this.plugin.core.bookmarks.allBookmarks();
       const matches = all.filter((bookmark) => [bookmark.title, bookmark.url, bookmark.description ?? "", ...bookmark.tags ?? [], bookmark.parentId ? this.plugin.core.bookmarks.folderPath(bookmark.parentId) : ""].some((value) => value.toLowerCase().includes(needle)));
-      summary.setText(needle ? t("{count} results", { count: matches.length }) : this.bookmarkLayout === "selected" ? t("Pick the pages you use every day from your bookmarks.") : "");
-      if (!matches.length && (needle || !this.plugin.core.bookmarks.folders().length || this.bookmarkLayout !== "folder")) {
+      const presented = bookmarksForPresentation(matches, this.bookmarkLayout);
+      summary.setText(needle ? t("{count} results", { count: presented.length }) : this.bookmarkLayout === "selected" ? t("{count} selected", { count: presented.length }) : this.bookmarkLayout === "manage" ? t("Pick the pages you use every day from your bookmarks.") : "");
+      if (!presented.length && (needle || !this.plugin.core.bookmarks.folders().length || this.bookmarkLayout !== "folder")) {
         const empty = list.createDiv({ cls: "ubc-empty-state ubc-bookmark-empty" });
-        (0, import_obsidian14.setIcon)(empty.createDiv({ cls: "ubc-bookmark-empty-icon" }), needle ? "search" : "bookmark-plus");
-        empty.createEl("h2", { text: t(needle ? "No matching bookmarks" : "No bookmarks yet") });
-        empty.createEl("p", { text: t(needle ? "Try another title, URL, or folder name." : "Save a page with the star in the toolbar, or add your first bookmark here.") });
-        if (!needle) empty.createEl("button", { text: t("New bookmark"), cls: "mod-cta" }).addEventListener("click", () => add.click());
+        (0, import_obsidian24.setIcon)(empty.createDiv({ cls: "ubc-bookmark-empty-icon" }), needle ? "search" : "bookmark-plus");
+        const noSelected = !needle && this.bookmarkLayout === "selected" && all.length > 0;
+        empty.createEl("h2", { text: t(needle ? "No matching bookmarks" : noSelected ? "No selected bookmarks" : "No bookmarks yet") });
+        empty.createEl("p", { text: t(needle ? "Try another title, URL, or folder name." : noSelected ? "Select pages to show in your everyday bookmarks." : "Save a page with the star in the toolbar, or add your first bookmark here.") });
+        if (noSelected) empty.createEl("button", { text: t("Manage selected members"), cls: "mod-cta" }).addEventListener("click", () => manage.click());
+        else if (!needle) empty.createEl("button", { text: t("New bookmark"), cls: "mod-cta" }).addEventListener("click", () => add.click());
         return;
       }
       if (this.bookmarkLayout === "folder" && !needle) {
         this.renderBookmarkFolder(list, null, 0, render);
         return;
       }
-      if (this.bookmarkLayout === "selected" || needle) {
+      if (this.bookmarkLayout === "selected" || this.bookmarkLayout === "manage" || needle) {
         const grid = list.createDiv({ cls: "ubc-bookmark-grid" });
-        const sorted = this.bookmarkLayout === "selected" ? [...matches].sort((a, b) => Number(b.favorite) - Number(a.favorite) || (a.favoriteOrder ?? a.order) - (b.favoriteOrder ?? b.order)) : matches;
-        for (const bookmark of sorted) this.renderBookmarkCard(grid, bookmark);
+        for (const bookmark of presented) this.renderBookmarkCard(grid, bookmark);
         return;
       }
       const categories = list.createDiv({ cls: "ubc-bookmark-category-index" });
@@ -8708,11 +10759,11 @@ ${item.url}` }
         if (!members.length) continue;
         const section = list.createEl("section", { cls: "ubc-bookmark-category" });
         const groupHeading = section.createDiv({ cls: "ubc-bookmark-category-heading" });
-        (0, import_obsidian14.setIcon)(groupHeading.createSpan(), media.icon);
+        (0, import_obsidian24.setIcon)(groupHeading.createSpan(), media.icon);
         groupHeading.createEl("h2", { text: t(media.label) });
         groupHeading.createSpan({ cls: "ubc-bookmark-count", text: String(members.length) });
         const shortcut = categories.createEl("button", { cls: "ubc-bookmark-category-chip" });
-        (0, import_obsidian14.setIcon)(shortcut.createSpan(), media.icon);
+        (0, import_obsidian24.setIcon)(shortcut.createSpan(), media.icon);
         shortcut.createSpan({ text: t(media.label) + " \xB7 " + members.length });
         shortcut.addEventListener("click", () => section.scrollIntoView({ block: "start", behavior: this.plugin.core.settings().reducedMotion ? "auto" : "smooth" }));
         const grid = section.createDiv({ cls: "ubc-bookmark-grid" });
@@ -8750,16 +10801,16 @@ ${item.url}` }
     const footer = card.createDiv({ cls: "ubc-bookmark-card-footer" });
     const media = BOOKMARK_MEDIA.find((entry) => entry.type === classifyBookmark(bookmark));
     const badge = footer.createSpan({ cls: "ubc-bookmark-type-badge" });
-    (0, import_obsidian14.setIcon)(badge.createSpan(), media.icon);
+    (0, import_obsidian24.setIcon)(badge.createSpan(), media.icon);
     badge.createSpan({ text: t(media.label) });
     const edit = footer.createEl("button", { cls: "clickable-icon", attr: { title: t("Edit bookmark"), "aria-label": t("Edit bookmark") } });
-    (0, import_obsidian14.setIcon)(edit, "pencil");
+    (0, import_obsidian24.setIcon)(edit, "pencil");
     edit.addEventListener("click", () => {
       this.bookmarkPopoverClose?.();
       this.bookmarkPopoverClose = showBookmarkPopover(this.plugin, bookmark, edit, this.browserContentEl, () => this.refreshBookmarks());
     });
     const move = footer.createEl("button", { cls: "clickable-icon", attr: { title: t("Move to folder"), "aria-label": t("Move to folder") } });
-    (0, import_obsidian14.setIcon)(move, "folder-input");
+    (0, import_obsidian24.setIcon)(move, "folder-input");
     move.addEventListener("click", async () => {
       const parentId = await pickBookmarkFolder(this.plugin.app, this.plugin.core.bookmarks);
       if (parentId === void 0 || !this.plugin.core.bookmarks.moveBookmark(bookmark.id, parentId)) return;
@@ -8798,61 +10849,71 @@ ${item.url}` }
     });
   }
   renderBookmarkFolder(parent, parentId, depth, refresh) {
-    for (const item of this.plugin.core.bookmarks.children(parentId)) {
-      const row = parent.createDiv({ cls: "ubc-bookmark-row" });
-      row.style.setProperty("--ubc-depth", String(depth));
-      if (item.kind === "folder") {
-        const collapsed = this.collapsedBookmarkFolders.has(item.id);
-        const toggle = row.createEl("button", {
-          cls: "ubc-bookmark-folder-toggle clickable-icon",
-          attr: {
-            type: "button",
-            "aria-label": (collapsed ? "Expand " : "Collapse ") + item.title,
-            "aria-expanded": String(!collapsed)
-          }
-        });
-        (0, import_obsidian14.setIcon)(toggle, collapsed ? "chevron-right" : "chevron-down");
-        const title = row.createEl("button", {
-          cls: "ubc-bookmark-folder-title",
-          text: item.title,
-          attr: { type: "button" }
-        });
-        const count = this.plugin.core.bookmarks.descendantBookmarks(item.id).length;
-        row.createSpan({
-          cls: "ubc-bookmark-count",
-          text: String(count),
-          attr: { "aria-label": t("{v0} bookmark{v1} in {v2}", { v0: count, v1: count === 1 ? "" : "s", v2: item.title }) }
-        });
-        const toggleFolder = () => {
-          if (collapsed) this.collapsedBookmarkFolders.delete(item.id);
-          else this.collapsedBookmarkFolders.add(item.id);
-          refresh();
-        };
-        toggle.addEventListener("click", toggleFolder);
-        title.addEventListener("click", toggleFolder);
-        row.addEventListener("contextmenu", (event) => {
-          event.preventDefault();
-          showBookmarkFolderMenu(this.plugin, this, item, event);
-        });
-        if (!collapsed) this.renderBookmarkFolder(parent, item.id, depth + 1, refresh);
-      } else {
-        renderBookmarkVisual(row, item, "ubc-bookmark-kind", this.plugin.app);
-        const content = row.createDiv({ cls: "ubc-bookmark-row-content" });
-        const button2 = content.createEl("button", { cls: "ubc-link-button", text: item.title || item.url });
-        button2.title = item.url;
-        button2.addEventListener("click", (event) => this.openWebTargetFromPointer(item.url, event));
-        button2.addEventListener("auxclick", (event) => {
-          if (event.button !== 1) return;
-          event.preventDefault();
-          this.openWebTargetFromPointer(item.url, event);
-        });
-        content.createSpan({ cls: "ubc-bookmark-meta", text: item.url });
-        this.renderBookmarkFavoriteToggle(row, item);
-        row.addEventListener("contextmenu", (event) => {
-          event.preventDefault();
-          showBookmarkMenu(this.plugin, this, item, event);
-        });
+    const children = this.plugin.core.bookmarks.children(parentId);
+    const groups = partitionBookmarkChildren(children, (id) => this.plugin.core.bookmarks.descendantBookmarks(id).length);
+    const renderItems = (items, target) => {
+      for (const item of items) {
+        const row = target.createDiv({ cls: "ubc-bookmark-row" });
+        row.style.setProperty("--ubc-depth", String(depth));
+        if (item.kind === "folder") {
+          const collapsed = this.collapsedBookmarkFolders.has(item.id);
+          const toggle = row.createEl("button", {
+            cls: "ubc-bookmark-folder-toggle clickable-icon",
+            attr: {
+              type: "button",
+              "aria-label": (collapsed ? "Expand " : "Collapse ") + item.title,
+              "aria-expanded": String(!collapsed)
+            }
+          });
+          (0, import_obsidian24.setIcon)(toggle, collapsed ? "chevron-right" : "chevron-down");
+          const title = row.createEl("button", {
+            cls: "ubc-bookmark-folder-title",
+            text: item.title,
+            attr: { type: "button" }
+          });
+          const count = this.plugin.core.bookmarks.descendantBookmarks(item.id).length;
+          row.createSpan({
+            cls: "ubc-bookmark-count",
+            text: String(count),
+            attr: { "aria-label": t("{v0} bookmark{v1} in {v2}", { v0: count, v1: count === 1 ? "" : "s", v2: item.title }) }
+          });
+          const toggleFolder = () => {
+            if (collapsed) this.collapsedBookmarkFolders.delete(item.id);
+            else this.collapsedBookmarkFolders.add(item.id);
+            refresh();
+          };
+          toggle.addEventListener("click", toggleFolder);
+          title.addEventListener("click", toggleFolder);
+          row.addEventListener("contextmenu", (event) => {
+            event.preventDefault();
+            showBookmarkFolderMenu(this.plugin, this, item, event);
+          });
+          if (!collapsed) this.renderBookmarkFolder(parent, item.id, depth + 1, refresh);
+        } else {
+          renderBookmarkVisual(row, item, "ubc-bookmark-kind", this.plugin.app);
+          const content = row.createDiv({ cls: "ubc-bookmark-row-content" });
+          const button2 = content.createEl("button", { cls: "ubc-link-button", text: item.title || item.url });
+          button2.title = item.url;
+          button2.addEventListener("click", (event) => this.openWebTargetFromPointer(item.url, event));
+          button2.addEventListener("auxclick", (event) => {
+            if (event.button !== 1) return;
+            event.preventDefault();
+            this.openWebTargetFromPointer(item.url, event);
+          });
+          content.createSpan({ cls: "ubc-bookmark-meta", text: item.url });
+          this.renderBookmarkFavoriteToggle(row, item);
+          row.addEventListener("contextmenu", (event) => {
+            event.preventDefault();
+            showBookmarkMenu(this.plugin, this, item, event);
+          });
+        }
       }
+    };
+    renderItems(groups.main, parent);
+    if (groups.empty.length) {
+      const details = parent.createEl("details", { cls: "ubc-bookmark-empty-folders" });
+      details.createEl("summary", { text: t("Empty folders ({count})", { count: groups.empty.length }) });
+      renderItems(groups.empty, details);
     }
   }
   renderBookmarkFavoriteToggle(parent, bookmark) {
@@ -8864,7 +10925,7 @@ ${item.url}` }
         title: bookmark.favorite ? t("Remove from favorites") : t("Add to favorites")
       }
     });
-    (0, import_obsidian14.setIcon)(button2, "star");
+    (0, import_obsidian24.setIcon)(button2, "star");
     button2.toggleClass("is-active", bookmark.favorite);
     button2.setAttribute("aria-pressed", String(bookmark.favorite));
     button2.addEventListener("click", () => {
@@ -8944,7 +11005,7 @@ ${item.url}` }
       const navigationCount = nodes.filter((node) => node.kind === "navigation").length;
       const tombstoneCount = nodes.filter((node) => node.kind === "tombstone").length;
       const filtersActive = Boolean(needle || selectedDay || selectedContainer);
-      const countSummary = navigationCount ? t("{v0} visit{v1} across {v2} day{v3}{v4}{v5}", { v0: navigationCount, v1: navigationCount === 1 ? "" : "s", v2: days.length, v3: days.length === 1 ? "" : "s", v4: tombstoneCount ? ` \xB7 ${tombstoneCount} deleted entr${tombstoneCount === 1 ? "y" : "ies"} retained` : "", v5: filtersActive ? " \xB7 filtered" : "" }) : tombstoneCount ? t("{v0} deleted histor{v1} retained to preserve navigation paths{v2}", { v0: tombstoneCount, v1: tombstoneCount === 1 ? "y entry" : "y entries", v2: filtersActive ? " \xB7 filtered" : "" }) : filtersActive ? t("No history matches these filters.") : t("No browser history yet.");
+      const countSummary = navigationCount ? t("{v0} visit{v1} across {v2} day{v3}{v4}{v5}", { v0: navigationCount, v1: navigationCount === 1 ? "" : "s", v2: days.length, v3: days.length === 1 ? "" : "s", v4: tombstoneCount ? ` \xB7 ${tombstoneCount} deleted entr${tombstoneCount === 1 ? "y" : "ies"} retained` : "", v5: filtersActive ? " \xB7 " + t("Filtered") : "" }) : tombstoneCount ? t("{v0} deleted histor{v1} retained to preserve navigation paths{v2}", { v0: tombstoneCount, v1: tombstoneCount === 1 ? "y entry" : "y entries", v2: filtersActive ? " \xB7 " + t("Filtered") : "" }) : filtersActive ? t("No history matches these filters.") : t("No browser history yet.");
       if (savedVersionId) {
         const capturedAt = this.historyVersionMeta?.capturedAt;
         const capturedLabel = capturedAt ? new Date(capturedAt).toLocaleString() : t("Unknown saved time");
@@ -9011,7 +11072,7 @@ ${item.url}` }
                 restore.addEventListener("click", () => {
                   void (async () => {
                     const restored = await this.plugin.restoreSavedHistoryLeaf(savedVersionId, leafId);
-                    if (!restored) new import_obsidian14.Notice(t("This saved tab no longer has a restorable URL."));
+                    if (!restored) new import_obsidian24.Notice(t("This saved tab no longer has a restorable URL."));
                   })();
                 });
               }
@@ -9079,7 +11140,7 @@ ${item.url}` }
       if (!state) {
         this.historyVersionId = void 0;
         versionFilter.value = "";
-        new import_obsidian14.Notice(t("This saved history version is no longer available."));
+        new import_obsidian24.Notice(t("This saved history version is no longer available."));
         render();
         return;
       }
@@ -9150,7 +11211,7 @@ ${item.url}` }
       button2.addEventListener("click", () => {
         void (async () => {
           const restored = await this.plugin.restoreSavedHistoryNode(versionId, node.id);
-          if (!restored) new import_obsidian14.Notice(t("This saved visit is no longer available."));
+          if (!restored) new import_obsidian24.Notice(t("This saved visit is no longer available."));
         })();
       });
     }
@@ -9172,7 +11233,7 @@ ${item.url}` }
     this.navigate(url);
   }
   showHistoryDayMenu(day, dayNodes, event, filterDay, refresh) {
-    const menu = new import_obsidian14.Menu();
+    const menu = new import_obsidian24.Menu();
     const navigationNodes = dayNodes.filter((node) => node.kind === "navigation");
     const branchIds = [...new Set(navigationNodes.map((node) => node.branchId))];
     menu.addItem((item) => item.setTitle(t("Expand all alternate paths")).onClick(() => {
@@ -9207,7 +11268,7 @@ ${item.url}` }
     const navigationNodes = leafNodes.filter((node) => node.kind === "navigation");
     const mainBranch = this.plugin.core.history.currentBranchForLeaf(leafId) ?? navigationNodes.at(-1)?.branchId;
     const mainNodes = mainBranch ? this.plugin.core.history.navigationNodesForBranch(mainBranch) : navigationNodes;
-    const menu = new import_obsidian14.Menu();
+    const menu = new import_obsidian24.Menu();
     if (record?.lastUrl) {
       menu.addItem((item) => item.setTitle(t("Restore tab")).setIcon("rotate-ccw").onClick(() => void this.plugin.restoreLeaf(leafId)));
       const originalContainerExists = Boolean(this.plugin.core.containers.find(record.containerId));
@@ -9264,12 +11325,12 @@ ${item.url}` }
         row.addEventListener("contextmenu", (event) => {
           event.preventDefault();
           const check = this.plugin.core.history.canRemoveTombstone(node.id);
-          const menu = new import_obsidian14.Menu();
+          const menu = new import_obsidian24.Menu();
           menu.addItem(
             (item) => item.setTitle(t("Remove deleted entry marker")).setIcon("trash").setDisabled(!check.ok).onClick(() => {
               const result = this.plugin.core.history.removeTombstone(node.id);
               if (!result.ok) {
-                new import_obsidian14.Notice(result.reason || "This deleted entry marker cannot be removed.");
+                new import_obsidian24.Notice(result.reason || "This deleted entry marker cannot be removed.");
                 return;
               }
               this.plugin.core.scheduleSave();
@@ -9303,7 +11364,7 @@ ${item.url}` }
           event.preventDefault();
           const branchNodes = this.plugin.core.history.navigationNodesForBranch(node.branchId);
           const latest = branchNodes.at(-1);
-          const menu = new import_obsidian14.Menu();
+          const menu = new import_obsidian24.Menu();
           menu.addItem((item) => item.setTitle(t("Show alternate path")).onClick(() => {
             this.expandedHistoryBranches.add(node.branchId);
             this.showInternal("history");
@@ -9360,7 +11421,7 @@ ${item.url}` }
       }
       row.addEventListener("contextmenu", (event) => {
         event.preventDefault();
-        const menu = new import_obsidian14.Menu();
+        const menu = new import_obsidian24.Menu();
         menu.addItem((item) => item.setTitle(t("Open")).onClick(() => this.navigate(node.url)));
         menu.addItem((item) => item.setTitle(t("Open in new tab")).onClick(() => this.plugin.openBrowser({ url: node.url, containerId: node.containerId })));
         for (const container of this.plugin.core.containers.list()) {
@@ -9428,7 +11489,7 @@ ${item.url}` }
           detail.createSpan({ text });
           detail.addEventListener("contextmenu", (event) => {
             event.preventDefault();
-            const menu = new import_obsidian14.Menu();
+            const menu = new import_obsidian24.Menu();
             menu.addItem((item) => item.setTitle(t("Copy event details")).setIcon("copy").onClick(() => {
               void navigator.clipboard.writeText(JSON.stringify(residual, null, 2));
             }));
@@ -9459,7 +11520,7 @@ ${item.url}` }
   showContainerMenuAt(position) {
     const mode = this.plugin.core.settings().containerMode;
     if (mode === "off") return;
-    const menu = new import_obsidian14.Menu();
+    const menu = new import_obsidian24.Menu();
     menu.addItem(
       (item) => item.setTitle(t("Open new tab in this container")).setIcon("plus").onClick(() => void this.plugin.openBrowser({ url: "browser://home", containerId: this.containerId }))
     );
@@ -9523,7 +11584,7 @@ ${item.url}` }
           this.plugin.core.scheduleSave();
           this.plugin.scheduleSessionCheckpoint();
           this.updateContainerIndicator();
-          new import_obsidian14.Notice("Forgot the site default container for " + assignment.originPattern);
+          new import_obsidian24.Notice("Forgot the site default container for " + assignment.originPattern);
         }));
       }
     } else {
@@ -9554,7 +11615,7 @@ ${item.url}` }
     this.plugin.core.scheduleSave();
     this.plugin.scheduleSessionCheckpoint();
     this.updateContainerIndicator();
-    new import_obsidian14.Notice(t("Always open {v0} in {v1}.", { v0: hostname, v1: this.plugin.core.containers.nameFor(containerId) }));
+    new import_obsidian24.Notice(t("Always open {v0} in {v1}.", { v0: hostname, v1: this.plugin.core.containers.nameFor(containerId) }));
   }
   updateContainerIndicator() {
     if (!this.containerButtonEl) return;
@@ -9562,7 +11623,7 @@ ${item.url}` }
     this.containerButtonEl.hidden = mode === "off";
     if (mode === "off") return;
     const container = this.plugin.core.containers.get(this.containerId);
-    (0, import_obsidian14.setIcon)(this.containerButtonEl, container.icon || "box");
+    (0, import_obsidian24.setIcon)(this.containerButtonEl, container.icon || "box");
     const routing = this.plugin.core.containers.routingStatus(
       this.currentUrlValue,
       this.containerId,
@@ -9579,7 +11640,7 @@ ${item.url}` }
     );
   }
   showPermissionMenu(event) {
-    const menu = new import_obsidian14.Menu();
+    const menu = new import_obsidian24.Menu();
     const origin = this.currentOrigin();
     if (!origin) {
       menu.addItem((item) => item.setTitle(t("Site permissions are only available for web pages")).setDisabled(true));
@@ -9632,7 +11693,7 @@ ${item.url}` }
     }
   }
   showNavigationHistoryMenu(direction, event) {
-    const menu = new import_obsidian14.Menu();
+    const menu = new import_obsidian24.Menu();
     const transientIndices = [];
     if (direction < 0) {
       for (let index = this.transientIndex - 1; index >= 0 && transientIndices.length < 12; index--) {
@@ -9711,7 +11772,7 @@ ${item.url}` }
     }
   }
   showAddressMenu(event) {
-    const menu = new import_obsidian14.Menu();
+    const menu = new import_obsidian24.Menu();
     const start = this.addressEl.selectionStart ?? 0;
     const end = this.addressEl.selectionEnd ?? start;
     const selectionStart = Math.min(start, end);
@@ -9967,13 +12028,13 @@ function validSavedFavicon(value) {
 }
 
 // src/ui/permission-prompt.ts
-var import_obsidian15 = require("obsidian");
+var import_obsidian25 = require("obsidian");
 function promptPermission(app, origin, permission) {
   return new Promise((resolve) => {
     new PermissionPromptModal(app, origin, permission, resolve).open();
   });
 }
-var PermissionPromptModal = class extends import_obsidian15.Modal {
+var PermissionPromptModal = class extends import_obsidian25.Modal {
   constructor(app, origin, permission, resolve) {
     super(app);
     this.origin = origin;
@@ -10010,8 +12071,8 @@ var PermissionPromptModal = class extends import_obsidian15.Modal {
 };
 
 // src/ui/tab-search-modal.ts
-var import_obsidian16 = require("obsidian");
-var TabSearchModal = class extends import_obsidian16.FuzzySuggestModal {
+var import_obsidian26 = require("obsidian");
+var TabSearchModal = class extends import_obsidian26.FuzzySuggestModal {
   constructor(app, plugin) {
     super(app);
     this.plugin = plugin;
@@ -10109,14 +12170,14 @@ var TabSearchModal = class extends import_obsidian16.FuzzySuggestModal {
       event.stopPropagation();
       const { leaf, title, url } = match.item;
       const view = leaf.view instanceof BrowserView ? leaf.view : void 0;
-      const menu = new import_obsidian16.Menu();
+      const menu = new import_obsidian26.Menu();
       menu.addItem((item) => item.setTitle(t("Switch to tab")).setIcon("mouse-pointer-click").onClick(() => this.plugin.app.workspace.revealLeaf(leaf)));
       menu.addItem((item) => item.setTitle(match.item.pinned ? t("Unpin") : t("Pin")).setIcon("pin").onClick(() => leaf.setPinned(!match.item.pinned)));
       menu.addItem((item) => item.setTitle(t("Move to new window")).setIcon("picture-in-picture").onClick(() => {
         try {
           this.plugin.app.workspace.moveLeafToPopout(leaf);
         } catch {
-          new import_obsidian16.Notice(t("This Obsidian build cannot move the tab to a new window."));
+          new import_obsidian26.Notice(t("This Obsidian build cannot move the tab to a new window."));
         }
       }));
       if (view) {
@@ -10650,13 +12711,13 @@ function openDb() {
 // src/passwords/vault.ts
 var import_node_crypto3 = require("node:crypto");
 var import_promises3 = require("node:fs/promises");
-var import_node_path2 = require("node:path");
+var import_node_path3 = require("node:path");
 
 // src/passwords/windows-hello.ts
 var import_node_crypto2 = require("node:crypto");
 var import_node_child_process = require("node:child_process");
 var import_promises2 = require("node:fs/promises");
-var import_node_path = require("node:path");
+var import_node_path2 = require("node:path");
 
 // src/passwords/native.generated.ts
 var helloDigest = "44f34d5a1ee0fbd2713e5d6a66597c0ca9de7465c9229afd71cad9dda339467f";
@@ -10670,8 +12731,8 @@ var WindowsHello = class {
     const remote = resolveElectronRemote();
     const root = remote?.app?.getPath("userData");
     if (!root) throw new Error("Windows Hello bridge is unavailable");
-    const dir = (0, import_node_path.join)(root, "ubc-native", helloDigest);
-    const path = (0, import_node_path.join)(dir, "UbcHello.exe");
+    const dir = (0, import_node_path2.join)(root, "ubc-native", helloDigest);
+    const path = (0, import_node_path2.join)(dir, "UbcHello.exe");
     await (0, import_promises2.mkdir)(dir, { recursive: true });
     let bytes;
     try {
@@ -11210,7 +13271,7 @@ var PasswordVault = class {
   persist(envelope) {
     const serialized = JSON.stringify(envelope);
     const save = async () => {
-      await (0, import_promises3.mkdir)((0, import_node_path2.dirname)(this.path), { recursive: true });
+      await (0, import_promises3.mkdir)((0, import_node_path3.dirname)(this.path), { recursive: true });
       const temporary = this.path + ".tmp";
       await (0, import_promises3.writeFile)(temporary, serialized, { mode: 384 });
       await (0, import_promises3.rename)(temporary, this.path);
@@ -11257,9 +13318,10 @@ function validateContents(value) {
 }
 
 // src/main.ts
-var import_obsidian18 = require("obsidian");
-var import_node_path3 = require("node:path");
-var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
+var import_obsidian28 = require("obsidian");
+var import_node_path4 = require("node:path");
+var import_node_url3 = require("node:url");
+var UnifiedBrowserCorePlugin = class extends import_obsidian27.Plugin {
   core;
   passwords;
   api;
@@ -11273,9 +13335,11 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
   commandAdapter = new ObsidianCommandAdapter();
   homeAdapter;
   bookmarksAdapter;
+  vaultBookmarkMirror;
   surfingMigrationAdapter;
   webViewerBookmarksAdapter;
   persistence;
+  linkHoverPreview;
   unloading = false;
   sessionCheckpointTimer;
   initialSessionReconcileTimer;
@@ -11313,8 +13377,8 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
   }
   async onload() {
     const adapter = this.app.vault.adapter;
-    if (!(adapter instanceof import_obsidian18.FileSystemAdapter)) throw new Error("Password vault requires a local desktop vault");
-    this.passwords = new PasswordVault((0, import_node_path3.join)(adapter.getBasePath(), this.app.vault.configDir, "plugins", this.manifest.id, "password-vault.json"));
+    if (!(adapter instanceof import_obsidian28.FileSystemAdapter)) throw new Error("Password vault requires a local desktop vault");
+    this.passwords = new PasswordVault((0, import_node_path4.join)(adapter.getBasePath(), this.app.vault.configDir, "plugins", this.manifest.id, "password-vault.json"));
     await this.passwords.load();
     this.register(() => this.passwords.dispose());
     const power = resolveElectronRemote()?.powerMonitor;
@@ -11326,6 +13390,20 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
     this.addCommand({ id: "open-passwords", name: t("Open password vault"), callback: () => this.openBrowser({ url: "browser://passwords" }) });
     this.addCommand({ id: "lock-passwords", name: t("Lock password vault"), callback: () => this.passwords.lock() });
     this.homeAdapter = new ObsidianHomeAdapter(this.app);
+    this.registerMarkdownCodeBlockProcessor("ubc-search-bar", (source3, el, ctx) => {
+      ctx.addChild(new EmbeddedHomeSearch(el, this, source3));
+    });
+    const surfingLoaded = Boolean(this.app.plugins?.plugins?.surfing);
+    if (!surfingLoaded) {
+      this.registerMarkdownCodeBlockProcessor("surfing", (source3, el, ctx) => {
+        const browser = addEmbeddedBrowser(el, this, source3);
+        if (browser) ctx.addChild(browser);
+      });
+    }
+    this.registerMarkdownCodeBlockProcessor("ubc-browser", (source3, el, ctx) => {
+      const browser = addEmbeddedBrowser(el, this, source3);
+      if (browser) ctx.addChild(browser);
+    });
     this.bookmarksAdapter = new ObsidianBookmarksAdapter(this.app);
     this.webViewerBookmarksAdapter = new WebViewerBookmarksAdapter(this.app);
     this.surfingMigrationAdapter = new SurfingMigrationAdapter(this.app);
@@ -11343,7 +13421,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
     const state = BrowserCore.normalize(raw);
     await this.persistence.archiveExistingHistoryVersions();
     await this.persistence.captureHistoryVersion(state.history);
-    setLocaleResolver(import_obsidian17.getLanguage);
+    setLocaleResolver(import_obsidian27.getLanguage);
     setLanguage(state.settings.language);
     this.core = new BrowserCore(
       this.app,
@@ -11351,6 +13429,13 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
       { save: async (next) => this.persistence.save(next) },
       persistenceScope
     );
+    this.vaultBookmarkMirror = new ObsidianVaultBookmarkMirror(
+      this.app,
+      this.core,
+      () => this.refreshBrowserViews(),
+      this
+    );
+    void this.vaultBookmarkMirror.initialize().catch((error) => console.warn("Unified Browser Core: Vault bookmark sync initialization failed", error));
     if ((raw?.version ?? 0) !== state.version) this.core.scheduleSave();
     this.previousSessionCheckpoint = cloneSessionCheckpoint(this.core.state.sessionCheckpoint);
     this.api = new BrowserPublicApi(
@@ -11407,12 +13492,60 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
       if (!this.unloading) void this.managedWebviewBackend.flushPersistentSessions().catch((error) => console.warn("Unified Browser Core: failed periodic guest storage flush", error));
     }, 15e3));
     this.registerView(BROWSER_VIEW_TYPE, (leaf) => new BrowserView(leaf, this));
+    this.registerView(BROWSER_TREE_VIEW_TYPE, (leaf) => new ObsidianBrowserTreeView(leaf, this));
+    this.registerView(UBC_HTML_FILE_VIEW, (leaf) => new UbcHtmlFileView(leaf, this));
+    this.linkHoverPreview = new ObsidianHoverPreview(this);
+    this.register(() => this.linkHoverPreview.close());
+    try {
+      this.registerExtensions(["html", "htm"], UBC_HTML_FILE_VIEW);
+    } catch {
+      console.info("Unified Browser Core: HTML extension is owned by another view; manual open remains available.");
+    }
+    registerObsidianLinkBridge({
+      app: this.app,
+      register: (dispose) => this.register(dispose),
+      registerEvent: (ref) => this.registerEvent(ref),
+      registerObsidianProtocolHandler: (name, handler) => this.registerObsidianProtocolHandler(name, handler),
+      claimSurfingProtocol: !surfingLoaded,
+      open: (intent) => this.openObsidianLink(intent),
+      preview: (anchor, intent) => this.linkHoverPreview.enter(anchor, intent.url),
+      leavePreview: (anchor) => this.linkHoverPreview.leave(anchor),
+      closePreview: () => this.linkHoverPreview.close()
+    });
+    registerObsidianCanvasBrowserActions({
+      app: this.app,
+      register: (dispose) => this.register(dispose),
+      registerEvent: (ref) => this.registerEvent(ref),
+      openUrl: (url) => this.openObsidianLink({ url, source: "canvas", external: false })
+    });
+    registerObsidianSearchSurfaces({
+      app: this.app,
+      core: this.core,
+      openBrowser: (request) => this.openBrowser(request),
+      registerEvent: (ref) => this.registerEvent(ref),
+      register: (callback) => this.register(callback)
+    });
+    this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
+      if (file instanceof import_obsidian27.TFile && ["html", "htm"].includes(file.extension)) {
+        menu.addItem((item) => item.setTitle(t("Open HTML in UBC")).setIcon("globe").onClick(() => void this.openHtmlFileInBrowser(file)));
+      }
+    }));
     this.addSettingTab(new BrowserSettingTab(this.app, this));
     this.addRibbonIcon("globe", t("Open browser"), () => this.openBrowser());
     this.addCommand({
       id: "open-browser",
       name: t("Open browser"),
       callback: () => this.openBrowser()
+    });
+    this.addCommand({
+      id: "open-new-home-tab",
+      name: t("Open new Home tab"),
+      callback: () => void this.openBrowser({ url: "browser://home" })
+    });
+    this.addCommand({
+      id: "replace-current-with-home",
+      name: t("Replace current tab with Home"),
+      callback: () => void this.replaceCurrentWithHome()
     });
     this.addCommand({
       id: "open-history",
@@ -11430,6 +13563,14 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
       callback: () => void this.importObsidianBookmarks()
     });
     this.addCommand({
+      id: "toggle-vault-bookmark-sync",
+      name: t("Toggle two-way Vault bookmark sync"),
+      callback: () => void this.vaultBookmarkMirror.setEnabled(!this.vaultBookmarkMirror.enabled).then(() => new import_obsidian27.Notice(this.vaultBookmarkMirror.enabled ? t("Vault bookmark sync enabled \xB7 UBC Bookmarks") : t("Vault bookmark sync disabled"))).catch((error) => {
+        console.warn("Unified Browser Core: failed to toggle Vault sync", error);
+        new import_obsidian27.Notice(t("Could not change Vault bookmark sync"));
+      })
+    });
+    this.addCommand({
       id: "import-webviewer-bookmarks",
       name: t("Import bookmarks from Web viewer Bookmarks"),
       callback: () => void this.importWebViewerBookmarks()
@@ -11445,13 +13586,96 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
       callback: () => {
         const closed = this.core.history.recentlyClosed(1)[0];
         if (closed) void this.restoreLeaf(closed.id);
-        else new import_obsidian17.Notice(t("No recently closed browser tab."));
+        else new import_obsidian27.Notice(t("No recently closed browser tab."));
       }
     });
     this.addCommand({
       id: "search-browser-tabs",
       name: t("Search browser tabs"),
       callback: () => this.openBrowserTabSearch()
+    });
+    this.addCommand({
+      id: "open-browser-tab-tree",
+      name: t("Open browser tab tree sidebar"),
+      callback: () => void this.openBrowserTabTree()
+    });
+    this.addCommand({
+      id: "search-in-markdown-header",
+      name: t("Search web from current note header"),
+      checkCallback: (checking) => {
+        const view = this.app.workspace.getActiveViewOfType(import_obsidian27.MarkdownView);
+        if (!view) return false;
+        if (!checking) this.showMarkdownHeaderSearch(view);
+        return true;
+      }
+    });
+    this.addCommand({
+      id: "copy-browser-tabs-as-markdown",
+      name: t("Copy browser tabs as Markdown links"),
+      callback: () => {
+        const text = formatBrowserTabsMarkdown(this.api.tabs());
+        if (!text) {
+          new import_obsidian27.Notice(t("No web tabs to copy"));
+          return;
+        }
+        void navigator.clipboard.writeText(text).then(() => new import_obsidian27.Notice(t("Browser tab links copied")));
+      }
+    });
+    for (const engine of [
+      { id: "default", name: "default engine", template: "" },
+      { id: "google", name: "Google", template: "https://www.google.com/search?q=" },
+      { id: "duckduckgo", name: "DuckDuckGo", template: "https://duckduckgo.com/?q=" },
+      { id: "bing", name: "Bing", template: "https://www.bing.com/search?q=" }
+    ]) {
+      this.addCommand({
+        id: `search-editor-selection-${engine.id}`,
+        name: t(`Search selected note text with ${engine.name}`),
+        editorCheckCallback: (checking, editor) => {
+          const selection = editor.getSelection().trim();
+          if (!selection) return false;
+          if (!checking) {
+            const url = engine.template ? engine.template + encodeURIComponent(selection) : this.core.searchUrl(selection);
+            void this.openBrowser({ url });
+          }
+          return true;
+        }
+      });
+    }
+    this.addCommand({
+      id: "save-web-selection-as-note",
+      name: t("Save browser selection as Markdown note"),
+      checkCallback: (checking) => {
+        const view = this.activeBrowserView();
+        if (!view || !/^https?:\/\//i.test(view.currentUrl())) return false;
+        if (!checking) void view.saveSelectionAsMarkdown();
+        return true;
+      }
+    });
+    this.addCommand({
+      id: "copy-web-highlight-link",
+      name: t("Copy browser selection as highlight link"),
+      checkCallback: (checking) => {
+        const view = this.activeBrowserView();
+        if (!view || !/^https?:\/\//i.test(view.currentUrl())) return false;
+        if (!checking) void view.copySelectionHighlightUrl();
+        return true;
+      }
+    });
+    this.addCommand({
+      id: "insert-browser-video-timestamp",
+      name: t("Insert browser video timestamp into note"),
+      editorCallback: async (editor) => {
+        const view = this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE).sort((a, b) => {
+          const touched = (leaf) => leaf.view instanceof BrowserView ? this.core.state.history.leaves[leaf.view.lifecycleIdentity()]?.lastActiveAt ?? 0 : 0;
+          return touched(b) - touched(a);
+        }).find((leaf) => leaf.view instanceof BrowserView)?.view;
+        const timestamp = await view?.currentVideoTimestampLink();
+        if (!timestamp) {
+          new import_obsidian27.Notice(t("No playable video position found in an open browser tab."));
+          return;
+        }
+        editor.replaceSelection(`[${timestamp.label}](<${timestamp.url}>)`);
+      }
     });
     this.addCommand({
       id: "next-browser-tab",
@@ -11518,6 +13742,16 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
         const view = this.activeBrowserView();
         if (!view) return false;
         if (!checking) view.focusAddressBar();
+        return true;
+      }
+    });
+    this.addCommand({
+      id: "browser-find-in-page",
+      name: t("Find in page"),
+      checkCallback: (checking) => {
+        const view = this.activeBrowserView();
+        if (!view || view.currentUrl().startsWith("browser://")) return false;
+        if (!checking) view.openFindInPage();
         return true;
       }
     });
@@ -11652,6 +13886,20 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
         await this.openBrowser({ url: "browser://home" });
       }
       await this.replaceMostRecentEmptyLeafWithHome();
+      const homeStartupMode = this.core.settings().homeStartupMode;
+      if (homeStartupMode !== "normal") {
+        let homeLeaf = this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE).find((leaf) => leaf.view instanceof BrowserView && leaf.view.currentInternalSurface() === "home");
+        if (!homeLeaf) homeLeaf = await this.openBrowser({ url: "browser://home" });
+        await this.app.workspace.revealLeaf(homeLeaf);
+        if (homeStartupMode === "home-only") {
+          const keep = homeLeaf;
+          const others = [];
+          this.app.workspace.iterateRootLeaves((leaf) => {
+            if (leaf !== keep) others.push(leaf);
+          });
+          for (const leaf of others) leaf.detach();
+        }
+      }
       this.sessionCheckpointArmed = true;
       this.captureSessionCheckpoint();
       void this.app.workspace.requestSaveLayout();
@@ -11691,6 +13939,32 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
     if (!this.core.settings().replaceEmptyTabsWithHome || this.replacingEmptyLeaf) return false;
     const leaf = this.app.workspace.getMostRecentLeaf();
     return leaf ? this.replaceEmptyLeafWithHome(leaf) : false;
+  }
+  async replaceCurrentWithHome() {
+    const leaf = this.app.workspace.getMostRecentLeaf();
+    if (!leaf) {
+      await this.openBrowser({ url: "browser://home" });
+      return;
+    }
+    if (leaf.view instanceof BrowserView) {
+      leaf.view.showInternal("home");
+      return;
+    }
+    await leaf.setViewState({
+      type: BROWSER_VIEW_TYPE,
+      active: true,
+      state: { url: "browser://home", containerId: this.core.defaultContainerForNewTab() }
+    });
+    await this.app.workspace.revealLeaf(leaf);
+  }
+  chooseHomeBookmarkIcon(path, onSaved) {
+    new HomeIconPicker(this.app, (icon) => {
+      const icons = { ...this.core.settings().homeBookmarkIcons };
+      if (icon) icons[path] = icon;
+      else delete icons[path];
+      this.core.updateSettings({ homeBookmarkIcons: icons });
+      onSaved?.();
+    }).open();
   }
   async replaceEmptyLeafWithHome(leaf) {
     if (!this.core.settings().replaceEmptyTabsWithHome || this.replacingEmptyLeaf || leaf.view.getViewType() !== "empty") return false;
@@ -11760,19 +14034,86 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
     if (reveal) this.app.workspace.revealLeaf(leaf);
     return leaf;
   }
+  async openBrowserTabTree() {
+    const present = this.app.workspace.getLeavesOfType(BROWSER_TREE_VIEW_TYPE)[0];
+    if (present) {
+      await this.app.workspace.revealLeaf(present);
+      return;
+    }
+    const leaf = this.app.workspace.getRightLeaf(true) ?? this.app.workspace.getLeaf("split");
+    await leaf.setViewState({ type: BROWSER_TREE_VIEW_TYPE, active: true });
+    await this.app.workspace.revealLeaf(leaf);
+  }
+  showMarkdownHeaderSearch(view) {
+    const header = view.containerEl.querySelector(".view-header");
+    if (!header) {
+      new import_obsidian27.Notice(t("Could not find the note header"));
+      return;
+    }
+    const previous = header.querySelector(".ubc-markdown-header-search");
+    if (previous) {
+      previous.focus();
+      previous.select();
+      return;
+    }
+    const input = header.createEl("input", { cls: "ubc-markdown-header-search", attr: {
+      type: "search",
+      "aria-label": "Search web from note",
+      placeholder: "Search web or URL"
+    } });
+    const remove = () => input.remove();
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        remove();
+        return;
+      }
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      const value = input.value.trim();
+      if (!value) {
+        remove();
+        return;
+      }
+      const url = normalizeBrowserAddress(value, (query) => this.core.searchUrl(query));
+      remove();
+      void this.openBrowser({ url });
+    });
+    input.addEventListener("blur", remove, { once: true });
+    input.focus();
+  }
   async openFromOpener(url, containerId, disposition) {
+    if (isExternalAppLink(url)) {
+      window.open(url, "_external");
+      return;
+    }
     await this.openBrowser({
       url,
       containerId,
       state: { siteAssignmentBypassReason: "opener" },
       reveal: disposition !== "background",
-      placement: disposition === "new-window" ? "window" : "tab"
+      placement: "tab"
     });
+  }
+  openObsidianLink(intent) {
+    if (intent.external) {
+      window.open(intent.url, "_external");
+      return;
+    }
+    void this.openBrowser({ url: intent.url }).catch((error) => {
+      console.warn("Unified Browser Core: failed to open Obsidian link", error);
+      new import_obsidian27.Notice(t("Could not open web link"));
+    });
+  }
+  async openHtmlFileInBrowser(file) {
+    const adapter = this.app.vault.adapter;
+    if (!(adapter instanceof import_obsidian28.FileSystemAdapter)) return;
+    await this.openBrowser({ url: (0, import_node_url3.pathToFileURL)((0, import_node_path4.join)(adapter.getBasePath(), file.path)).href });
   }
   async restoreLeaf(oldLeafId, options = {}) {
     const record = this.core.state.history.leaves[oldLeafId];
     if (!record?.lastUrl) {
-      new import_obsidian17.Notice(t("This tab has no restorable URL."));
+      new import_obsidian27.Notice(t("This tab has no restorable URL."));
       return;
     }
     const pinned = options.pinned ?? record.pinned;
@@ -11857,13 +14198,13 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
       return leaf.view instanceof BrowserView && leaf.view.getState().containerId === containerId;
     });
     if (hasLiveLeaf) {
-      new import_obsidian17.Notice(t("Close or reopen tabs using this container before deleting it."));
+      new import_obsidian27.Notice(t("Close or reopen tabs using this container before deleting it."));
       return false;
     }
     this.permissionAdapter.release(containerId);
     const cleared = await this.sessionDataAdapter.clearPartition(container.partition);
     if (!cleared) {
-      new import_obsidian17.Notice(t("Could not clear this container's browsing data, so the container was not deleted."));
+      new import_obsidian27.Notice(t("Could not clear this container's browsing data, so the container was not deleted."));
       return false;
     }
     this.core.permissions.resetContainer(containerId);
@@ -11871,7 +14212,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
     const removed = this.core.containers.remove(containerId);
     if (removed) {
       this.core.scheduleSave();
-      new import_obsidian17.Notice(t("Deleted container \u201C{v0}\u201D and cleared its browsing data.", { v0: container.name }));
+      new import_obsidian27.Notice(t("Deleted container \u201C{v0}\u201D and cleared its browsing data.", { v0: container.name }));
     }
     return removed;
   }
@@ -11922,12 +14263,12 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
     if (!container) return false;
     const cleared = await this.sessionDataAdapter.clearPartition(container.partition);
     if (!cleared) {
-      new import_obsidian17.Notice(t("Could not clear browsing data for \u201C{v0}\u201D.", { v0: container.name }));
+      new import_obsidian27.Notice(t("Could not clear browsing data for \u201C{v0}\u201D.", { v0: container.name }));
       return false;
     }
     this.core.permissions.resetContainer(containerId);
     this.core.scheduleSave();
-    new import_obsidian17.Notice(t("Cleared browsing data and saved permissions for \u201C{v0}\u201D.", { v0: container.name }));
+    new import_obsidian27.Notice(t("Cleared browsing data and saved permissions for \u201C{v0}\u201D.", { v0: container.name }));
     return true;
   }
   captureSessionCheckpoint() {
@@ -11966,12 +14307,12 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
   async restorePreviousSession(notify) {
     const checkpoint = this.previousSessionCheckpoint;
     if (!checkpoint.leaves.length) {
-      if (notify) new import_obsidian17.Notice(t("No previous browser session is available."));
+      if (notify) new import_obsidian27.Notice(t("No previous browser session is available."));
       return;
     }
     const leavesToRestore = this.pendingPreviousSessionLeaves();
     if (!leavesToRestore.length) {
-      if (notify) new import_obsidian17.Notice(t("The previous browser session is already restored."));
+      if (notify) new import_obsidian27.Notice(t("The previous browser session is already restored."));
       return;
     }
     for (const saved of leavesToRestore) {
@@ -11993,7 +14334,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
       });
       leaf.setPinned(saved.pinned);
     }
-    if (notify) new import_obsidian17.Notice(t("Restored {v0} browser tab(s).", { v0: leavesToRestore.length }));
+    if (notify) new import_obsidian27.Notice(t("Restored {v0} browser tab(s).", { v0: leavesToRestore.length }));
   }
   async reconcileInitialSession() {
     if (this.unloading) return;
@@ -12080,13 +14421,13 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
   }
   openSettings() {
     if (!this.settingsAdapter.openPluginSettings(this.app, this.manifest.id)) {
-      new import_obsidian17.Notice(t("Open Obsidian Settings \u2192 Community plugins \u2192 Unified Browser Core."));
+      new import_obsidian27.Notice(t("Open Obsidian Settings \u2192 Community plugins \u2192 Unified Browser Core."));
     }
   }
   async importObsidianBookmarks(notify = true) {
     const snapshot = await this.bookmarksAdapter.scan();
     if (!snapshot.available) {
-      if (notify) new import_obsidian17.Notice(t("Obsidian Bookmarks is unavailable or has no readable bookmark data."));
+      if (notify) new import_obsidian27.Notice(t("Obsidian Bookmarks is unavailable or has no readable bookmark data."));
       return { available: false, added: 0, reused: 0, foldersCreated: 0, skippedNonWeb: 0 };
     }
     const imported = this.core.bookmarks.importWebBookmarks(snapshot.entries);
@@ -12101,7 +14442,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
         imported.foldersCreated ? `${imported.foldersCreated} folder${imported.foldersCreated === 1 ? "" : "s"} created` : "",
         snapshot.skippedNonWeb ? `${snapshot.skippedNonWeb} non-web item${snapshot.skippedNonWeb === 1 ? "" : "s"} left in Obsidian Bookmarks` : ""
       ].filter(Boolean);
-      new import_obsidian17.Notice(parts.join(" \xB7 "));
+      new import_obsidian27.Notice(parts.join(" \xB7 "));
     }
     return { available: true, ...imported, skippedNonWeb: snapshot.skippedNonWeb };
   }
@@ -12113,7 +14454,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
   async importWebViewerBookmarks(notify = true) {
     const snapshot = await this.webViewerBookmarksAdapter.scan();
     if (!snapshot.available) {
-      if (notify) new import_obsidian17.Notice(t("Web viewer Bookmarks has no readable data in this vault."));
+      if (notify) new import_obsidian27.Notice(t("Web viewer Bookmarks has no readable data in this vault."));
       return { available: false, added: 0, reused: 0, skippedInvalid: 0 };
     }
     const imported = this.core.bookmarks.importWebBookmarks(snapshot.entries);
@@ -12127,7 +14468,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
         imported.reused ? `${imported.reused} already present` : "",
         snapshot.skippedInvalid ? `${snapshot.skippedInvalid} invalid item${snapshot.skippedInvalid === 1 ? "" : "s"} skipped` : ""
       ].filter(Boolean);
-      new import_obsidian17.Notice(parts.join(" \xB7 "));
+      new import_obsidian27.Notice(parts.join(" \xB7 "));
     }
     return { available: true, added: imported.added, reused: imported.reused, skippedInvalid: snapshot.skippedInvalid };
   }
@@ -12137,16 +14478,16 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
     try {
       const previous = this.core.state.surfingMigration;
       if (previous?.completedAt) {
-        new import_obsidian17.Notice(t("Surfing migration already completed. Backup: {v0}", { v0: previous.backupPath }));
+        new import_obsidian27.Notice(t("Surfing migration already completed. Backup: {v0}", { v0: previous.backupPath }));
         return;
       }
       const snapshot = previous ? null : await this.surfingMigrationAdapter.scan();
       if (snapshot && !snapshot.settingsFound && !snapshot.bookmarksFound && snapshot.tabs.length === 0) {
-        new import_obsidian17.Notice(t("No Surfing data was found in this vault. Run migration before uninstalling Surfing."));
+        new import_obsidian27.Notice(t("No Surfing data was found in this vault. Run migration before uninstalling Surfing."));
         return;
       }
       if (snapshot && (snapshot.settingsFound && !snapshot.settings || snapshot.bookmarksFound && !snapshot.bookmarksValid)) {
-        new import_obsidian17.Notice(t("Surfing data could not be read safely. No changes were made."));
+        new import_obsidian27.Notice(t("Surfing data could not be read safely. No changes were made."));
         return;
       }
       const tabs = previous?.tabs ?? snapshot?.tabs ?? [];
@@ -12274,10 +14615,10 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
       this.refreshContainerPresentation();
       if (this.sessionCheckpointArmed) this.captureSessionCheckpoint();
       await this.core.flush();
-      new import_obsidian17.Notice(`Surfing migration complete: ${record.bookmarksAdded} bookmark(s) added, ${record.tabs.length} tab(s) opened. Backup: ${record.backupPath}`, 12e3);
+      new import_obsidian27.Notice(`Surfing migration complete: ${record.bookmarksAdded} bookmark(s) added, ${record.tabs.length} tab(s) opened. Backup: ${record.backupPath}`, 12e3);
     } catch (error) {
       console.error("Unified Browser Core: Surfing migration failed.", error);
-      new import_obsidian17.Notice(t("Surfing migration stopped. Source data was not deleted; run the command again to resume."), 12e3);
+      new import_obsidian27.Notice(t("Surfing migration stopped. Source data was not deleted; run the command again to resume."), 12e3);
     } finally {
       this.surfingMigrationRunning = false;
     }
@@ -12370,11 +14711,11 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian17.Plugin {
   }
   openQuickSwitcher() {
     if (!this.commandAdapter.openQuickSwitcher(this.app)) {
-      new import_obsidian17.Notice(t("Obsidian Quick Switcher is not available."));
+      new import_obsidian27.Notice(t("Obsidian Quick Switcher is not available."));
     }
   }
   showTabStripMenu(event) {
-    const menu = new import_obsidian17.Menu();
+    const menu = new import_obsidian27.Menu();
     menu.addItem((item) => item.setTitle(t("New browser tab")).setIcon("plus").onClick(() => void this.openBrowser()));
     for (const container of this.core.containers.list()) {
       menu.addItem(

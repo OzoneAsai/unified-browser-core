@@ -110,6 +110,14 @@ export class BrowserSettingTab extends PluginSettingTab {
     customSearchSetting.settingEl.style.display = currentSearchPreset ? "none" : "";
 
     new Setting(containerEl).setName(t("Migration")).setHeading();
+    new Setting(containerEl)
+      .setName(t("Sync bookmarks with Vault notes"))
+      .setDesc(t("Optional two-way sync in the dedicated UBC Bookmarks folder. Removing a managed note removes its linked UBC bookmark; Surfing files are never modified."))
+      .addToggle(toggle => toggle.setValue(this.plugin.vaultBookmarkMirror.enabled)
+        .onChange(async enabled => {
+          await this.plugin.vaultBookmarkMirror.setEnabled(enabled);
+          this.display();
+        }));
     const surfingMigration = this.plugin.core.state.surfingMigration;
     new Setting(containerEl)
       .setName(t("Migrate from Surfing"))

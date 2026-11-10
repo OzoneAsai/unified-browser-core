@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>UBC Manaba-style popup regression</title>
+</head>
+<body>
+  <p>Manaba-style external-site balloon (example URLs only)</p>
+  <iframe id="manaba" width="700" height="180" srcdoc="&lt;!doctype html&gt;&lt;meta charset='utf-8'&gt;&lt;a id='manaba-link' target='_blank' href='https://example.org/ubc-manaba-iframe' onclick=&quot;if (! window.parent.manaba || ! window.parent.manaba.balloon_close_by_target) { return true; } window.parent.open(this.href); window.parent.manaba.balloon_close_by_target(window.frameElement); return false;&quot;&gt;Manaba external link&lt;/a&gt;"></iframe>
+  <a id="ordinary" target="_blank" href="https://example.org/ubc-ordinary-blank">Ordinary target blank</a>
+  <button id="popup" onclick="window.open('https://example.org/ubc-named-popup','oauth','popup=yes,width=480,height=640')">Named and sized popup</button>
+</body>
+</html>

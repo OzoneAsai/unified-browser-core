@@ -75,6 +75,8 @@ export function buildWebContentMenuEntries(
     const shown = selection.slice(0, 40) + (selection.length > 40 ? "…" : "");
     add(t("Search “{query}”", { query: shown }), () => void plugin.openBrowser({ url: plugin.core.searchUrl(selection) }), { icon: "search" });
     add("Copy selected text", () => void navigator.clipboard.writeText(selection), { icon: "copy" });
+    add("Save selection as Markdown note", () => void view.saveSelectionAsMarkdown(selection), { icon: "file-plus" });
+    add("Copy link to highlighted text", () => void view.copySelectionHighlightUrl(selection), { icon: "link" });
     separator();
   }
 
@@ -127,6 +129,10 @@ export function buildWebContentMenuEntries(
       icon: currentPageBookmarked ? "bookmark-check" : "bookmark",
     });
     add("Copy page URL", () => void navigator.clipboard.writeText(view.currentUrl()), { icon: "copy" });
+    add("Find in page", () => view.openFindInPage(), { icon: "search" });
+    add("Copy viewport as image", () => void view.copyViewportImage(), { icon: "image" });
+    add("Save page as Markdown", () => void view.savePageAsMarkdown(), { icon: "file-text" });
+    add("Open page in external browser", () => view.openInExternalBrowser(), { icon: "globe" });
     add("View page in history", () => view.showHistoryQuery(view.currentUrl()), { icon: "history" });
     if (containerMode !== "off") {
       add("Reopen in container…", () => view.openContainerPicker(), { icon: "boxes" });

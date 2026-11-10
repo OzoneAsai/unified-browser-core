@@ -9,6 +9,53 @@ import { pathToFileURL } from "node:url";
 const dir = await mkdtemp(join(tmpdir(), "ubc-smoke-"));
 const outfile = join(dir, "test.mjs");
 try {
+  const linkPolicyBundle = join(dir, "obsidian-link-policy.mjs");
+  await esbuild.build({
+    entryPoints: ["tests/obsidian-link-policy-smoke.ts"],
+    bundle: true, platform: "node", format: "esm", target: "node22", outfile: linkPolicyBundle,
+  });
+  await import(pathToFileURL(linkPolicyBundle).href);
+  const linkRouterBundle = join(dir, "obsidian-link-router.mjs");
+  await esbuild.build({
+    entryPoints: ["tests/obsidian-link-router-smoke.ts"],
+    bundle: true, platform: "node", format: "esm", target: "node22", outfile: linkRouterBundle,
+  });
+  await import(pathToFileURL(linkRouterBundle).href);
+  const transferBundle = join(dir, "obsidian-web-transfer.mjs");
+  await esbuild.build({
+    entryPoints: ["tests/obsidian-web-transfer-smoke.ts"],
+    bundle: true, platform: "node", format: "esm", target: "node22", outfile: transferBundle,
+  });
+  await import(pathToFileURL(transferBundle).href);
+  const vaultMirrorBundle = join(dir, "obsidian-vault-bookmark-mirror.mjs");
+  await esbuild.build({
+    entryPoints: ["tests/obsidian-vault-bookmark-mirror-smoke.ts"],
+    bundle: true, platform: "node", format: "esm", target: "node22", outfile: vaultMirrorBundle,
+    plugins: [{ name: "obsidian-vault-mirror-host", setup(build) {
+      build.onResolve({ filter: /^obsidian$/ }, () => ({ path: "obsidian", namespace: "mirror-host" }));
+      build.onLoad({ filter: /.*/, namespace: "mirror-host" }, () => ({
+        contents: `export class Notice { constructor(_text) {} }
+          export class TFile { constructor(path,parent) { this.path = path; this.parent = parent; this.extension = 'md'; } }
+          export class TFolder { constructor(path) { this.path = path; this.children = []; } }
+          export function parseYaml(s) {
+            const result = {};
+            for (const line of s.split(/\\r?\\n/)) {
+              const m = /^([\\w_-]+): (.*)$/.exec(line);
+              if (!m) continue;
+              try { result[m[1]] = JSON.parse(m[2]); } catch { result[m[1]] = m[2]; }
+            }
+            return result;
+          }`, loader: "js",
+      }));
+    } }],
+  });
+  await import(pathToFileURL(vaultMirrorBundle).href);
+  const browserTreeBundle = join(dir, "obsidian-browser-tree-model.mjs");
+  await esbuild.build({
+    entryPoints: ["tests/obsidian-browser-tree-model-smoke.ts"],
+    bundle: true, platform: "node", format: "esm", target: "node22", outfile: browserTreeBundle,
+  });
+  await import(pathToFileURL(browserTreeBundle).href);
   await esbuild.build({
     entryPoints: ["tests/core-smoke.ts"],
     bundle: true,

@@ -10,42 +10,11 @@ import {
 type WindowOpenDetails = {
   url: string;
   disposition?: string;
-  frameName?: string;
-  features?: string;
 };
-
-type BrowserWindowLike = {
-  close?: () => void;
-  isDestroyed?: () => boolean;
-  once?: (event: "closed", listener: () => void) => void;
-};
-
-type WindowOpenHandlerResponse =
-  | { action: "deny" }
-  | {
-      action: "allow";
-      outlivesOpener?: boolean;
-      overrideBrowserWindowOptions?: {
-        show?: boolean;
-        webPreferences?: {
-          nodeIntegration?: boolean;
-          contextIsolation?: boolean;
-          sandbox?: boolean;
-        };
-      };
-    };
 
 type WebContentsLike = {
   setWindowOpenHandler?: (
-    handler: (details: WindowOpenDetails) => WindowOpenHandlerResponse,
-  ) => void;
-  on?: (
-    event: "did-create-window",
-    listener: (window: BrowserWindowLike, details: WindowOpenDetails) => void,
-  ) => void;
-  removeListener?: (
-    event: "did-create-window",
-    listener: (window: BrowserWindowLike, details: WindowOpenDetails) => void,
+    handler: (details: WindowOpenDetails) => { action: "deny" },
   ) => void;
 };
 
@@ -67,102 +36,44 @@ type MainWindowOpenRuntime = {
   };
 };
 
-const WINDOW_OPEN_CHANNEL = "unified-browser-core:window-open:v1";
-const MAIN_RUNTIME_FILENAME = "/tmp/unified-browser-core-window-open-runtime.cjs";
-const MAIN_RUNTIME_SOURCE = String.raw`
+const WINDOW_OPEN_CHANNEL = "unified-browser-core:window-open:v2";
+const MAIN_RUNTIME_FILENAME = "/tmp/unified-browser-core-window-open-runtime-v2.cjs";
+// Main-process handlers must make their deny decision synchronously. Renderer
+// callbacks crossing @electron/remote cannot safely supply that decision.
+export const MAIN_RUNTIME_SOURCE = String.raw`
 "use strict";
 const { webContents } = require("electron");
-const singletonKey = Symbol.for("unified-browser-core.window-open-runtime.v1");
+const singletonKey = Symbol.for("unified-browser-core.window-open-runtime.v2");
 
 if (!globalThis[singletonKey]) {
   const bindings = new Map();
 
   const normalizeDisposition = (value) => {
     if (value === "background-tab") return "background";
-    if (value === "new-window") return "new-window";
     return "new-tab";
-  };
-  const parseFeatures = (value) => {
-    const features = new Map();
-    for (const rawPart of (value || "").split(",")) {
-      const part = rawPart.trim();
-      if (!part) continue;
-      const equals = part.indexOf("=");
-      const key = (equals >= 0 ? part.slice(0, equals) : part).trim().toLowerCase();
-      if (!key) continue;
-      const featureValue = equals >= 0 ? part.slice(equals + 1).trim().toLowerCase() : "";
-      features.set(key, featureValue);
-    }
-    return features;
-  };
-  const featureEnabled = (features, key) => {
-    if (!features.has(key)) return false;
-    return !["0", "no", "false", "off"].includes(features.get(key));
-  };
-  const classify = (details) => {
-    const features = parseFeatures(details.features);
-    if (featureEnabled(features, "noopener") || featureEnabled(features, "noreferrer")) {
-      return "core-tab";
-    }
-    const frameName = details.frameName && details.frameName.trim();
-    if (frameName && !["_blank", "_self", "_top", "_parent"].includes(frameName.toLowerCase())) {
-      return "auxiliary";
-    }
-    if (featureEnabled(features, "popup")) return "auxiliary";
-    if (["width", "height", "left", "top", "screenx", "screeny"].some((key) => features.has(key))) {
-      return "auxiliary";
-    }
-    return "core-tab";
-  };
-  const closeChild = (child) => {
-    try {
-      if (child && !child.isDestroyed()) child.close();
-    } catch {}
   };
   const unbind = (bindingId) => {
     const state = bindings.get(bindingId);
     if (!state) return;
     bindings.delete(bindingId);
-    try { state.guest.removeListener("did-create-window", state.onCreated); } catch {}
     try { state.guest.removeListener("destroyed", state.onDestroyed); } catch {}
     try { state.guest.setWindowOpenHandler(() => ({ action: "deny" })); } catch {}
-    for (const child of state.children) closeChild(child);
-    state.children.clear();
   };
   const bind = ({ bindingId, guestId, hostId, channel }) => {
     unbind(bindingId);
     const guest = webContents.fromId(guestId);
     const host = webContents.fromId(hostId);
     if (!guest || !host || guest.isDestroyed() || host.isDestroyed()) return false;
-    const children = new Set();
-    const onCreated = (child, details) => {
-      children.add(child);
-      child.once("closed", () => children.delete(child));
-      if (details && details.url && details.url !== "about:blank" && !details.postBody) {
-        setTimeout(() => {
-          try {
-            if (child.isDestroyed()) return;
-            const current = child.webContents && child.webContents.getURL();
-            if (!current || current === "about:blank") {
-              child.webContents.loadURL(details.url);
-            }
-          } catch {}
-        }, 100);
-      }
-    };
     const onDestroyed = () => unbind(bindingId);
-    const state = { guest, host, children, onCreated, onDestroyed };
+    const state = { guest, host, onDestroyed };
     bindings.set(bindingId, state);
-    guest.on("did-create-window", onCreated);
     guest.once("destroyed", onDestroyed);
     guest.setWindowOpenHandler((details) => {
-      const classification = classify(details);
-      if (classification === "auxiliary") {
-        return { action: "allow", outlivesOpener: false };
-      }
+      // Surfing-like policy: every web popup becomes an Obsidian tab,
+      // including named windows and requests with popup/size features.
       setImmediate(() => {
         try {
-          if (!host.isDestroyed()) {
+          if (bindings.get(bindingId) === state && !host.isDestroyed()) {
             host.send(channel, {
               bindingId,
               url: details.url,
@@ -178,13 +89,7 @@ if (!globalThis[singletonKey]) {
   globalThis[singletonKey] = {
     bind,
     unbind,
-    diagnostics: () => {
-      let activeAuxiliaryWindows = 0;
-      for (const state of bindings.values()) {
-        activeAuxiliaryWindows += state.children.size;
-      }
-      return { activeAuxiliaryWindows };
-    },
+    diagnostics: () => ({ activeAuxiliaryWindows: 0 }),
   };
 }
 
@@ -192,7 +97,6 @@ module.exports = globalThis[singletonKey];
 `;
 
 export class ElectronWindowOpenAdapter {
-  private readonly auxiliaryWindows = new Set<BrowserWindowLike>();
   private readonly rendererBindings = new Map<
     string,
     (url: string, disposition: BrowserOpenDisposition) => void
@@ -246,44 +150,19 @@ export class ElectronWindowOpenAdapter {
       this.rendererBindings.delete(bindingId);
     }
 
-    // Compatibility fallback for hosts where a main-process runtime cannot
-    // be installed. It still keeps ordinary target=_blank navigation under
-    // Browser Core ownership, but auxiliary opener semantics may be degraded.
-    const ownedChildren = new Set<BrowserWindowLike>();
-    const trackChild = (window: BrowserWindowLike) => {
-      this.auxiliaryWindows.add(window);
-      ownedChildren.add(window);
-      window.once?.("closed", () => {
-        ownedChildren.delete(window);
-        this.auxiliaryWindows.delete(window);
-      });
-    };
-    const onCreated = (window: BrowserWindowLike) => {
-      trackChild(window);
-    };
-    contents.on?.("did-create-window", onCreated);
+    // Fallback keeps the same routing policy when main-process installation
+    // is unavailable. Do not create an auxiliary OS-level window.
+    let bound = true;
     contents.setWindowOpenHandler((details) => {
-      const classification = classifyWindowOpen(details);
-      if (classification === "auxiliary") {
-        window.setTimeout(() => open(details.url, "new-tab"), 0);
-        return { action: "deny" };
-      }
-      const disposition = normalizeDisposition(details.disposition);
-      window.setTimeout(() => open(details.url, disposition), 0);
+      const disposition = normalizePopupDisposition(details.disposition);
+      window.setTimeout(() => {
+        if (bound) open(details.url, disposition);
+      }, 0);
       return { action: "deny" };
     });
     return () => {
-      contents.removeListener?.("did-create-window", onCreated);
+      bound = false;
       contents.setWindowOpenHandler?.(() => ({ action: "deny" }));
-      for (const child of [...ownedChildren]) {
-        try {
-          if (!child.isDestroyed?.()) child.close?.();
-        } catch {
-          // The child may already be tearing down with its opener.
-        }
-        ownedChildren.delete(child);
-        this.auxiliaryWindows.delete(child);
-      }
     };
   }
 
@@ -300,25 +179,10 @@ export class ElectronWindowOpenAdapter {
       this.ipcRenderer.removeListener(WINDOW_OPEN_CHANNEL, this.ipcListener);
     }
     this.ipcListener = undefined;
-    for (const child of [...this.auxiliaryWindows]) {
-      try {
-        if (!child.isDestroyed?.()) child.close?.();
-      } catch {
-        // The host may already be tearing the window down.
-      }
-      this.auxiliaryWindows.delete(child);
-    }
   }
 
   activeAuxiliaryWindowCount(): number {
-    try {
-      return (
-        this.mainRuntime?.diagnostics?.().activeAuxiliaryWindows ??
-        this.auxiliaryWindows.size
-      );
-    } catch {
-      return this.auxiliaryWindows.size;
-    }
+    return 0;
   }
 
   private resolveMainRuntime(): MainWindowOpenRuntime | undefined {
@@ -372,51 +236,13 @@ export class ElectronWindowOpenAdapter {
       const callback = this.rendererBindings.get(value.bindingId);
       if (!callback) return;
       const disposition: BrowserOpenDisposition =
-        value.disposition === "background" ||
-        value.disposition === "new-window" ||
-        value.disposition === "current"
-          ? value.disposition
-          : "new-tab";
+        value.disposition === "background" ? "background" : "new-tab";
       callback(value.url, disposition);
     };
     ipcRenderer.on?.(WINDOW_OPEN_CHANNEL, this.ipcListener);
   }
 }
 
-function normalizeDisposition(value: string | undefined): BrowserOpenDisposition {
-  if (value === "background-tab") return "background";
-  if (value === "new-window") return "new-window";
-  return "new-tab";
-}
-
-export function classifyWindowOpen(
-  details: Pick<WindowOpenDetails, "disposition" | "frameName" | "features">,
-): "auxiliary" | "core-tab" {
-  const features = parseWindowFeatures(details.features);
-  if (featureEnabled(features, "noopener") || featureEnabled(features, "noreferrer")) return "core-tab";
-
-  const frameName = details.frameName?.trim();
-  if (frameName && !["_blank", "_self", "_top", "_parent"].includes(frameName.toLowerCase())) return "auxiliary";
-  if (featureEnabled(features, "popup")) return "auxiliary";
-  if (["width", "height", "left", "top", "screenx", "screeny"].some((key) => features.has(key))) return "auxiliary";
-  return "core-tab";
-}
-
-function parseWindowFeatures(value: string | undefined): Map<string, string> {
-  const features = new Map<string, string>();
-  for (const rawPart of (value ?? "").split(",")) {
-    const part = rawPart.trim();
-    if (!part) continue;
-    const equals = part.indexOf("=");
-    const key = (equals >= 0 ? part.slice(0, equals) : part).trim().toLowerCase();
-    if (!key) continue;
-    const featureValue = equals >= 0 ? part.slice(equals + 1).trim().toLowerCase() : "";
-    features.set(key, featureValue);
-  }
-  return features;
-}
-
-function featureEnabled(features: ReadonlyMap<string, string>, key: string): boolean {
-  if (!features.has(key)) return false;
-  return !["0", "no", "false", "off"].includes(features.get(key) ?? "");
+export function normalizePopupDisposition(value: string | undefined): BrowserOpenDisposition {
+  return value === "background-tab" ? "background" : "new-tab";
 }

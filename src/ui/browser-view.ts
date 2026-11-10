@@ -3,7 +3,11 @@ import { renderPasswordPage, unlockVault, editPassword, passwordPopover, passwor
 import { readPasswordEvent, readCurrentPasswordSnapshot, fillPassword, type PasswordGuestEvent } from "../passwords/guest";
 import { passwordOrigin, generatePassword } from "../passwords/crypto";
 import { observeGuestInteraction } from "../adapters/guest-interaction";
-import { ItemView, Menu, Notice, TFile, getIcon, setIcon, type ViewStateResult, type WorkspaceLeaf } from "obsidian";
+import { bindGuestBrowserShortcuts, type GuestBrowserShortcut } from "../adapters/guest-keyboard";
+import { resolveElectronRenderer, resolveGuestWebContents } from "../adapters/electron-compat";
+import { BrowserFindBar } from "./browser-find";
+import { ItemView, Menu, Notice, TFile, getIcon, setIcon, htmlToMarkdown, type ViewStateResult, type WorkspaceLeaf } from "obsidian";
+import { bindGuestLinkHover } from "../adapters/guest-link-hover";
 import type UnifiedBrowserCorePlugin from "../main";
 import type { BrowserOpenRequest } from "../main";
 import { createId } from "../core/id";
@@ -57,6 +61,7 @@ import { promptText } from "./text-prompt";
 import { permissionDecisionLabel, permissionLabel } from "./permission-label";
 import { fallbackFaviconUrl, renderBookmarkVisual } from "./bookmark-visual";
 import { resolveBookmarkUrl } from "../bookmarks/bookmark-url";
+import { formatBrowserTabsMarkdown, selectionNoteContent, videoTimestampLink, webTextFragmentUrl } from "../integrations/obsidian-web-transfer";
 import { dismissOpenMenus, showDismissibleMenu, trackDismissibleMenu } from "./popup-dismissal";
 import type { HistoryVersionSummary } from "../persistence/hybrid-persistence";
 
@@ -116,6 +121,10 @@ export class BrowserView extends ItemView {
   private checkpointTimer: number | undefined;
   private popupDisposer: (() => void) | undefined;
   private contextMenuDisposer: (() => void) | undefined;
+  private guestKeyboardDisposer: (() => void) | undefined;
+  private guestHoverDisposer: (() => void) | undefined;
+  private hoverStatusEl!: HTMLDivElement;
+  private findBar: BrowserFindBar | undefined;
   private formRecoveryWatchEnabled = false;
   private richRestoreAttempted = false;
   private restoreIntentGeneration = 0;
@@ -182,6 +191,18 @@ export class BrowserView extends ItemView {
     this.rootEl.empty();
     this.rootEl.addClass("ubc-browser-view");
     this.applyAccessibility();
+    this.registerDomEvent(this.rootEl.ownerDocument, "keydown", (event: KeyboardEvent) => {
+      if (this.plugin.app.workspace.activeLeaf !== this.leaf || event.isComposing) return;
+      if (event.target instanceof Node && !this.rootEl.contains(event.target) && !this.toolbarEl.contains(event.target)) return;
+      const ctrl = (event.metaKey || event.ctrlKey) && !event.altKey;
+      if (ctrl && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        this.openFindInPage();
+      } else if (ctrl && event.key.toLowerCase() === "l") {
+        event.preventDefault();
+        this.focusAddressBar();
+      }
+    }, { capture: true });
     this.registerDomEvent(this.rootEl.ownerDocument, "pointerdown", (event) => {
       const target = event.target;
       if (target instanceof Element && target.closest(".menu")) return;
@@ -207,6 +228,8 @@ export class BrowserView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.findBar?.dispose();
+    this.findBar = undefined;
     this.homeSearchWidget?.dispose();
     this.homeSearchWidget = undefined;
     this.releaseLeafDetachGate?.();
@@ -409,6 +432,121 @@ export class BrowserView extends ItemView {
 
   inspectPage(): void {
     this.readyWebview()?.openDevTools?.();
+  }
+
+  openFindInPage(): void {
+    if (this.internalSurface || !this.webview) return;
+    this.findBar?.attach(this.webview);
+    this.findBar?.open();
+  }
+
+  async copyViewportImage(): Promise<void> {
+    const webview = this.readyWebview();
+    if (!webview) return;
+    const contents = resolveGuestWebContents<{ capturePage?: () => Promise<unknown> }>(webview);
+    const clipboard = resolveElectronRenderer<{ clipboard?: { writeImage?: (image: unknown) => void } }>()?.clipboard;
+    if (!contents?.capturePage || !clipboard?.writeImage) return;
+    try {
+      clipboard.writeImage(await contents.capturePage());
+      new Notice(t("Viewport copied as image"));
+    } catch (error) {
+      console.warn("Unified Browser Core: screenshot capture failed", error);
+      new Notice(t("Could not copy viewport"));
+    }
+  }
+
+  openInExternalBrowser(): void {
+    if (/^https?:\/\//i.test(this.currentUrlValue)) window.open(this.currentUrlValue, "_external");
+  }
+
+  async savePageAsMarkdown(): Promise<void> {
+    const webview = this.readyWebview();
+    const pageUrl = this.currentUrlValue;
+    if (!webview?.executeJavaScript || !/^https?:\/\//i.test(pageUrl) && !/^file:\/\//i.test(pageUrl)) return;
+    try {
+      // Parse in Obsidian's host: the source HTML is never evaluated here.
+      const raw = await webview.executeJavaScript<string>("document.documentElement.outerHTML");
+      if (!raw || this.webview !== webview) return;
+      const parsed = new DOMParser().parseFromString(raw, "text/html");
+      parsed.querySelectorAll("script,style,noscript,template,iframe").forEach(el => el.remove());
+      for (const [selector, attr] of [["a[href]", "href"], ["img[src]", "src"]] as const) {
+        parsed.querySelectorAll(selector).forEach((el) => {
+          const value = el.getAttribute(attr);
+          if (!value) return;
+          try {
+            const absolute = new URL(value, pageUrl);
+            if (/^https?:$/.test(absolute.protocol)) el.setAttribute(attr, absolute.href);
+          } catch { /* Preserve non-URL references verbatim. */ }
+        });
+      }
+      const markdown = htmlToMarkdown(parsed.body).trim();
+      if (!markdown) { new Notice(t("No readable page content")); return; }
+      const title = (this.currentTitle || parsed.title || "Web page").trim();
+      const baseName = title.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "-").slice(0, 100).trim() || "Web page";
+      const vault = this.plugin.app.vault;
+      const folder = "Web Clippings";
+      if (!vault.getAbstractFileByPath(folder)) await vault.createFolder(folder);
+      let path = `${folder}/${baseName}.md`;
+      for (let i = 2; vault.getAbstractFileByPath(path); i++) path = `${folder}/${baseName} (${i}).md`;
+      const frontmatter = `---\ntitle: ${JSON.stringify(title)}\nsource: ${JSON.stringify(pageUrl)}\n---\n\n`;
+      const note = await vault.create(path, frontmatter + markdown + "\n");
+      await this.plugin.app.workspace.openLinkText(note.path, "", true);
+      new Notice(t("Page saved as Markdown"));
+    } catch (error) {
+      console.warn("Unified Browser Core: page clipping failed", error);
+      new Notice(t("Could not save page as Markdown"));
+    }
+  }
+
+  async copySelectionHighlightUrl(selected?: string): Promise<boolean> {
+    const url = this.currentUrlValue;
+    let text = selected?.trim();
+    if (!text) text = (await this.readyWebview()?.executeJavaScript?.<string>(
+      "window.getSelection()?.toString() || ''",
+    ))?.trim();
+    const link = webTextFragmentUrl(url, text ?? "");
+    if (!link) { new Notice(t("Select text on an HTTP(S) page to copy its highlight link.")); return false; }
+    await navigator.clipboard.writeText(link);
+    new Notice(t("Highlight link copied"));
+    return true;
+  }
+
+  async saveSelectionAsMarkdown(selected?: string): Promise<boolean> {
+    const url = this.currentUrlValue;
+    let text = selected?.trim();
+    if (!text) text = (await this.readyWebview()?.executeJavaScript?.<string>(
+      "window.getSelection()?.toString() || ''",
+    ))?.trim();
+    if (!text) { new Notice(t("Select web page text to create a note.")); return false; }
+    try {
+      const { baseName, markdown } = selectionNoteContent({
+        text, title: this.currentTitle || url, url,
+      });
+      const vault = this.plugin.app.vault;
+      const folder = "Web Clippings";
+      if (!vault.getAbstractFileByPath(folder)) await vault.createFolder(folder);
+      let path = `${folder}/${baseName}.md`;
+      for (let count = 2; vault.getAbstractFileByPath(path); count++) path = `${folder}/${baseName} (${count}).md`;
+      const file = await vault.create(path, markdown);
+      await this.plugin.app.workspace.openLinkText(file.path, "", true);
+      new Notice(t("Selected text saved as a Markdown note"));
+      return true;
+    } catch (error) {
+      console.warn("Unified Browser Core: selection clipping failed", error);
+      new Notice(t("Could not save selected text"));
+      return false;
+    }
+  }
+
+  async currentVideoTimestampLink(): Promise<{ url: string; label: string } | null> {
+    const guest = this.readyWebview();
+    if (!guest?.executeJavaScript) return null;
+    try {
+      const seconds = await guest.executeJavaScript<number | null>(
+        "(() => { const video = document.querySelector('video'); return video && Number.isFinite(video.currentTime) ? video.currentTime : null; })()",
+      );
+      return seconds === null || this.webview !== guest ? null : videoTimestampLink(this.currentUrlValue, seconds);
+    } catch { return null; }
   }
 
   executeWebEdit(command: WebEditCommand): void {
@@ -883,6 +1021,21 @@ export class BrowserView extends ItemView {
       this.browserHeaderEl?.addClass("ubc-browser-view-header");
     }
     this.toolbarEl = toolbarHost.createDiv({ cls: "ubc-toolbar" });
+    // A host-side drag source can hand Markdown to Obsidian's editors without
+    // injecting drag handlers into arbitrary third-party web pages.
+    const dragLink = this.toolbarEl.createEl("button", {
+      cls: "ubc-drag-markdown-link clickable-icon",
+      attr: { type: "button", draggable: "true", title: "Drag page link into an Obsidian note", "aria-label": "Drag Markdown link to note" },
+    });
+    setIcon(dragLink, "grip");
+    dragLink.addEventListener("dragstart", event => {
+      if (!event.dataTransfer || !/^https?:\/\//i.test(this.currentUrlValue)) { event.preventDefault(); return; }
+      const url = this.currentUrlValue;
+      const markdown = formatBrowserTabsMarkdown([{ title: this.currentTitle || url, url }]).replace(/^- /, "");
+      event.dataTransfer.setData("text/plain", markdown);
+      event.dataTransfer.setData("text/uri-list", url);
+      event.dataTransfer.effectAllowed = "copy";
+    });
     this.backButtonEl = this.addToolbarButton("arrow-left", t("Back"), () => this.goBack());
     this.backButtonEl.addEventListener("contextmenu", (event) => {
       event.preventDefault();
@@ -962,6 +1115,8 @@ export class BrowserView extends ItemView {
       }, { capture: true, passive: true });
     }
     this.webLayerEl = this.browserContentEl.createDiv({ cls: "ubc-web-layer is-hidden" });
+    this.findBar = new BrowserFindBar(this.webLayerEl);
+    this.hoverStatusEl = this.webLayerEl.createDiv({ cls: "ubc-link-hover-status is-hidden", attr: { role: "status" } });
     this.loadingShieldEl = this.webLayerEl.createDiv({
       cls: "ubc-loading-shield is-hidden",
       attr: { "aria-hidden": "true" },
@@ -1337,6 +1492,8 @@ export class BrowserView extends ItemView {
       if (this.webview !== webview || this.plugin.isUnloading() || this.preparingLeafClose) return;
       const event = rawEvent as WebviewNavigateEvent;
       if (event.isMainFrame === false) return;
+      this.findBar?.navigate();
+      this.showLinkHover("");
       const url = event.url || this.safeWebviewUrl(webview) || this.currentUrlValue;
       if (this.ignoreBootstrapAboutBlank && url === "about:blank") return;
       if (url !== "about:blank") this.ignoreBootstrapAboutBlank = false;
@@ -1351,6 +1508,8 @@ export class BrowserView extends ItemView {
       if (this.webview !== webview || this.plugin.isUnloading() || this.preparingLeafClose) return;
       const event = rawEvent as WebviewNavigateEvent;
       if (event.isMainFrame === false) return;
+      this.findBar?.navigate();
+      this.showLinkHover("");
       const url = event.url || this.safeWebviewUrl(webview) || this.currentUrlValue;
       const previousUrl = this.currentUrlValue;
       const currentTransient = this.transientHistory[this.transientIndex];
@@ -1574,6 +1733,26 @@ export class BrowserView extends ItemView {
       !this.internalSurface && this.rootEl.offsetParent !== null && this.plugin.app.workspace.getMostRecentLeaf(this.leaf.getContainer()) === this.leaf,
       this.plugin.core.settings().blockPasskeyRequests);
     this.plugin.managedWebviewBackend.browserApis.enablePasswordCapture(webview, this.plugin.passwords.exists);
+    this.findBar?.attach(webview);
+    if (!this.guestHoverDisposer) {
+      this.guestHoverDisposer = bindGuestLinkHover(webview, (url) => {
+        if (this.webview === webview) this.showLinkHover(url);
+      });
+    }
+    if (!this.guestKeyboardDisposer) {
+      this.guestKeyboardDisposer = bindGuestBrowserShortcuts(
+        webview,
+        () => this.findBar?.isOpen ?? false,
+        () => this.webview === webview && !this.internalSurface &&
+          this.plugin.app.workspace.getMostRecentLeaf(this.leaf.getContainer()) === this.leaf,
+        (shortcut: GuestBrowserShortcut) => {
+          if (shortcut === "find") this.openFindInPage();
+          else if (shortcut === "address") this.focusAddressBar();
+          else if (shortcut === "find-next") this.findBar?.step(true);
+          else this.findBar?.step(false);
+        },
+      );
+    }
     // Guest WebContents is not addressable when the <webview> element is first
     // created. Install input observers alongside the other guest-bound
     // adapters, after did-attach/dom-ready exposes the guest contents.
@@ -1583,6 +1762,11 @@ export class BrowserView extends ItemView {
         this.bookmarkPopoverClose?.();
         this.passwordPopoverClose?.();
       });
+    }
+    if (finalAttempt) {
+      // Surfing binds at dom-ready. Reassert ownership after guest attachment.
+      this.popupDisposer?.();
+      this.popupDisposer = undefined;
     }
     if (!this.popupDisposer) {
       this.popupDisposer = this.plugin.windowOpenAdapter.bind(webview, (url, disposition) => {
@@ -2055,6 +2239,12 @@ export class BrowserView extends ItemView {
       this.checkpointTimer = undefined;
     }
     if (!this.webview) return;
+    this.findBar?.navigate();
+    this.guestHoverDisposer?.();
+    this.guestHoverDisposer = undefined;
+    this.showLinkHover("");
+    this.guestKeyboardDisposer?.();
+    this.guestKeyboardDisposer = undefined;
     const guest = this.webview;
     this.webview = null;
     this.webviewDomReady = false;
@@ -2072,6 +2262,13 @@ export class BrowserView extends ItemView {
     const doc = this.containerEl.ownerDocument;
     dismissOpenMenus(doc);
     this.activeContainerMenu?.hide();
+  }
+
+  private showLinkHover(url: string): void {
+    if (!this.hoverStatusEl) return;
+    this.hoverStatusEl.textContent = url;
+    this.hoverStatusEl.toggleClass("is-hidden", !url);
+    this.hoverStatusEl.title = url;
   }
 
   private showLoadingShield(): void {
