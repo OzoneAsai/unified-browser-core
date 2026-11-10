@@ -61,7 +61,7 @@ import { promptText } from "./text-prompt";
 import { permissionDecisionLabel, permissionLabel } from "./permission-label";
 import { fallbackFaviconUrl, renderBookmarkVisual } from "./bookmark-visual";
 import { resolveBookmarkUrl } from "../bookmarks/bookmark-url";
-import { selectionNoteContent, webTextFragmentUrl } from "../integrations/obsidian-web-transfer";
+import { formatBrowserTabsMarkdown, selectionNoteContent, videoTimestampLink, webTextFragmentUrl } from "../integrations/obsidian-web-transfer";
 import { dismissOpenMenus, showDismissibleMenu, trackDismissibleMenu } from "./popup-dismissal";
 import type { HistoryVersionSummary } from "../persistence/hybrid-persistence";
 
@@ -538,6 +538,17 @@ export class BrowserView extends ItemView {
     }
   }
 
+  async currentVideoTimestampLink(): Promise<{ url: string; label: string } | null> {
+    const guest = this.readyWebview();
+    if (!guest?.executeJavaScript) return null;
+    try {
+      const seconds = await guest.executeJavaScript<number | null>(
+        "(() => { const video = document.querySelector('video'); return video && Number.isFinite(video.currentTime) ? video.currentTime : null; })()",
+      );
+      return seconds === null || this.webview !== guest ? null : videoTimestampLink(this.currentUrlValue, seconds);
+    } catch { return null; }
+  }
+
   executeWebEdit(command: WebEditCommand): void {
     this.readyWebview()?.[command]?.();
   }
@@ -1010,6 +1021,21 @@ export class BrowserView extends ItemView {
       this.browserHeaderEl?.addClass("ubc-browser-view-header");
     }
     this.toolbarEl = toolbarHost.createDiv({ cls: "ubc-toolbar" });
+    // A host-side drag source can hand Markdown to Obsidian's editors without
+    // injecting drag handlers into arbitrary third-party web pages.
+    const dragLink = this.toolbarEl.createEl("button", {
+      cls: "ubc-drag-markdown-link clickable-icon",
+      attr: { type: "button", draggable: "true", title: "Drag page link into an Obsidian note", "aria-label": "Drag Markdown link to note" },
+    });
+    setIcon(dragLink, "grip");
+    dragLink.addEventListener("dragstart", event => {
+      if (!event.dataTransfer || !/^https?:\/\//i.test(this.currentUrlValue)) { event.preventDefault(); return; }
+      const url = this.currentUrlValue;
+      const markdown = formatBrowserTabsMarkdown([{ title: this.currentTitle || url, url }]).replace(/^- /, "");
+      event.dataTransfer.setData("text/plain", markdown);
+      event.dataTransfer.setData("text/uri-list", url);
+      event.dataTransfer.effectAllowed = "copy";
+    });
     this.backButtonEl = this.addToolbarButton("arrow-left", t("Back"), () => this.goBack());
     this.backButtonEl.addEventListener("contextmenu", (event) => {
       event.preventDefault();

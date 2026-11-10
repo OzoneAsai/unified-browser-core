@@ -17,6 +17,9 @@ import { registerObsidianLinkBridge, type ObsidianBrowserLinkIntent } from "./in
 import { registerObsidianCanvasBrowserActions } from "./integrations/obsidian-canvas";
 import { formatBrowserTabsMarkdown } from "./integrations/obsidian-web-transfer";
 import { ObsidianVaultBookmarkMirror } from "./integrations/obsidian-vault-bookmark-mirror";
+import { ObsidianBrowserTreeView, BROWSER_TREE_VIEW_TYPE } from "./ui/obsidian-browser-tree-view";
+import { registerObsidianSearchSurfaces } from "./integrations/obsidian-search-surfaces";
+import { normalizeBrowserAddress } from "./navigation/address-normalizer";
 import { ObsidianBookmarksAdapter } from "./adapters/obsidian-bookmarks";
 import { WebViewerBookmarksAdapter } from "./adapters/webviewer-bookmarks";
 import { SurfingMigrationAdapter, normalizeSurfingBookmarks, surfingFolderPaths, surfingSearchTemplate } from "./adapters/surfing-migration";
@@ -256,6 +259,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     }, 15_000));
 
     this.registerView(BROWSER_VIEW_TYPE, (leaf) => new BrowserView(leaf, this));
+    this.registerView(BROWSER_TREE_VIEW_TYPE, (leaf) => new ObsidianBrowserTreeView(leaf, this));
     this.registerView(UBC_HTML_FILE_VIEW, leaf => new UbcHtmlFileView(leaf, this));
     this.linkHoverPreview = new ObsidianHoverPreview(this);
     this.register(() => this.linkHoverPreview.close());
@@ -281,6 +285,12 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       register: dispose => this.register(dispose),
       registerEvent: ref => this.registerEvent(ref),
       openUrl: url => this.openObsidianLink({ url, source: "canvas", external: false }),
+    });
+    registerObsidianSearchSurfaces({
+      app: this.app, core: this.core,
+      openBrowser: request => this.openBrowser(request),
+      registerEvent: ref => this.registerEvent(ref),
+      register: callback => this.register(callback),
     });
     this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
       if (file instanceof TFile && ["html", "htm"].includes(file.extension)) {
@@ -355,6 +365,21 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       callback: () => this.openBrowserTabSearch(),
     });
     this.addCommand({
+      id: "open-browser-tab-tree",
+      name: t("Open browser tab tree sidebar"),
+      callback: () => void this.openBrowserTabTree(),
+    });
+    this.addCommand({
+      id: "search-in-markdown-header",
+      name: t("Search web from current note header"),
+      checkCallback: checking => {
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view) return false;
+        if (!checking) this.showMarkdownHeaderSearch(view);
+        return true;
+      },
+    });
+    this.addCommand({
       id: "copy-browser-tabs-as-markdown",
       name: t("Copy browser tabs as Markdown links"),
       callback: () => {
@@ -401,6 +426,22 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
         if (!view || !/^https?:\/\//i.test(view.currentUrl())) return false;
         if (!checking) void view.copySelectionHighlightUrl();
         return true;
+      },
+    });
+    this.addCommand({
+      id: "insert-browser-video-timestamp",
+      name: t("Insert browser video timestamp into note"),
+      editorCallback: async editor => {
+        const view = this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE)
+          .sort((a, b) => {
+            const touched = (leaf: WorkspaceLeaf) => leaf.view instanceof BrowserView
+              ? this.core.state.history.leaves[leaf.view.lifecycleIdentity()]?.lastActiveAt ?? 0 : 0;
+            return touched(b) - touched(a);
+          })
+          .find(leaf => leaf.view instanceof BrowserView)?.view as BrowserView | undefined;
+        const timestamp = await view?.currentVideoTimestampLink();
+        if (!timestamp) { new Notice(t("No playable video position found in an open browser tab.")); return; }
+        editor.replaceSelection(`[${timestamp.label}](<${timestamp.url}>)`);
       },
     });
     this.addCommand({
@@ -799,6 +840,36 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
     });
     if (reveal) this.app.workspace.revealLeaf(leaf);
     return leaf;
+  }
+
+  async openBrowserTabTree(): Promise<void> {
+    const present = this.app.workspace.getLeavesOfType(BROWSER_TREE_VIEW_TYPE)[0];
+    if (present) { await this.app.workspace.revealLeaf(present); return; }
+    const leaf = this.app.workspace.getRightLeaf(true) ?? this.app.workspace.getLeaf("split");
+    await leaf.setViewState({ type: BROWSER_TREE_VIEW_TYPE, active: true });
+    await this.app.workspace.revealLeaf(leaf);
+  }
+
+  private showMarkdownHeaderSearch(view: MarkdownView): void {
+    const header = view.containerEl.querySelector<HTMLElement>(".view-header");
+    if (!header) { new Notice(t("Could not find the note header"));return; }
+    const previous = header.querySelector<HTMLInputElement>(".ubc-markdown-header-search");
+    if (previous) { previous.focus();previous.select();return; }
+    const input = header.createEl("input", { cls: "ubc-markdown-header-search", attr: {
+      type: "search", "aria-label": "Search web from note", placeholder: "Search web or URL",
+    } });
+    const remove = () => input.remove();
+    input.addEventListener("keydown", event => {
+      if (event.key === "Escape") { event.preventDefault();remove();return; }
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      const value = input.value.trim();
+      if (!value) { remove();return; }
+      const url = normalizeBrowserAddress(value, query => this.core.searchUrl(query));
+      remove();void this.openBrowser({ url });
+    });
+    input.addEventListener("blur", remove, { once: true });
+    input.focus();
   }
 
   async openFromOpener(

@@ -1399,5 +1399,29 @@
 .ubc-embed-error { padding: 12px; border: 1px solid var(--background-modifier-error); border-radius: 8px; color: var(--text-error); }
 .ubc-hover-preview { position: fixed; z-index: var(--layer-popover, 130); background: var(--background-primary); border: 1px solid var(--background-modifier-border); box-shadow: 0 12px 35px #0005; border-radius: 10px; overflow: hidden; }
 .ubc-hover-preview .ubc-embedded-browser { height: 100%; min-height: 0; border: 0; }
+
+/* Obsidian Workspace-owned tab tree. BrowserCore remains the tab registry. */
+.ubc-tab-tree { padding: 12px 8px; display: grid; align-content: start; gap: 6px; }
+.ubc-tab-tree-header { display: flex; align-items: center; gap: 5px; padding: 0 6px 6px; }
+.ubc-tab-tree-header h3 { font-size: var(--font-ui-medium); font-weight: var(--font-semibold); margin: 0 auto 0 0; }
+.ubc-tab-tree-header button { min-width: 26px; min-height: 26px; }
+.ubc-tab-tree-group, .ubc-tab-tree-ungrouped { display: grid; align-content: start; min-width: 0; }
+.ubc-tab-tree-group-header { display: flex; gap: 6px; align-items: center; min-width: 0; text-align: left; padding: 6px 8px; border-radius: var(--radius-s); color: var(--text-muted); font-size: var(--font-ui-small); }
+.ubc-tab-tree-group-header:hover { background: var(--background-modifier-hover); }
+.ubc-tab-tree-count { margin-left: auto; font-variant-numeric: tabular-nums; }
+.ubc-tab-tree-entry { display: flex; align-items: center; min-width: 0; gap: 8px; padding: 4px 8px 4px 20px; border-radius: var(--radius-s); }
+.ubc-tab-tree-entry:hover, .ubc-tab-tree-entry.is-active { background: var(--background-modifier-hover); }
+.ubc-tab-tree-icon { color: var(--text-muted); flex-shrink: 0; }
+.ubc-tab-tree-label { display: flex; flex: 1; flex-direction: column; gap: 2px; align-items: start; min-width: 0; padding: 2px 0; background: transparent; border: none; box-shadow: none; text-align: left; font-size: var(--font-ui-small); }
+.ubc-tab-tree-label span { display: block; max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.ubc-tab-tree-url { font-size: var(--font-smallest); color: var(--text-faint); }
+.ubc-tab-tree-empty { padding: 16px 8px; color: var(--text-muted); font-size: var(--font-ui-small); }
+.ubc-obsidian-empty-search { display: flex; align-items: center; gap: 8px; width: min(100%, 460px); margin: 18px auto 4px; padding: 6px 12px; background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); }
+.ubc-obsidian-empty-search:focus-within { border-color: var(--interactive-accent); }
+.ubc-obsidian-empty-search-icon { color: var(--text-muted); }
+.ubc-obsidian-empty-search input { min-width: 0; flex: 1; border: 0; box-shadow: none; background: transparent; }
+.ubc-markdown-header-search { width: min(280px, 46vw); flex-shrink: 1; min-width: 100px; margin: 0 8px; padding: 4px 8px; }
+.ubc-drag-markdown-link { cursor: grab; flex: 0 0 auto; }
+.ubc-drag-markdown-link:active { cursor: grabbing; }
 .canvas-node .ubc-canvas-browser-action { position: absolute; z-index: 6; top: 7px; right: 7px; width: 30px; height: 28px; border: 1px solid var(--background-modifier-border); border-radius: 6px; color: var(--text-normal); background: var(--background-primary); opacity: .7; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
 .canvas-node:hover .ubc-canvas-browser-action, .canvas-node:focus-within .ubc-canvas-browser-action { opacity: 1; }

@@ -23,7 +23,7 @@ __export(main_exports, {
   default: () => UnifiedBrowserCorePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian25 = require("obsidian");
+var import_obsidian27 = require("obsidian");
 
 // src/adapters/electron-compat.ts
 function resolveElectronRemote() {
@@ -2971,8 +2971,8 @@ function webTextFragmentUrl(url, selected) {
     return null;
   }
   if (target.protocol !== "http:" && target.protocol !== "https:") return null;
-  const selection = content.length > 250 ? `${content.slice(0, 140)},${content.slice(-90)}` : content;
-  const encoded = selection.split(",").map((part) => encodeURIComponent(part)).join(",");
+  const chars = Array.from(content);
+  const encoded = chars.length > 250 ? `${encodeURIComponent(chars.slice(0, 140).join(""))},${encodeURIComponent(chars.slice(-90).join(""))}` : encodeURIComponent(content);
   const existing = target.hash.replace(/^#/, "").replace(/:~:text=.*$/u, "");
   target.hash = `${existing}:~:text=${encoded}`;
   return target.href;
@@ -2982,6 +2982,27 @@ function formatBrowserTabsMarkdown(tabs) {
     const name = (item.title || item.url).replace(/[\[\]\\]/g, "\\$&").replace(/[\r\n]+/g, " ");
     return `- [${name}](<${item.url.replaceAll(">", "%3E")}>)`;
   }).join("\n");
+}
+function videoTimestampLink(url, time) {
+  if (!Number.isFinite(time) || time < 0) return null;
+  let page;
+  try {
+    page = new URL(url);
+  } catch {
+    return null;
+  }
+  if (!/^https?:$/u.test(page.protocol)) return null;
+  const seconds = Math.floor(time);
+  if (/(^|\.)youtube\.com$|(^|\.)youtu\.be$|(^|\.)bilibili\.com$/iu.test(page.hostname)) {
+    page.searchParams.set("t", String(seconds));
+  } else {
+    page.hash = `t=${seconds}`;
+  }
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor(seconds % 3600 / 60);
+  const remainder = seconds % 60;
+  const label2 = hours ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}` : `${minutes}:${String(remainder).padStart(2, "0")}`;
+  return { url: page.href, label: label2 };
 }
 function selectionNoteContent(selection) {
   const title = selection.title.trim() || "Web selection";
@@ -3114,7 +3135,9 @@ var ObsidianVaultBookmarkMirror = class {
       if (!(item instanceof import_obsidian8.TFile) || item.extension !== "md") continue;
       const data = parseMirroredBookmark(await this.app.vault.cachedRead(item));
       if (data && !result.has(data.id)) result.set(data.id, { file: item, data });
-      else unreadable = true;
+      else if (this.core.state.vaultBookmarkMirror.publishedIds.some((id) => item.path === `${BOOKMARK_VAULT_FOLDER}/${encodeURIComponent(id)}.md` || this.files.get(id) === item)) {
+        unreadable = true;
+      }
     }
     return { records: result, unreadable };
   }
@@ -3167,6 +3190,12 @@ var ObsidianVaultBookmarkMirror = class {
       }
     } finally {
       this.applyingFromVault = false;
+    }
+    if (unreadable) {
+      console.warn("Unified Browser Core: a managed Vault bookmark note has invalid frontmatter; export paused");
+      this.core.scheduleSave();
+      this.refreshViews();
+      return;
     }
     const nextTracked = new Set(tracked.filter((id) => activeIds.has(id) || unreadable));
     for (const bookmark of this.core.bookmarks.allBookmarks()) {
@@ -3245,6 +3274,374 @@ var ObsidianVaultBookmarkMirror = class {
     this.files.clear();
   }
 };
+
+// src/ui/obsidian-browser-tree-view.ts
+var import_obsidian10 = require("obsidian");
+
+// src/core/id.ts
+function createId(prefix) {
+  const random = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `${prefix}-${random}`;
+}
+function safePartitionPart(value) {
+  return value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "container";
+}
+
+// src/ui/text-prompt.ts
+var import_obsidian9 = require("obsidian");
+function promptText(app, title, initialValue = "", placeholder = "") {
+  return new Promise((resolve) => {
+    new TextPromptModal(app, title, initialValue, placeholder, resolve).open();
+  });
+}
+var TextPromptModal = class extends import_obsidian9.Modal {
+  constructor(app, promptTitle, initialValue, placeholder, resolveValue) {
+    super(app);
+    this.promptTitle = promptTitle;
+    this.initialValue = initialValue;
+    this.placeholder = placeholder;
+    this.resolveValue = resolveValue;
+  }
+  settled = false;
+  onOpen() {
+    this.contentEl.createEl("h2", { text: this.promptTitle });
+    const field2 = this.contentEl.createEl("label", { cls: "ubc-prompt-field" });
+    if (this.placeholder) field2.createSpan({ cls: "ubc-prompt-label", text: this.placeholder });
+    const input = field2.createEl("input", {
+      attr: {
+        type: "text",
+        placeholder: this.placeholder,
+        "aria-label": this.placeholder || this.promptTitle
+      }
+    });
+    input.value = this.initialValue;
+    input.addClass("ubc-prompt-input");
+    const actions = this.contentEl.createDiv({ cls: "ubc-modal-actions" });
+    actions.createEl("button", { text: t("Cancel") }).addEventListener("click", () => this.finish(void 0));
+    const save = actions.createEl("button", { text: t("Save") });
+    const submit = () => {
+      const value = input.value.trim();
+      if (!value) return;
+      this.finish(value);
+    };
+    const syncSave = () => {
+      const enabled = Boolean(input.value.trim());
+      save.disabled = !enabled;
+      save.toggleClass("mod-cta", enabled);
+    };
+    save.addEventListener("click", submit);
+    input.addEventListener("input", syncSave);
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || save.disabled) return;
+      event.preventDefault();
+      submit();
+    });
+    syncSave();
+    input.focus();
+    input.select();
+  }
+  onClose() {
+    this.contentEl.empty();
+    if (!this.settled) this.resolveValue(void 0);
+  }
+  finish(value) {
+    if (this.settled) return;
+    this.settled = true;
+    this.resolveValue(value);
+    this.close();
+  }
+};
+
+// src/tabs/browser-tab-tree-model.ts
+function orderedTabTree(tabs, tree) {
+  const order = new Map(tree.tabOrder.map((id, index) => [id, index]));
+  const sorted = [...tabs].sort((a, b) => (order.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.id) ?? Number.MAX_SAFE_INTEGER));
+  const groups = /* @__PURE__ */ new Map();
+  for (const group of tree.groups) groups.set(group.id, []);
+  const ungrouped = [];
+  for (const tab of sorted) {
+    const assigned = tree.tabToGroup[tab.id];
+    const target = assigned ? groups.get(assigned) : void 0;
+    if (target) target.push(tab);
+    else ungrouped.push(tab);
+  }
+  return { groups, ungrouped };
+}
+
+// src/ui/obsidian-browser-tree-view.ts
+var BROWSER_TREE_VIEW_TYPE = "ubc-browser-tab-tree";
+var ObsidianBrowserTreeView = class extends import_obsidian10.ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+  }
+  disposeEvents = [];
+  renderScheduled = false;
+  getViewType() {
+    return BROWSER_TREE_VIEW_TYPE;
+  }
+  getDisplayText() {
+    return "Browser tab tree";
+  }
+  getIcon() {
+    return "list-tree";
+  }
+  async onOpen() {
+    this.disposeEvents.push(this.plugin.core.events.on("leaf-opened", () => this.scheduleRender()));
+    this.disposeEvents.push(this.plugin.core.events.on("leaf-closed", () => this.scheduleRender()));
+    this.disposeEvents.push(this.plugin.core.events.on("navigation-committed", () => this.scheduleRender()));
+    this.registerEvent(this.app.workspace.on("layout-change", () => this.scheduleRender()));
+    this.render();
+  }
+  async onClose() {
+    for (const dispose of this.disposeEvents) dispose();
+    this.disposeEvents = [];
+    this.contentEl.empty();
+  }
+  state() {
+    return this.plugin.core.state.browserTabTree;
+  }
+  persist() {
+    this.plugin.core.scheduleSave();
+    this.render();
+  }
+  scheduleRender() {
+    if (this.renderScheduled) return;
+    this.renderScheduled = true;
+    queueMicrotask(() => {
+      this.renderScheduled = false;
+      this.render();
+    });
+  }
+  async addGroup() {
+    const name = await promptText(this.app, "New browser tab group", "", "Group name");
+    if (!name) return;
+    this.state().groups.push({ id: createId("tab-group"), name, collapsed: false });
+    this.persist();
+  }
+  moveTab(id, groupId, beforeId) {
+    const tree = this.state();
+    if (groupId && !tree.groups.some((group) => group.id === groupId)) return;
+    if (groupId) tree.tabToGroup[id] = groupId;
+    else delete tree.tabToGroup[id];
+    const order = tree.tabOrder.filter((tabId) => tabId !== id);
+    const position = beforeId ? order.indexOf(beforeId) : -1;
+    if (position < 0) order.push(id);
+    else order.splice(position, 0, id);
+    tree.tabOrder = order;
+    this.persist();
+  }
+  async saveCurrentWorkspace() {
+    const name = await promptText(this.app, "Save browser workspace", "", "Workspace name");
+    if (!name) return;
+    const tree = this.state();
+    if (tree.savedWorkspaces[name]) {
+      new import_obsidian10.Notice("That browser workspace name is already in use.");
+      return;
+    }
+    tree.savedWorkspaces[name] = {
+      savedAt: Date.now(),
+      groups: tree.groups.map((group) => ({ ...group })),
+      tabs: this.plugin.api.tabs().map((tab) => ({
+        id: tab.id,
+        url: tab.url,
+        title: tab.title,
+        containerId: tab.containerId,
+        pinned: tab.pinned,
+        groupId: tree.tabToGroup[tab.id] ?? null
+      }))
+    };
+    this.persist();
+    new import_obsidian10.Notice(`Browser workspace saved: ${name}`);
+  }
+  async restoreWorkspace(name) {
+    const saved = this.state().savedWorkspaces[name];
+    if (!saved) return;
+    const tree = this.state();
+    const groups = new Map(tree.groups.map((group) => [group.id, group]));
+    for (const group of saved.groups) if (!groups.has(group.id)) tree.groups.push({ ...group });
+    let restored = 0;
+    for (const tab of saved.tabs) {
+      try {
+        const leaf = await this.plugin.openBrowser({
+          url: tab.url,
+          containerId: tab.containerId,
+          state: { pinned: tab.pinned },
+          reveal: false
+        });
+        leaf.setPinned(tab.pinned);
+        const current = leaf.view.getState();
+        const id = current.lifecycleId;
+        if (id) this.moveTab(id, tab.groupId);
+        restored++;
+      } catch (error) {
+        console.warn("Unified Browser Core: could not restore browser tab", tab.url, error);
+      }
+    }
+    this.persist();
+    new import_obsidian10.Notice(`Restored ${restored} browser tabs from ${name}`);
+  }
+  render() {
+    if (!this.contentEl) return;
+    this.contentEl.empty();
+    const root = this.contentEl.createDiv({ cls: "ubc-tab-tree" });
+    const header = root.createDiv({ cls: "ubc-tab-tree-header" });
+    header.createEl("h3", { text: "Browser tabs" });
+    const add = header.createEl("button", { cls: "clickable-icon", attr: { "aria-label": "Create browser tab group", title: "Create group" } });
+    (0, import_obsidian10.setIcon)(add, "folder-plus");
+    add.addEventListener("click", () => void this.addGroup());
+    const save = header.createEl("button", { cls: "clickable-icon", attr: { "aria-label": "Save browser workspace", title: "Save workspace" } });
+    (0, import_obsidian10.setIcon)(save, "save");
+    save.addEventListener("click", () => void this.saveCurrentWorkspace());
+    const restore = header.createEl("button", { cls: "clickable-icon", attr: { "aria-label": "Restore browser workspace", title: "Restore workspace" } });
+    (0, import_obsidian10.setIcon)(restore, "folder-open");
+    restore.addEventListener("click", () => {
+      const menu = new import_obsidian10.Menu();
+      for (const name of Object.keys(this.state().savedWorkspaces).sort()) {
+        menu.addItem((item) => item.setTitle(name).onClick(() => void this.restoreWorkspace(name)));
+      }
+      menu.addItem((item) => item.setTitle("Save current workspace\u2026").onClick(() => void this.saveCurrentWorkspace()));
+      const bounds = restore.getBoundingClientRect();
+      menu.showAtPosition({ x: bounds.left, y: bounds.bottom });
+    });
+    const tree = this.state();
+    const { groups, ungrouped } = orderedTabTree(this.plugin.api.tabs(), tree);
+    for (const group of tree.groups) {
+      const section = root.createDiv({ cls: "ubc-tab-tree-group" });
+      const label3 = section.createEl("button", { cls: "ubc-tab-tree-group-header", attr: { "aria-expanded": String(!group.collapsed) } });
+      const icon = label3.createSpan();
+      (0, import_obsidian10.setIcon)(icon, group.collapsed ? "chevron-right" : "chevron-down");
+      label3.createSpan({ text: group.name });
+      label3.createSpan({ cls: "ubc-tab-tree-count", text: String(groups.get(group.id)?.length ?? 0) });
+      label3.addEventListener("click", () => {
+        group.collapsed = !group.collapsed;
+        this.persist();
+      });
+      this.acceptDrop(label3, group.id);
+      label3.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        const menu = new import_obsidian10.Menu();
+        menu.addItem((item) => item.setTitle("Rename group").onClick(async () => {
+          const renamed = await promptText(this.app, "Rename tab group", group.name);
+          if (renamed) {
+            group.name = renamed;
+            this.persist();
+          }
+        }));
+        menu.addItem((item) => item.setTitle("Remove group (keep tabs)").onClick(() => {
+          for (const [tabId, groupId] of Object.entries(tree.tabToGroup)) if (groupId === group.id) delete tree.tabToGroup[tabId];
+          tree.groups = tree.groups.filter((entry) => entry.id !== group.id);
+          this.persist();
+        }));
+        menu.showAtMouseEvent(event);
+      });
+      if (!group.collapsed) for (const tab of groups.get(group.id) ?? []) this.renderTab(section, tab, group.id);
+    }
+    const other = root.createDiv({ cls: "ubc-tab-tree-ungrouped" });
+    const label2 = other.createDiv({ cls: "ubc-tab-tree-group-header", text: `Ungrouped \xB7 ${ungrouped.length}` });
+    this.acceptDrop(label2, null);
+    for (const tab of ungrouped) this.renderTab(other, tab, null);
+    if (!this.plugin.api.tabs().length) root.createDiv({ cls: "ubc-tab-tree-empty", text: "No browser tabs. Open a browser tab to see it here." });
+  }
+  acceptDrop(target, groupId, beforeId) {
+    target.addEventListener("dragover", (event) => {
+      if (!event.dataTransfer?.types.includes("application/x-ubc-tab")) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+    });
+    target.addEventListener("drop", (event) => {
+      const id = event.dataTransfer?.getData("application/x-ubc-tab");
+      if (!id || !this.plugin.api.tabs().some((tab) => tab.id === id)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.moveTab(id, groupId, beforeId === id ? void 0 : beforeId);
+    });
+  }
+  renderTab(parent, tab, groupId) {
+    const item = parent.createDiv({ cls: "ubc-tab-tree-entry" });
+    item.draggable = true;
+    item.setAttribute("role", "listitem");
+    item.setAttribute("aria-label", tab.title || tab.url);
+    item.toggleClass("is-active", tab.active);
+    const icon = item.createSpan({ cls: "ubc-tab-tree-icon" });
+    (0, import_obsidian10.setIcon)(icon, tab.pinned ? "pin" : "globe");
+    const text = item.createEl("button", { cls: "ubc-tab-tree-label", attr: { type: "button", title: tab.url } });
+    text.createSpan({ text: tab.title || tab.url });
+    text.createSpan({ cls: "ubc-tab-tree-url", text: tab.url });
+    text.addEventListener("click", () => void this.plugin.api.activateTab(tab.id));
+    item.addEventListener("dragstart", (event) => {
+      event.dataTransfer?.setData("application/x-ubc-tab", tab.id);
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+    });
+    this.acceptDrop(item, groupId, tab.id);
+    item.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      const menu = new import_obsidian10.Menu();
+      menu.addItem((entry) => entry.setTitle("Activate").onClick(() => void this.plugin.api.activateTab(tab.id)));
+      menu.addItem((entry) => entry.setTitle("Move to Ungrouped").onClick(() => this.moveTab(tab.id, null)));
+      for (const group of this.state().groups) {
+        menu.addItem((entry) => entry.setTitle(`Move to ${group.name}`).onClick(() => this.moveTab(tab.id, group.id)));
+      }
+      menu.addItem((entry) => entry.setTitle("Close tab").onClick(() => this.plugin.api.closeTab(tab.id)));
+      menu.showAtMouseEvent(event);
+    });
+  }
+};
+
+// src/integrations/obsidian-search-surfaces.ts
+var import_obsidian11 = require("obsidian");
+function registerObsidianSearchSurfaces(host) {
+  const widgets = /* @__PURE__ */ new Map();
+  let scheduled = false;
+  const render = () => {
+    scheduled = false;
+    const roots = /* @__PURE__ */ new Set();
+    if (!host.core.settings().replaceEmptyTabsWithHome) {
+      for (const leaf of host.app.workspace.getLeavesOfType("empty")) {
+        const root = leaf.view.containerEl.querySelector(".empty-state-container");
+        if (root) roots.add(root);
+      }
+    }
+    for (const [root, widget] of widgets) {
+      if (roots.has(root) && root.isConnected) continue;
+      widget.remove();
+      widgets.delete(root);
+    }
+    for (const root of roots) {
+      if (widgets.has(root)) continue;
+      const form = root.createEl("form", { cls: "ubc-obsidian-empty-search", attr: { role: "search" } });
+      const icon = form.createSpan({ cls: "ubc-obsidian-empty-search-icon" });
+      (0, import_obsidian11.setIcon)(icon, "search");
+      const input = form.createEl("input", { attr: {
+        type: "search",
+        "aria-label": "Search the web with UBC",
+        placeholder: "Search the web or enter a URL",
+        autocomplete: "off",
+        autocapitalize: "off",
+        spellcheck: "false"
+      } });
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const text = input.value.trim();
+        if (!text) return;
+        const url = normalizeBrowserAddress(text, (query) => host.core.searchUrl(query));
+        void host.openBrowser({ url });
+      });
+      widgets.set(root, form);
+    }
+  };
+  const schedule = () => {
+    if (scheduled) return;
+    scheduled = true;
+    queueMicrotask(render);
+  };
+  host.registerEvent(host.app.workspace.on("layout-change", schedule));
+  host.register(() => {
+    for (const widget of widgets.values()) widget.remove();
+    widgets.clear();
+  });
+  schedule();
+}
 
 // src/adapters/obsidian-bookmarks.ts
 var ObsidianBookmarksAdapter = class {
@@ -3664,15 +4061,6 @@ function mapBookmarkChange(event) {
     kind: event.kind,
     id: event.id
   };
-}
-
-// src/core/id.ts
-function createId(prefix) {
-  const random = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-  return `${prefix}-${random}`;
-}
-function safePartitionPart(value) {
-  return value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "container";
 }
 
 // src/bookmarks/bookmark-store.ts
@@ -5066,6 +5454,12 @@ var BrowserCore = class {
       vaultBookmarkMirror: {
         enabled: raw?.vaultBookmarkMirror?.enabled === true,
         publishedIds: Array.isArray(raw?.vaultBookmarkMirror?.publishedIds) ? raw.vaultBookmarkMirror.publishedIds.filter((id) => typeof id === "string") : []
+      },
+      browserTabTree: {
+        groups: Array.isArray(raw?.browserTabTree?.groups) ? raw.browserTabTree.groups : [],
+        tabToGroup: raw?.browserTabTree?.tabToGroup && typeof raw.browserTabTree.tabToGroup === "object" ? raw.browserTabTree.tabToGroup : {},
+        tabOrder: Array.isArray(raw?.browserTabTree?.tabOrder) ? raw.browserTabTree.tabOrder : [],
+        savedWorkspaces: raw?.browserTabTree?.savedWorkspaces && typeof raw.browserTabTree.savedWorkspaces === "object" ? raw.browserTabTree.savedWorkspaces : {}
       }
     };
   }
@@ -5256,14 +5650,14 @@ function resolveTabLayoutPolicy(style) {
 }
 
 // src/settings/settings-tab.ts
-var import_obsidian10 = require("obsidian");
+var import_obsidian13 = require("obsidian");
 
 // src/ui/confirm-modal.ts
-var import_obsidian9 = require("obsidian");
+var import_obsidian12 = require("obsidian");
 function confirmAction(app, title, message, confirmLabel = "Delete") {
   return new Promise((resolve) => new ConfirmActionModal(app, title, message, confirmLabel, resolve).open());
 }
-var ConfirmActionModal = class extends import_obsidian9.Modal {
+var ConfirmActionModal = class extends import_obsidian12.Modal {
   constructor(app, titleText, message, confirmLabel, resolveResult) {
     super(app);
     this.titleText = titleText;
@@ -5365,7 +5759,7 @@ function renderSettingsSectionNavigation(container) {
 }
 
 // src/settings/settings-tab.ts
-var BrowserSettingTab = class extends import_obsidian10.PluginSettingTab {
+var BrowserSettingTab = class extends import_obsidian13.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -5373,27 +5767,27 @@ var BrowserSettingTab = class extends import_obsidian10.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian10.Setting(containerEl).setName(t("Unified Browser Core")).setHeading();
-    new import_obsidian10.Setting(containerEl).setName(t("Language")).setDesc(t("Choose the language used by Browser Core.")).addDropdown((dropdown) => dropdown.addOption("auto", t("Follow Obsidian")).addOption("en", t("English")).addOption("ja", "\u65E5\u672C\u8A9E").setValue(this.plugin.core.settings().language).onChange((value) => {
+    new import_obsidian13.Setting(containerEl).setName(t("Unified Browser Core")).setHeading();
+    new import_obsidian13.Setting(containerEl).setName(t("Language")).setDesc(t("Choose the language used by Browser Core.")).addDropdown((dropdown) => dropdown.addOption("auto", t("Follow Obsidian")).addOption("en", t("English")).addOption("ja", "\u65E5\u672C\u8A9E").setValue(this.plugin.core.settings().language).onChange((value) => {
       const language2 = value;
       this.plugin.core.updateSettings({ language: language2 });
       setLanguage(language2);
       this.plugin.refreshLanguage();
       this.display();
     }));
-    new import_obsidian10.Setting(containerEl).setName(t("Playback and authentication")).setHeading();
-    new import_obsidian10.Setting(containerEl).setName(t("Password manager")).setDesc(t("Manage the encrypted vault, Windows Hello, recovery keys, backups, and automatic locking.")).addButton((button2) => button2.setButtonText(t("Open password vault")).onClick(() => void this.plugin.openBrowser({ url: "browser://passwords" })));
-    new import_obsidian10.Setting(containerEl).setName(t("Autoplay")).setDesc(t("Block audible autoplay until you interact with the page. Muted videos may still play. Reopen tabs after changing this setting.")).addDropdown((dropdown) => dropdown.addOption("block-audible", t("Block audible autoplay")).addOption("allow", t("Allow autoplay")).setValue(this.plugin.core.settings().autoplayPolicy).onChange((value) => {
+    new import_obsidian13.Setting(containerEl).setName(t("Playback and authentication")).setHeading();
+    new import_obsidian13.Setting(containerEl).setName(t("Password manager")).setDesc(t("Manage the encrypted vault, Windows Hello, recovery keys, backups, and automatic locking.")).addButton((button2) => button2.setButtonText(t("Open password vault")).onClick(() => void this.plugin.openBrowser({ url: "browser://passwords" })));
+    new import_obsidian13.Setting(containerEl).setName(t("Autoplay")).setDesc(t("Block audible autoplay until you interact with the page. Muted videos may still play. Reopen tabs after changing this setting.")).addDropdown((dropdown) => dropdown.addOption("block-audible", t("Block audible autoplay")).addOption("allow", t("Allow autoplay")).setValue(this.plugin.core.settings().autoplayPolicy).onChange((value) => {
       if (value === "allow" || value === "block-audible") this.plugin.core.updateSettings({ autoplayPolicy: value });
     }));
-    new import_obsidian10.Setting(containerEl).setName(t("Block passkey requests")).setDesc(t("Prevent sites from requesting or creating passkeys, including requests you start yourself. Turn off to sign in with a passkey. Reload pages after changing this setting.")).addToggle((toggle) => toggle.setValue(this.plugin.core.settings().blockPasskeyRequests).onChange((value) => this.plugin.core.updateSettings({ blockPasskeyRequests: value })));
-    new import_obsidian10.Setting(containerEl).setName(t("Tab style")).setDesc(t("Firefox keeps a readable minimum tab width and overflows horizontally. Chrome compresses tabs more aggressively.")).addDropdown(
+    new import_obsidian13.Setting(containerEl).setName(t("Block passkey requests")).setDesc(t("Prevent sites from requesting or creating passkeys, including requests you start yourself. Turn off to sign in with a passkey. Reload pages after changing this setting.")).addToggle((toggle) => toggle.setValue(this.plugin.core.settings().blockPasskeyRequests).onChange((value) => this.plugin.core.updateSettings({ blockPasskeyRequests: value })));
+    new import_obsidian13.Setting(containerEl).setName(t("Tab style")).setDesc(t("Firefox keeps a readable minimum tab width and overflows horizontally. Chrome compresses tabs more aggressively.")).addDropdown(
       (dropdown) => dropdown.addOption("firefox", t("Firefox")).addOption("chrome", t("Chrome")).setValue(this.plugin.core.settings().tabStyle).onChange((value) => {
         this.plugin.core.updateSettings({ tabStyle: value });
         this.plugin.applyTabStyle();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName(t("Use Browser Core tab layout")).setDesc(t("Apply the selected browser tab style only to panes that contain Browser Core tabs.")).addToggle(
+    new import_obsidian13.Setting(containerEl).setName(t("Use Browser Core tab layout")).setDesc(t("Apply the selected browser tab style only to panes that contain Browser Core tabs.")).addToggle(
       (toggle) => toggle.setValue(this.plugin.core.settings().tabStripIntegrationEnabled).onChange((value) => {
         this.plugin.core.updateSettings({ tabStripIntegrationEnabled: value });
         this.plugin.applyTabStyle();
@@ -5402,7 +5796,7 @@ var BrowserSettingTab = class extends import_obsidian10.PluginSettingTab {
     const currentSearchTemplate = this.plugin.core.settings().searchUrlTemplate;
     const currentSearchPreset = searchPresetForTemplate(currentSearchTemplate);
     let customSearchSetting;
-    const searchEngineSetting = new import_obsidian10.Setting(containerEl).setName(t("Web search engine")).setDesc(t("Used when Browser Core treats text as a web search rather than an address."));
+    const searchEngineSetting = new import_obsidian13.Setting(containerEl).setName(t("Web search engine")).setDesc(t("Used when Browser Core treats text as a web search rather than an address."));
     searchEngineSetting.addDropdown((dropdown) => {
       for (const preset of SEARCH_PRESETS) dropdown.addOption(preset.id, preset.name);
       dropdown.addOption("custom", t("Custom"));
@@ -5414,32 +5808,32 @@ var BrowserSettingTab = class extends import_obsidian10.PluginSettingTab {
         }
       });
     });
-    customSearchSetting = new import_obsidian10.Setting(containerEl).setName(t("Custom search URL")).setDesc(t("Use {query} where the encoded search text should be inserted.")).addText(
+    customSearchSetting = new import_obsidian13.Setting(containerEl).setName(t("Custom search URL")).setDesc(t("Use {query} where the encoded search text should be inserted.")).addText(
       (text) => text.setPlaceholder("https://search.example/?q={query}").setValue(currentSearchTemplate).onChange((value) => {
         const template = value.trim();
         if (template.includes("{query}")) this.plugin.core.updateSettings({ searchUrlTemplate: template });
       })
     );
     customSearchSetting.settingEl.style.display = currentSearchPreset ? "none" : "";
-    new import_obsidian10.Setting(containerEl).setName(t("Migration")).setHeading();
-    new import_obsidian10.Setting(containerEl).setName(t("Sync bookmarks with Vault notes")).setDesc(t("Optional two-way sync in the dedicated UBC Bookmarks folder. Removing a managed note removes its linked UBC bookmark; Surfing files are never modified.")).addToggle((toggle) => toggle.setValue(this.plugin.vaultBookmarkMirror.enabled).onChange(async (enabled) => {
+    new import_obsidian13.Setting(containerEl).setName(t("Migration")).setHeading();
+    new import_obsidian13.Setting(containerEl).setName(t("Sync bookmarks with Vault notes")).setDesc(t("Optional two-way sync in the dedicated UBC Bookmarks folder. Removing a managed note removes its linked UBC bookmark; Surfing files are never modified.")).addToggle((toggle) => toggle.setValue(this.plugin.vaultBookmarkMirror.enabled).onChange(async (enabled) => {
       await this.plugin.vaultBookmarkMirror.setEnabled(enabled);
       this.display();
     }));
     const surfingMigration = this.plugin.core.state.surfingMigration;
-    new import_obsidian10.Setting(containerEl).setName(t("Migrate from Surfing")).setDesc(surfingMigration?.completedAt ? t("Completed. Original Surfing data was kept. Backup: {v0}", { v0: surfingMigration.backupPath }) : t("Adopt Surfing's persistent login session, import bookmarks and compatible settings, and copy open tabs. Existing Browser Core data and Surfing source files are kept.")).addButton((button2) => button2.setButtonText(t(surfingMigration?.completedAt ? "Migrated" : surfingMigration ? "Resume migration" : "Preview and migrate")).setDisabled(Boolean(surfingMigration?.completedAt)).onClick(async () => {
+    new import_obsidian13.Setting(containerEl).setName(t("Migrate from Surfing")).setDesc(surfingMigration?.completedAt ? t("Completed. Original Surfing data was kept. Backup: {v0}", { v0: surfingMigration.backupPath }) : t("Adopt Surfing's persistent login session, import bookmarks and compatible settings, and copy open tabs. Existing Browser Core data and Surfing source files are kept.")).addButton((button2) => button2.setButtonText(t(surfingMigration?.completedAt ? "Migrated" : surfingMigration ? "Resume migration" : "Preview and migrate")).setDisabled(Boolean(surfingMigration?.completedAt)).onClick(async () => {
       await this.plugin.migrateFromSurfing();
       this.display();
     }));
-    new import_obsidian10.Setting(containerEl).setName(t("Home")).setHeading();
-    new import_obsidian10.Setting(containerEl).setName(t("Replace new empty tabs with Home")).setDesc(t("A newly created empty Obsidian tab becomes the Browser Core Home surface.")).addToggle(
+    new import_obsidian13.Setting(containerEl).setName(t("Home")).setHeading();
+    new import_obsidian13.Setting(containerEl).setName(t("Replace new empty tabs with Home")).setDesc(t("A newly created empty Obsidian tab becomes the Browser Core Home surface.")).addToggle(
       (toggle) => toggle.setValue(this.plugin.core.settings().replaceEmptyTabsWithHome).onChange((value) => {
         this.plugin.core.updateSettings({ replaceEmptyTabsWithHome: value });
         if (value) void this.plugin.replaceMostRecentEmptyLeafWithHome();
       })
     );
     const hasOmnisearch = this.plugin.homeAdapter.hasOmnisearch();
-    new import_obsidian10.Setting(containerEl).setName(t("Default Home search")).setDesc(t("Vault searches files in this vault. Web searches the web or opens an address.") + (hasOmnisearch ? "" : " " + t("Omnisearch is not enabled."))).addDropdown((dropdown) => {
+    new import_obsidian13.Setting(containerEl).setName(t("Default Home search")).setDesc(t("Vault searches files in this vault. Web searches the web or opens an address.") + (hasOmnisearch ? "" : " " + t("Omnisearch is not enabled."))).addDropdown((dropdown) => {
       dropdown.addOption("vault", t("Vault files")).addOption("web", t("Web"));
       if (hasOmnisearch) dropdown.addOption("omnisearch", "Omnisearch");
       dropdown.setValue(!hasOmnisearch && this.plugin.core.settings().homeSearchMode === "omnisearch" ? "vault" : this.plugin.core.settings().homeSearchMode).onChange((value) => {
@@ -5450,13 +5844,13 @@ var BrowserSettingTab = class extends import_obsidian10.PluginSettingTab {
       });
     });
     const homeToggle = (title, description, key) => {
-      new import_obsidian10.Setting(containerEl).setName(t(title)).setDesc(t(description)).addToggle((toggle) => toggle.setValue(this.plugin.core.settings()[key]).onChange((value) => {
+      new import_obsidian13.Setting(containerEl).setName(t(title)).setDesc(t(description)).addToggle((toggle) => toggle.setValue(this.plugin.core.settings()[key]).onChange((value) => {
         this.plugin.core.updateSettings({ [key]: value });
         this.plugin.refreshBrowserViews();
       }));
     };
     const homeCount = (title, key, upper = 25) => {
-      new import_obsidian10.Setting(containerEl).setName(t(title)).addSlider((slider) => slider.setLimits(1, upper, 1).setDynamicTooltip().setValue(this.plugin.core.settings()[key]).onChange((value) => {
+      new import_obsidian13.Setting(containerEl).setName(t(title)).addSlider((slider) => slider.setLimits(1, upper, 1).setDynamicTooltip().setValue(this.plugin.core.settings()[key]).onChange((value) => {
         this.plugin.core.updateSettings({ [key]: value });
         this.plugin.refreshBrowserViews();
       }));
@@ -5467,14 +5861,14 @@ var BrowserSettingTab = class extends import_obsidian10.PluginSettingTab {
     homeToggle("Show search shortcuts", "Show keyboard guidance below Home search.", "homeShowShortcuts");
     if (hasOmnisearch) homeToggle("Show Omnisearch excerpts", "Display a text excerpt for Omnisearch results.", "homeShowOmnisearchExcerpts");
     homeCount("Search result count", "homeMaxSearchResults");
-    new import_obsidian10.Setting(containerEl).setName(t("Search delay (ms)")).setDesc(t("Delay between typing and updating suggestions.")).addSlider((slider) => slider.setLimits(0, 500, 10).setDynamicTooltip().setValue(this.plugin.core.settings().homeSearchDelayMs).onChange((value) => this.plugin.core.updateSettings({ homeSearchDelayMs: value })));
-    new import_obsidian10.Setting(containerEl).setName(t("Show bookmarked Vault files on Home")).setDesc(t("Reads file bookmarks from Obsidian's built-in Bookmarks plugin without mixing them with web bookmarks.")).addToggle(
+    new import_obsidian13.Setting(containerEl).setName(t("Search delay (ms)")).setDesc(t("Delay between typing and updating suggestions.")).addSlider((slider) => slider.setLimits(0, 500, 10).setDynamicTooltip().setValue(this.plugin.core.settings().homeSearchDelayMs).onChange((value) => this.plugin.core.updateSettings({ homeSearchDelayMs: value })));
+    new import_obsidian13.Setting(containerEl).setName(t("Show bookmarked Vault files on Home")).setDesc(t("Reads file bookmarks from Obsidian's built-in Bookmarks plugin without mixing them with web bookmarks.")).addToggle(
       (toggle) => toggle.setValue(this.plugin.core.settings().showVaultBookmarksOnHome).onChange((value) => {
         this.plugin.core.updateSettings({ showVaultBookmarksOnHome: value });
         this.plugin.refreshBrowserViews();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName(t("Show recent Vault files on Home")).setDesc(t("Uses Obsidian's recent-file list; Browser Core does not maintain a duplicate recent-file database.")).addToggle(
+    new import_obsidian13.Setting(containerEl).setName(t("Show recent Vault files on Home")).setDesc(t("Uses Obsidian's recent-file list; Browser Core does not maintain a duplicate recent-file database.")).addToggle(
       (toggle) => toggle.setValue(this.plugin.core.settings().showRecentVaultFilesOnHome).onChange((value) => {
         this.plugin.core.updateSettings({ showRecentVaultFilesOnHome: value });
         this.plugin.refreshBrowserViews();
@@ -5482,53 +5876,53 @@ var BrowserSettingTab = class extends import_obsidian10.PluginSettingTab {
     );
     homeCount("Bookmarked file count", "homeMaxBookmarkedFiles");
     homeCount("Recent file count", "homeMaxRecentFiles");
-    new import_obsidian10.Setting(containerEl).setName(t("Restore hidden recent files")).setDesc(t("Make files hidden from the Home recent list visible again.")).addButton((button2) => button2.setButtonText(t("Restore")).onClick(() => {
+    new import_obsidian13.Setting(containerEl).setName(t("Restore hidden recent files")).setDesc(t("Make files hidden from the Home recent list visible again.")).addButton((button2) => button2.setButtonText(t("Restore")).onClick(() => {
       this.plugin.core.updateSettings({ homeHiddenRecentPaths: [] });
       this.plugin.refreshBrowserViews();
     }));
-    new import_obsidian10.Setting(containerEl).setName(t("Home appearance")).setHeading();
-    new import_obsidian10.Setting(containerEl).setName(t("Home title")).addText((text) => text.setValue(this.plugin.core.settings().homeTitle).onChange((value) => {
+    new import_obsidian13.Setting(containerEl).setName(t("Home appearance")).setHeading();
+    new import_obsidian13.Setting(containerEl).setName(t("Home title")).addText((text) => text.setValue(this.plugin.core.settings().homeTitle).onChange((value) => {
       this.plugin.core.updateSettings({ homeTitle: value });
       this.plugin.refreshBrowserViews();
     }));
-    new import_obsidian10.Setting(containerEl).setName(t("Home logo")).setDesc(t("Lucide icon name, Vault image path, HTTPS image URL, or blank.")).addText((text) => text.setValue(this.plugin.core.settings().homeLogo).onChange((value) => {
+    new import_obsidian13.Setting(containerEl).setName(t("Home logo")).setDesc(t("Lucide icon name, Vault image path, HTTPS image URL, or blank.")).addText((text) => text.setValue(this.plugin.core.settings().homeLogo).onChange((value) => {
       this.plugin.core.updateSettings({ homeLogo: value.trim() });
       this.plugin.refreshBrowserViews();
     }));
-    new import_obsidian10.Setting(containerEl).setName(t("Home title font size")).addText((text) => text.setValue(this.plugin.core.settings().homeTitleFontSize).onChange((value) => {
+    new import_obsidian13.Setting(containerEl).setName(t("Home title font size")).addText((text) => text.setValue(this.plugin.core.settings().homeTitleFontSize).onChange((value) => {
       if (CSS.supports("font-size", value)) {
         this.plugin.core.updateSettings({ homeTitleFontSize: value });
         this.plugin.refreshBrowserViews();
       }
     }));
-    new import_obsidian10.Setting(containerEl).setName(t("Home title weight")).addSlider((slider) => slider.setLimits(100, 900, 100).setDynamicTooltip().setValue(this.plugin.core.settings().homeTitleFontWeight).onChange((value) => {
+    new import_obsidian13.Setting(containerEl).setName(t("Home title weight")).addSlider((slider) => slider.setLimits(100, 900, 100).setDynamicTooltip().setValue(this.plugin.core.settings().homeTitleFontWeight).onChange((value) => {
       this.plugin.core.updateSettings({ homeTitleFontWeight: value });
       this.plugin.refreshBrowserViews();
     }));
-    new import_obsidian10.Setting(containerEl).setName(t("Home title font family")).addText((text) => text.setPlaceholder(t("Default theme font")).setValue(this.plugin.core.settings().homeTitleFontFamily).onChange((value) => {
+    new import_obsidian13.Setting(containerEl).setName(t("Home title font family")).addText((text) => text.setPlaceholder(t("Default theme font")).setValue(this.plugin.core.settings().homeTitleFontFamily).onChange((value) => {
       this.plugin.core.updateSettings({ homeTitleFontFamily: value });
       this.plugin.refreshBrowserViews();
     }));
-    new import_obsidian10.Setting(containerEl).setName(t("Home title color")).addText((text) => text.setPlaceholder(t("Theme color (blank)")).setValue(this.plugin.core.settings().homeTitleColor).onChange((value) => {
+    new import_obsidian13.Setting(containerEl).setName(t("Home title color")).addText((text) => text.setPlaceholder(t("Theme color (blank)")).setValue(this.plugin.core.settings().homeTitleColor).onChange((value) => {
       if (!value || CSS.supports("color", value)) {
         this.plugin.core.updateSettings({ homeTitleColor: value });
         this.plugin.refreshBrowserViews();
       }
     }));
     homeToggle("Accent selected search result", "Use the theme accent color for the active suggestion.", "homeSelectionAccent");
-    new import_obsidian10.Setting(containerEl).setName(t("Home on Obsidian startup")).setDesc(t("Choose whether to focus a Home tab on startup, optionally closing other workspace tabs.")).addDropdown((dropdown) => dropdown.addOption("normal", t("Use browser startup behavior")).addOption("focus-or-open", t("Focus or open Home")).addOption("home-only", t("Home only (close other workspace tabs)")).setValue(this.plugin.core.settings().homeStartupMode).onChange((value) => {
+    new import_obsidian13.Setting(containerEl).setName(t("Home on Obsidian startup")).setDesc(t("Choose whether to focus a Home tab on startup, optionally closing other workspace tabs.")).addDropdown((dropdown) => dropdown.addOption("normal", t("Use browser startup behavior")).addOption("focus-or-open", t("Focus or open Home")).addOption("home-only", t("Home only (close other workspace tabs)")).setValue(this.plugin.core.settings().homeStartupMode).onChange((value) => {
       if (value === "normal" || value === "focus-or-open" || value === "home-only")
         this.plugin.core.updateSettings({ homeStartupMode: value });
     }));
-    new import_obsidian10.Setting(containerEl).setName(t("Browser startup")).setDesc(t("Choose what happens when Obsidian starts and no browser tabs are already open.")).addDropdown(
+    new import_obsidian13.Setting(containerEl).setName(t("Browser startup")).setDesc(t("Choose what happens when Obsidian starts and no browser tabs are already open.")).addDropdown(
       (dropdown) => dropdown.addOption("restore", t("Restore previous browser session")).addOption("home", t("Open Home")).addOption("none", t("Do nothing")).setValue(this.plugin.core.settings().startupBehavior).onChange((value) => {
         if (value === "restore" || value === "home" || value === "none") {
           this.plugin.core.updateSettings({ startupBehavior: value });
         }
       })
     );
-    new import_obsidian10.Setting(containerEl).setName(t("History & recovery")).setHeading();
-    new import_obsidian10.Setting(containerEl).setName(t("History day starts at")).setDesc(t("History day boundaries default to 04:00 so late-night work stays together.")).addText((text) => {
+    new import_obsidian13.Setting(containerEl).setName(t("History & recovery")).setHeading();
+    new import_obsidian13.Setting(containerEl).setName(t("History day starts at")).setDesc(t("History day boundaries default to 04:00 so late-night work stays together.")).addText((text) => {
       text.inputEl.type = "time";
       text.setValue(formatDayStart(this.plugin.core.settings().historyDayStartMinutes));
       text.onChange((value) => {
@@ -5536,7 +5930,7 @@ var BrowserSettingTab = class extends import_obsidian10.PluginSettingTab {
         if (minutes !== void 0) this.plugin.core.updateSettings({ historyDayStartMinutes: minutes });
       });
     });
-    new import_obsidian10.Setting(containerEl).setName(t("History retention (days)")).setDesc(t("0 keeps browsing history until you delete it. Protected tab histories are not removed automatically.")).addText(
+    new import_obsidian13.Setting(containerEl).setName(t("History retention (days)")).setDesc(t("0 keeps browsing history until you delete it. Protected tab histories are not removed automatically.")).addText(
       (text) => text.setValue(String(this.plugin.core.settings().historyRetentionDays)).onChange((value) => {
         const days = Number(value);
         if (Number.isFinite(days) && days >= 0) this.plugin.core.updateSettings({ historyRetentionDays: days });
@@ -5545,7 +5939,7 @@ var BrowserSettingTab = class extends import_obsidian10.PluginSettingTab {
     const advancedStorage = containerEl.createEl("details", { cls: "ubc-settings-advanced" });
     advancedStorage.createEl("summary", { text: t("Advanced history and recovery storage") });
     const advancedStorageEl = advancedStorage.createDiv({ cls: "ubc-settings-advanced-content" });
-    new import_obsidian10.Setting(advancedStorageEl).setName(t("Automatic history size limit")).setDesc(t("0 disables size-based cleanup. A positive value allows the oldest closed, unprotected tab histories to be removed when stored history grows past this limit.")).addText(
+    new import_obsidian13.Setting(advancedStorageEl).setName(t("Automatic history size limit")).setDesc(t("0 disables size-based cleanup. A positive value allows the oldest closed, unprotected tab histories to be removed when stored history grows past this limit.")).addText(
       (text) => text.setValue(String(this.plugin.core.settings().historyMaxNodes)).onChange((value) => {
         const count = Number(value);
         if (Number.isFinite(count) && (count === 0 || count >= 1e3)) {
@@ -5553,37 +5947,37 @@ var BrowserSettingTab = class extends import_obsidian10.PluginSettingTab {
         }
       })
     );
-    new import_obsidian10.Setting(containerEl).setName(t("Detailed tab recovery retention (days)")).setDesc(t("How long Browser Core should keep extra state that can restore recently closed tabs more accurately.")).addText(
+    new import_obsidian13.Setting(containerEl).setName(t("Detailed tab recovery retention (days)")).setDesc(t("How long Browser Core should keep extra state that can restore recently closed tabs more accurately.")).addText(
       (text) => text.setValue(String(this.plugin.core.settings().restoreRetentionDays)).onChange((value) => {
         const days = Number(value);
         if (Number.isFinite(days) && days >= 0) this.plugin.core.updateSettings({ restoreRetentionDays: days });
       })
     );
-    new import_obsidian10.Setting(advancedStorageEl).setName(t("Detailed recovery storage limit (MB)")).setDesc(t("When this budget is exceeded, older unprotected recovery data may fall back to URL-only reopening.")).addText(
+    new import_obsidian13.Setting(advancedStorageEl).setName(t("Detailed recovery storage limit (MB)")).setDesc(t("When this budget is exceeded, older unprotected recovery data may fall back to URL-only reopening.")).addText(
       (text) => text.setValue(String(this.plugin.core.settings().restoreStorageLimitMb)).onChange((value) => {
         const mb = Number(value);
         if (Number.isFinite(mb) && mb >= 16) this.plugin.core.updateSettings({ restoreStorageLimitMb: mb });
       })
     );
-    new import_obsidian10.Setting(containerEl).setName(t("Form recovery")).setDesc(t("Allow form recovery as a feature. Capture remains opt-in per site, and password/payment credentials are excluded.")).addToggle(
+    new import_obsidian13.Setting(containerEl).setName(t("Form recovery")).setDesc(t("Allow form recovery as a feature. Capture remains opt-in per site, and password/payment credentials are excluded.")).addToggle(
       (toggle) => toggle.setValue(this.plugin.core.settings().formRecoveryEnabled).onChange((value) => {
         this.plugin.core.updateSettings({ formRecoveryEnabled: value });
         this.plugin.refreshFormRecoveryInstrumentation();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName(t("Form recovery retention (days)")).setDesc(t("How long saved non-credential form values are retained.")).addText(
+    new import_obsidian13.Setting(containerEl).setName(t("Form recovery retention (days)")).setDesc(t("How long saved non-credential form values are retained.")).addText(
       (text) => text.setValue(String(this.plugin.core.settings().formRecoveryRetentionDays)).onChange((value) => {
         const days = Number(value);
         if (Number.isFinite(days) && days >= 0) this.plugin.core.updateSettings({ formRecoveryRetentionDays: days });
       })
     );
-    new import_obsidian10.Setting(advancedStorageEl).setName(t("Saved form versions per page")).setDesc(t("How many recent recovery versions to keep for one page. Multi-step forms can use values from several versions.")).addText(
+    new import_obsidian13.Setting(advancedStorageEl).setName(t("Saved form versions per page")).setDesc(t("How many recent recovery versions to keep for one page. Multi-step forms can use values from several versions.")).addText(
       (text) => text.setValue(String(this.plugin.core.settings().formRecoveryMaxSnapshotsPerUrl)).onChange((value) => {
         const count = Number(value);
         if (Number.isFinite(count) && count >= 1) this.plugin.core.updateSettings({ formRecoveryMaxSnapshotsPerUrl: Math.floor(count) });
       })
     );
-    new import_obsidian10.Setting(advancedStorageEl).setName(t("Pages with saved form recovery")).setDesc(t("Maximum number of distinct pages that may keep form recovery data.")).addText(
+    new import_obsidian13.Setting(advancedStorageEl).setName(t("Pages with saved form recovery")).setDesc(t("Maximum number of distinct pages that may keep form recovery data.")).addText(
       (text) => text.setValue(String(this.plugin.core.settings().formRecoveryMaxUrls)).onChange((value) => {
         const count = Number(value);
         if (Number.isFinite(count) && count >= 1) this.plugin.core.updateSettings({ formRecoveryMaxUrls: Math.floor(count) });
@@ -5602,9 +5996,9 @@ var BrowserSettingTab = class extends import_obsidian10.PluginSettingTab {
     );
     const recoveryPolicies = this.plugin.core.formRecovery.policies();
     if (recoveryPolicies.length) {
-      new import_obsidian10.Setting(containerEl).setName(t("Form recovery by site")).setHeading();
+      new import_obsidian13.Setting(containerEl).setName(t("Form recovery by site")).setHeading();
       for (const policy of recoveryPolicies) {
-        new import_obsidian10.Setting(containerEl).setName(`${this.plugin.core.containers.nameFor(policy.containerId)} \xB7 ${policy.origin}`).setDesc(
+        new import_obsidian13.Setting(containerEl).setName(`${this.plugin.core.containers.nameFor(policy.containerId)} \xB7 ${policy.origin}`).setDesc(
           policy.disabled ? t("Disabled for this site") : t("{v0} excluded field(s)", { v0: policy.excludedFieldKeys.length })
         ).addExtraButton(
           (button2) => button2.setIcon("rotate-ccw").setTooltip(t("Reset form recovery for this site")).onClick(async () => {
@@ -5622,8 +6016,8 @@ var BrowserSettingTab = class extends import_obsidian10.PluginSettingTab {
         );
       }
     }
-    new import_obsidian10.Setting(containerEl).setName(t("Browsing data")).setHeading();
-    new import_obsidian10.Setting(containerEl).setName(t("Clear browsing history")).setDesc(t("Deletes browsing history and detailed recovery data for closed tabs. Open tabs stay open.")).addButton(
+    new import_obsidian13.Setting(containerEl).setName(t("Browsing data")).setHeading();
+    new import_obsidian13.Setting(containerEl).setName(t("Clear browsing history")).setDesc(t("Deletes browsing history and detailed recovery data for closed tabs. Open tabs stay open.")).addButton(
       (button2) => button2.setButtonText(t("Clear history")).setWarning().onClick(async () => {
         const confirmed = await confirmAction(
           this.app,
@@ -5636,7 +6030,7 @@ var BrowserSettingTab = class extends import_obsidian10.PluginSettingTab {
         this.display();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName(t("Clear detailed tab recovery")).setDesc(t("Keeps browsing history, but removes extra state used to restore recently closed tabs more accurately. Open tabs start collecting detailed recovery again after they are reopened.")).addButton(
+    new import_obsidian13.Setting(containerEl).setName(t("Clear detailed tab recovery")).setDesc(t("Keeps browsing history, but removes extra state used to restore recently closed tabs more accurately. Open tabs start collecting detailed recovery again after they are reopened.")).addButton(
       (button2) => button2.setButtonText(t("Clear recovery data")).setWarning().onClick(async () => {
         const confirmed = await confirmAction(
           this.app,
@@ -5648,7 +6042,7 @@ var BrowserSettingTab = class extends import_obsidian10.PluginSettingTab {
         this.plugin.clearRichRestoreData();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName(t("Clear form recovery data")).setDesc(t("Deletes all saved non-credential form values without changing which sites have form recovery enabled.")).addButton(
+    new import_obsidian13.Setting(containerEl).setName(t("Clear form recovery data")).setDesc(t("Deletes all saved non-credential form values without changing which sites have form recovery enabled.")).addButton(
       (button2) => button2.setButtonText(t("Clear form data")).setWarning().onClick(async () => {
         const confirmed = await confirmAction(
           this.app,
@@ -5660,7 +6054,7 @@ var BrowserSettingTab = class extends import_obsidian10.PluginSettingTab {
         this.plugin.clearFormRecoveryData();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName(t("Reset site permissions")).setDesc(t("Returns saved site permissions to Ask next time. Container cookies and site storage are not changed.")).addButton(
+    new import_obsidian13.Setting(containerEl).setName(t("Reset site permissions")).setDesc(t("Returns saved site permissions to Ask next time. Container cookies and site storage are not changed.")).addButton(
       (button2) => button2.setButtonText(t("Reset permissions")).setWarning().onClick(async () => {
         const confirmed = await confirmAction(
           this.app,
@@ -5673,62 +6067,62 @@ var BrowserSettingTab = class extends import_obsidian10.PluginSettingTab {
         this.display();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName(t("Appearance")).setHeading();
-    new import_obsidian10.Setting(containerEl).setName(t("Initial background color override")).setDesc(t("Choose the background before the site paints. The site's own colors remain in control once painted.")).addDropdown((dropdown) => dropdown.addOption("none", t("No override")).addOption("theme", t("Follow theme")).addOption("custom", t("Custom color")).setValue(this.plugin.core.settings().initialBackgroundOverride ? this.plugin.core.settings().initialBackgroundSource : "none").onChange((value) => {
+    new import_obsidian13.Setting(containerEl).setName(t("Appearance")).setHeading();
+    new import_obsidian13.Setting(containerEl).setName(t("Initial background color override")).setDesc(t("Choose the background before the site paints. The site's own colors remain in control once painted.")).addDropdown((dropdown) => dropdown.addOption("none", t("No override")).addOption("theme", t("Follow theme")).addOption("custom", t("Custom color")).setValue(this.plugin.core.settings().initialBackgroundOverride ? this.plugin.core.settings().initialBackgroundSource : "none").onChange((value) => {
       this.plugin.core.updateSettings({ initialBackgroundOverride: value !== "none", initialBackgroundSource: value === "custom" ? "custom" : "theme" });
       this.plugin.refreshBrowserViews();
       this.display();
     }));
     if (this.plugin.core.settings().initialBackgroundOverride && this.plugin.core.settings().initialBackgroundSource === "custom") {
-      new import_obsidian10.Setting(containerEl).setName(t("Initial background color")).addColorPicker((picker) => picker.setValue(this.plugin.core.settings().initialBackgroundColor).onChange((value) => {
+      new import_obsidian13.Setting(containerEl).setName(t("Initial background color")).addColorPicker((picker) => picker.setValue(this.plugin.core.settings().initialBackgroundColor).onChange((value) => {
         this.plugin.core.updateSettings({ initialBackgroundColor: value });
         this.plugin.refreshBrowserViews();
       }));
     }
-    new import_obsidian10.Setting(containerEl).setName(t("Full-page loading shield")).setDesc(t("Cover the web page while a new page starts loading. Off by default to avoid a full-page flash.")).addToggle(
+    new import_obsidian13.Setting(containerEl).setName(t("Full-page loading shield")).setDesc(t("Cover the web page while a new page starts loading. Off by default to avoid a full-page flash.")).addToggle(
       (toggle) => toggle.setValue(this.plugin.core.settings().fullPageLoadingShield).onChange((value) => {
         this.plugin.core.updateSettings({ fullPageLoadingShield: value });
         this.plugin.refreshLoadingShields();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName(t("Reduced motion")).setDesc(t("Avoid large transitions, slides and parallax in Browser Core UI.")).addToggle(
+    new import_obsidian13.Setting(containerEl).setName(t("Reduced motion")).setDesc(t("Avoid large transitions, slides and parallax in Browser Core UI.")).addToggle(
       (toggle) => toggle.setValue(this.plugin.core.settings().reducedMotion).onChange((value) => {
         this.plugin.core.updateSettings({ reducedMotion: value });
         this.plugin.applyAccessibilityClasses();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName(t("Default web content zoom")).setDesc(t("Relative to this Obsidian window. Used by sites without a site-specific zoom override.")).addSlider(
+    new import_obsidian13.Setting(containerEl).setName(t("Default web content zoom")).setDesc(t("Relative to this Obsidian window. Used by sites without a site-specific zoom override.")).addSlider(
       (slider) => slider.setLimits(50, 200, 10).setDynamicTooltip().setValue(Math.round(this.plugin.core.settings().defaultZoomFactor * 100)).onChange((value) => {
         this.plugin.core.updateSettings({ defaultZoomFactor: value / 100 });
         this.plugin.refreshBrowserZoom();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName(t("Show bookmark bar")).setDesc(t("Your everyday pages, one click away.")).addToggle(
+    new import_obsidian13.Setting(containerEl).setName(t("Show bookmark bar")).setDesc(t("Your everyday pages, one click away.")).addToggle(
       (toggle) => toggle.setValue(this.plugin.core.settings().showFavoritesBar).onChange((value) => {
         this.plugin.core.updateSettings({ showFavoritesBar: value });
         this.plugin.refreshBrowserViews();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName(t("Bookmark bar display")).setDesc(t("Choose every bookmark and folder, or just the members you select.")).addDropdown((dropdown) => dropdown.addOption("all", t("Bookmark bar")).addOption("selected", t("Selected members")).setValue(this.plugin.core.settings().bookmarkBarMode).onChange((value) => {
+    new import_obsidian13.Setting(containerEl).setName(t("Bookmark bar display")).setDesc(t("Choose every bookmark and folder, or just the members you select.")).addDropdown((dropdown) => dropdown.addOption("all", t("Bookmark bar")).addOption("selected", t("Selected members")).setValue(this.plugin.core.settings().bookmarkBarMode).onChange((value) => {
       this.plugin.core.updateSettings({ bookmarkBarMode: value });
       this.plugin.refreshBrowserViews();
     })).addButton((button2) => button2.setButtonText(t("Choose members")).onClick(() => void this.plugin.openBrowser({ url: "browser://bookmarks", state: { bookmarkLayout: "manage" } })));
-    new import_obsidian10.Setting(containerEl).setName(t("Containers")).setHeading();
-    new import_obsidian10.Setting(containerEl).setName(t("Container use")).setDesc(t("Off uses only the selected default container. Manual keeps other containers available without automatic site routing. Automatic also applies site default rules.")).addDropdown(
+    new import_obsidian13.Setting(containerEl).setName(t("Containers")).setHeading();
+    new import_obsidian13.Setting(containerEl).setName(t("Container use")).setDesc(t("Off uses only the selected default container. Manual keeps other containers available without automatic site routing. Automatic also applies site default rules.")).addDropdown(
       (dropdown) => dropdown.addOption("off", t("Off")).addOption("manual", t("Manual")).addOption("automatic", t("Automatic")).setValue(this.plugin.core.settings().containerMode).onChange((value) => {
         this.plugin.core.updateSettings({ containerMode: value });
         this.plugin.refreshContainerPresentation();
         this.display();
       })
     );
-    new import_obsidian10.Setting(containerEl).setName(t("Default container")).setDesc(t("Used for new browser tabs, including when container controls are off. Automatic mode may replace it with a site's default container.")).addDropdown((dropdown) => {
+    new import_obsidian13.Setting(containerEl).setName(t("Default container")).setDesc(t("Used for new browser tabs, including when container controls are off. Automatic mode may replace it with a site's default container.")).addDropdown((dropdown) => {
       for (const container of this.plugin.core.containers.list()) {
         dropdown.addOption(container.id, container.name);
       }
       dropdown.setValue(this.plugin.core.settings().defaultContainerId).onChange((value) => this.plugin.core.updateSettings({ defaultContainerId: value }));
     });
     for (const container of this.plugin.core.containers.list()) {
-      const row = new import_obsidian10.Setting(containerEl).setName(container.name).setDesc(t("Separate persistent login and site data")).addText(
+      const row = new import_obsidian13.Setting(containerEl).setName(container.name).setDesc(t("Separate persistent login and site data")).addText(
         (text) => text.setPlaceholder(t("Container name")).setValue(container.name).onChange((value) => {
           const next = value.trim();
           if (!next) return;
@@ -5778,7 +6172,7 @@ var BrowserSettingTab = class extends import_obsidian10.PluginSettingTab {
       });
       row.settingEl.dataset.containerId = container.id;
     }
-    new import_obsidian10.Setting(containerEl).setName(t("Add container")).setDesc(t("Creates a separate persistent login and site data.")).addButton(
+    new import_obsidian13.Setting(containerEl).setName(t("Add container")).setDesc(t("Creates a separate persistent login and site data.")).addButton(
       (button2) => button2.setButtonText(t("Add")).onClick(() => {
         this.plugin.core.containers.create("Container");
         this.plugin.core.scheduleSave();
@@ -5787,9 +6181,9 @@ var BrowserSettingTab = class extends import_obsidian10.PluginSettingTab {
     );
     const assignments = this.plugin.core.containers.assignments();
     if (assignments.length) {
-      new import_obsidian10.Setting(containerEl).setName(t("Site default containers")).setDesc(this.plugin.core.settings().containerMode === "automatic" ? t("Applied automatically when an independent navigation opens a matching site.") : t("Saved for later, but currently paused because automatic container routing is off.")).setHeading();
+      new import_obsidian13.Setting(containerEl).setName(t("Site default containers")).setDesc(this.plugin.core.settings().containerMode === "automatic" ? t("Applied automatically when an independent navigation opens a matching site.") : t("Saved for later, but currently paused because automatic container routing is off.")).setHeading();
       for (const rule of assignments) {
-        new import_obsidian10.Setting(containerEl).setName(rule.originPattern).setDesc(this.plugin.core.containers.nameFor(rule.containerId)).addExtraButton(
+        new import_obsidian13.Setting(containerEl).setName(rule.originPattern).setDesc(this.plugin.core.containers.nameFor(rule.containerId)).addExtraButton(
           (button2) => button2.setIcon("x").setTooltip(t("Forget site default container")).onClick(() => {
             this.plugin.core.containers.unassignOrigin(rule.originPattern);
             this.plugin.core.scheduleSave();
@@ -5800,9 +6194,9 @@ var BrowserSettingTab = class extends import_obsidian10.PluginSettingTab {
     }
     const permissions = this.plugin.core.permissions.list();
     if (permissions.length) {
-      new import_obsidian10.Setting(containerEl).setName(t("Site permissions")).setHeading();
+      new import_obsidian13.Setting(containerEl).setName(t("Site permissions")).setHeading();
       for (const record of permissions) {
-        new import_obsidian10.Setting(containerEl).setName(permissionLabel(record.permission)).setDesc(`${record.origin} \xB7 ${this.plugin.core.containers.nameFor(record.containerId)} \xB7 ${permissionDecisionLabel(record.decision)}`).addDropdown(
+        new import_obsidian13.Setting(containerEl).setName(permissionLabel(record.permission)).setDesc(`${record.origin} \xB7 ${this.plugin.core.containers.nameFor(record.containerId)} \xB7 ${permissionDecisionLabel(record.decision)}`).addDropdown(
           (dropdown) => dropdown.addOption("ask", t("Ask next time")).addOption("allow", t("Allow")).addOption("block", t("Block")).setValue(record.decision).onChange((value) => {
             if (value === "ask") {
               this.plugin.core.permissions.remove(record.containerId, record.origin, record.permission);
@@ -6021,7 +6415,7 @@ function bindAddressSuggestions(input, core, navigate) {
 }
 
 // src/passwords/ui.ts
-var import_obsidian11 = require("obsidian");
+var import_obsidian14 = require("obsidian");
 var import_promises = require("node:fs/promises");
 
 // src/passwords/crypto.ts
@@ -6086,7 +6480,7 @@ function button(parent, label2, action, primary = false) {
     try {
       await action();
     } catch {
-      new import_obsidian11.Notice(t("Password operation failed. Check the recovery key, OS keyring, and file access."));
+      new import_obsidian14.Notice(t("Password operation failed. Check the recovery key, OS keyring, and file access."));
     } finally {
       el.disabled = false;
     }
@@ -6100,7 +6494,7 @@ function field(parent, label2, value = "", type = "text") {
   input.value = value;
   return input;
 }
-var SensitiveModal = class extends import_obsidian11.Modal {
+var SensitiveModal = class extends import_obsidian14.Modal {
   constructor(app, vault, requireUnlocked = true) {
     super(app);
     this.vault = vault;
@@ -6260,7 +6654,7 @@ function renderPasswordPage(parent, app, vault) {
       idle.min = "1";
       idle.max = "60";
       idle.addEventListener("change", () => {
-        void vault.setIdleMinutes(Number(idle.value)).catch(() => new import_obsidian11.Notice(t("Enter a value from 1 to 60.")));
+        void vault.setIdleMinutes(Number(idle.value)).catch(() => new import_obsidian14.Notice(t("Enter a value from 1 to 60.")));
       });
       const search = field(page, "Search passwords", query, "search");
       const list = page.createDiv({ cls: "ubc-password-list" });
@@ -6533,7 +6927,7 @@ function bindGuestBrowserShortcuts(webview, findOpen, active, handle) {
 }
 
 // src/ui/browser-find.ts
-var import_obsidian12 = require("obsidian");
+var import_obsidian15 = require("obsidian");
 var BrowserFindBar = class {
   element;
   input;
@@ -6555,7 +6949,7 @@ var BrowserFindBar = class {
     this.results = root.createSpan({ cls: "ubc-find-results", attr: { role: "status", "aria-live": "polite" } });
     const button2 = (icon, title, action) => {
       const el = root.createEl("button", { cls: "ubc-find-button clickable-icon", attr: { type: "button", title, "aria-label": title } });
-      (0, import_obsidian12.setIcon)(el, icon);
+      (0, import_obsidian15.setIcon)(el, icon);
       el.addEventListener("click", action);
       return el;
     };
@@ -6681,7 +7075,7 @@ var BrowserFindBar = class {
 };
 
 // src/ui/browser-view.ts
-var import_obsidian22 = require("obsidian");
+var import_obsidian24 = require("obsidian");
 
 // src/adapters/guest-link-hover.ts
 function bindGuestLinkHover(webview, show) {
@@ -6807,10 +7201,10 @@ function classifyInPageNavigation(previousIndex, nextIndex, intent) {
 }
 
 // src/ui/context-menus.ts
-var import_obsidian18 = require("obsidian");
+var import_obsidian20 = require("obsidian");
 
 // src/ui/bookmark-editor.ts
-var import_obsidian14 = require("obsidian");
+var import_obsidian17 = require("obsidian");
 
 // src/bookmarks/bookmark-media.ts
 var BOOKMARK_MEDIA = [
@@ -6854,12 +7248,12 @@ function inferBookmarkMedia(rawUrl) {
 }
 
 // src/ui/bookmark-visual.ts
-var import_obsidian13 = require("obsidian");
+var import_obsidian16 = require("obsidian");
 function renderBookmarkVisual(parent, bookmark, className = "ubc-bookmark-visual", app) {
   const host = parent.createSpan({ cls: className, attr: { "aria-hidden": "true" } });
   const fallback = () => {
     host.empty();
-    (0, import_obsidian13.setIcon)(host, "bookmark");
+    (0, import_obsidian16.setIcon)(host, "bookmark");
   };
   if (bookmark.visualKind === "text") {
     const value = bookmark.visualValue?.trim();
@@ -6872,7 +7266,7 @@ function renderBookmarkVisual(parent, bookmark, className = "ubc-bookmark-visual
     return host;
   }
   if (bookmark.visualKind === "icon") {
-    (0, import_obsidian13.setIcon)(host, bookmark.visualValue?.trim() || "bookmark");
+    (0, import_obsidian16.setIcon)(host, bookmark.visualValue?.trim() || "bookmark");
     if (!host.firstElementChild) fallback();
     return host;
   }
@@ -6893,7 +7287,7 @@ function resolveCustomImage(value, app) {
   if (!source3) return void 0;
   if (/^(?:https?:|data:image\/|app:|file:)/i.test(source3)) return source3;
   const file = app?.vault.getAbstractFileByPath(source3);
-  return file instanceof import_obsidian13.TFile ? app.vault.getResourcePath(file) : source3;
+  return file instanceof import_obsidian16.TFile ? app.vault.getResourcePath(file) : source3;
 }
 function fallbackFaviconUrl(url) {
   try {
@@ -6911,7 +7305,7 @@ function editBookmark(app, title, url, heading = "Edit bookmark", options = {}) 
     new BookmarkEditorModal(app, title, url, heading, options, resolve).open();
   });
 }
-var BookmarkEditorModal = class extends import_obsidian14.Modal {
+var BookmarkEditorModal = class extends import_obsidian17.Modal {
   constructor(app, initialTitle, initialUrl, heading, options, resolveDraft) {
     super(app);
     this.initialTitle = initialTitle;
@@ -7075,21 +7469,21 @@ var BookmarkEditorModal = class extends import_obsidian14.Modal {
 };
 
 // src/bookmarks/bookmark-url.ts
-var import_obsidian15 = require("obsidian");
+var import_obsidian18 = require("obsidian");
 function resolveBookmarkUrl(url, app) {
   if (!/{{\s*selection\s*}}/.test(url)) return url;
-  const selection = app.workspace.getActiveViewOfType(import_obsidian15.MarkdownView)?.editor?.getSelection().trim() || "";
+  const selection = app.workspace.getActiveViewOfType(import_obsidian18.MarkdownView)?.editor?.getSelection().trim() || "";
   return url.replace(/{{\s*selection\s*}}/g, encodeURIComponent(selection));
 }
 
 // src/ui/folder-picker-modal.ts
-var import_obsidian16 = require("obsidian");
+var import_obsidian19 = require("obsidian");
 function pickBookmarkFolder(app, store, options = {}) {
   return new Promise((resolve) => {
     new BookmarkFolderPickerModal(app, store, options.excludeFolderId, resolve).open();
   });
 }
-var BookmarkFolderPickerModal = class extends import_obsidian16.FuzzySuggestModal {
+var BookmarkFolderPickerModal = class extends import_obsidian19.FuzzySuggestModal {
   constructor(app, store, excludeFolderId, resolveChoice) {
     super(app);
     this.store = store;
@@ -7118,71 +7512,6 @@ var BookmarkFolderPickerModal = class extends import_obsidian16.FuzzySuggestModa
     window.setTimeout(() => {
       if (!this.chosen) this.resolveChoice(void 0);
     }, 0);
-  }
-};
-
-// src/ui/text-prompt.ts
-var import_obsidian17 = require("obsidian");
-function promptText(app, title, initialValue = "", placeholder = "") {
-  return new Promise((resolve) => {
-    new TextPromptModal(app, title, initialValue, placeholder, resolve).open();
-  });
-}
-var TextPromptModal = class extends import_obsidian17.Modal {
-  constructor(app, promptTitle, initialValue, placeholder, resolveValue) {
-    super(app);
-    this.promptTitle = promptTitle;
-    this.initialValue = initialValue;
-    this.placeholder = placeholder;
-    this.resolveValue = resolveValue;
-  }
-  settled = false;
-  onOpen() {
-    this.contentEl.createEl("h2", { text: this.promptTitle });
-    const field2 = this.contentEl.createEl("label", { cls: "ubc-prompt-field" });
-    if (this.placeholder) field2.createSpan({ cls: "ubc-prompt-label", text: this.placeholder });
-    const input = field2.createEl("input", {
-      attr: {
-        type: "text",
-        placeholder: this.placeholder,
-        "aria-label": this.placeholder || this.promptTitle
-      }
-    });
-    input.value = this.initialValue;
-    input.addClass("ubc-prompt-input");
-    const actions = this.contentEl.createDiv({ cls: "ubc-modal-actions" });
-    actions.createEl("button", { text: t("Cancel") }).addEventListener("click", () => this.finish(void 0));
-    const save = actions.createEl("button", { text: t("Save") });
-    const submit = () => {
-      const value = input.value.trim();
-      if (!value) return;
-      this.finish(value);
-    };
-    const syncSave = () => {
-      const enabled = Boolean(input.value.trim());
-      save.disabled = !enabled;
-      save.toggleClass("mod-cta", enabled);
-    };
-    save.addEventListener("click", submit);
-    input.addEventListener("input", syncSave);
-    input.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" || save.disabled) return;
-      event.preventDefault();
-      submit();
-    });
-    syncSave();
-    input.focus();
-    input.select();
-  }
-  onClose() {
-    this.contentEl.empty();
-    if (!this.settled) this.resolveValue(void 0);
-  }
-  finish(value) {
-    if (this.settled) return;
-    this.settled = true;
-    this.resolveValue(value);
-    this.close();
   }
 };
 
@@ -7340,7 +7669,7 @@ function dismissOpenMenus(doc = document) {
 
 // src/ui/context-menus.ts
 function showPageMenu(plugin, view, event) {
-  const menu = new import_obsidian18.Menu();
+  const menu = new import_obsidian20.Menu();
   menu.addItem(
     (item) => item.setTitle(t("Back")).setIcon("arrow-left").setDisabled(!view.canGoBack()).onClick(() => view.goBack())
   );
@@ -7358,7 +7687,7 @@ function showPageMenu(plugin, view, event) {
   );
   menu.addItem((item) => item.setTitle(t("Copy page URL")).setIcon("copy").onClick(async () => {
     await navigator.clipboard.writeText(view.currentUrl());
-    new import_obsidian18.Notice(t("URL copied."));
+    new import_obsidian20.Notice(t("URL copied."));
   }));
   menu.addItem((item) => item.setTitle(t("Find in page")).setIcon("search").onClick(() => view.openFindInPage()));
   menu.addItem((item) => item.setTitle(t("Copy viewport as image")).setIcon("image").onClick(() => void view.copyViewportImage()));
@@ -7388,7 +7717,7 @@ function showPageMenu(plugin, view, event) {
   showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), event.currentTarget instanceof HTMLElement ? event.currentTarget.ownerDocument : document);
 }
 function showWebContentMenu(plugin, view, params, position) {
-  const menu = new import_obsidian18.Menu();
+  const menu = new import_obsidian20.Menu();
   for (const entry of buildWebContentMenuEntries(plugin, view, params)) {
     if (entry.kind === "separator") {
       menu.addSeparator();
@@ -7404,7 +7733,7 @@ function showWebContentMenu(plugin, view, params, position) {
   showDismissibleMenu(menu, () => menu.showAtPosition(position));
 }
 function showBookmarkMenu(plugin, view, bookmark, event) {
-  const menu = new import_obsidian18.Menu();
+  const menu = new import_obsidian20.Menu();
   menu.addItem((item) => item.setTitle(t("Open")).setIcon("external-link").onClick(() => view.navigate(resolveBookmarkUrl(bookmark.url, plugin.app))));
   menu.addItem((item) => item.setTitle(t("Open in new tab")).setIcon("plus").onClick(() => plugin.openBrowser({ url: resolveBookmarkUrl(bookmark.url, plugin.app) })));
   if (plugin.core.settings().containerMode !== "off") {
@@ -7467,7 +7796,7 @@ function showBookmarkMenu(plugin, view, bookmark, event) {
   showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), event.currentTarget instanceof HTMLElement ? event.currentTarget.ownerDocument : document);
 }
 function showBookmarkFolderMenu(plugin, view, folder, event) {
-  const menu = new import_obsidian18.Menu();
+  const menu = new import_obsidian20.Menu();
   const bookmarks = plugin.core.bookmarks.descendantBookmarks(folder.id);
   menu.addItem(
     (item) => item.setTitle(t("Open all")).setDisabled(bookmarks.length === 0).onClick(() => view.openBookmarkSet(bookmarks, void 0, true))
@@ -7509,7 +7838,7 @@ function showBookmarkFolderMenu(plugin, view, folder, event) {
     const parentId = await pickBookmarkFolder(plugin.app, plugin.core.bookmarks, { excludeFolderId: folder.id });
     if (parentId === void 0) return;
     if (!plugin.core.bookmarks.moveFolder(folder.id, parentId)) {
-      new import_obsidian18.Notice(t("That move would create an invalid bookmark-folder cycle."));
+      new import_obsidian20.Notice(t("That move would create an invalid bookmark-folder cycle."));
       return;
     }
     plugin.core.scheduleSave();
@@ -7538,7 +7867,7 @@ function showBookmarkFolderMenu(plugin, view, folder, event) {
   showDismissibleMenu(menu, () => menu.showAtMouseEvent(event), event.currentTarget instanceof HTMLElement ? event.currentTarget.ownerDocument : document);
 }
 function showFavoritesBarMenu(plugin, view, event) {
-  const menu = new import_obsidian18.Menu();
+  const menu = new import_obsidian20.Menu();
   if (!view.currentUrl().startsWith("browser://")) {
     menu.addItem((item) => item.setTitle(t("Add current page to favorites")).setIcon("star").onClick(() => view.favoriteCurrentPage()));
   }
@@ -7552,11 +7881,11 @@ function showFavoritesBarMenu(plugin, view, event) {
 }
 
 // src/ui/recovery-details-modal.ts
-var import_obsidian19 = require("obsidian");
+var import_obsidian21 = require("obsidian");
 function showRecoveryDetails(app, details) {
   new RecoveryDetailsModal(app, details).open();
 }
-var RecoveryDetailsModal = class extends import_obsidian19.Modal {
+var RecoveryDetailsModal = class extends import_obsidian21.Modal {
   constructor(app, details) {
     super(app);
     this.details = details;
@@ -7597,11 +7926,11 @@ function addRow(parent, term, value) {
 }
 
 // src/ui/form-recovery-candidates-modal.ts
-var import_obsidian20 = require("obsidian");
+var import_obsidian22 = require("obsidian");
 function showFormRecoveryCandidates(app, fields, restoreSafeMatches) {
   new FormRecoveryCandidatesModal(app, fields, restoreSafeMatches).open();
 }
-var FormRecoveryCandidatesModal = class extends import_obsidian20.Modal {
+var FormRecoveryCandidatesModal = class extends import_obsidian22.Modal {
   constructor(app, fields, restoreSafeMatches) {
     super(app);
     this.fields = fields;
@@ -7724,7 +8053,7 @@ function gateLeafDetach(leaf, prepare, reportFailure = console.warn) {
 }
 
 // src/ui/bookmark-popover.ts
-var import_obsidian21 = require("obsidian");
+var import_obsidian23 = require("obsidian");
 function showBookmarkPopover(plugin, bookmark, anchor, content, onClose) {
   const doc = anchor.ownerDocument;
   const win = doc.defaultView ?? window;
@@ -7793,7 +8122,7 @@ function showBookmarkPopover(plugin, bookmark, anchor, content, onClose) {
     save();
   });
   const newFolder = folderRow.createEl("button", { attr: { type: "button", title: t("New folder"), "aria-label": t("New folder") } });
-  (0, import_obsidian21.setIcon)(newFolder, "folder-plus");
+  (0, import_obsidian23.setIcon)(newFolder, "folder-plus");
   newFolder.addEventListener("click", async () => {
     const title = await promptText(plugin.app, t("New bookmark folder"), "", t("Folder name"));
     if (!title?.trim() || !plugin.core.bookmarks.getBookmark(bookmark.id)) return;
@@ -7887,7 +8216,7 @@ function addHierarchicalMenuSection(menu, title, icon, appendCommands) {
 
 // src/ui/browser-view.ts
 var BROWSER_VIEW_TYPE = "unified-browser-core-view";
-var BrowserView = class _BrowserView extends import_obsidian22.ItemView {
+var BrowserView = class _BrowserView extends import_obsidian24.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -8227,10 +8556,10 @@ var BrowserView = class _BrowserView extends import_obsidian22.ItemView {
     if (!contents?.capturePage || !clipboard?.writeImage) return;
     try {
       clipboard.writeImage(await contents.capturePage());
-      new import_obsidian22.Notice(t("Viewport copied as image"));
+      new import_obsidian24.Notice(t("Viewport copied as image"));
     } catch (error) {
       console.warn("Unified Browser Core: screenshot capture failed", error);
-      new import_obsidian22.Notice(t("Could not copy viewport"));
+      new import_obsidian24.Notice(t("Could not copy viewport"));
     }
   }
   openInExternalBrowser() {
@@ -8256,9 +8585,9 @@ var BrowserView = class _BrowserView extends import_obsidian22.ItemView {
           }
         });
       }
-      const markdown = (0, import_obsidian22.htmlToMarkdown)(parsed.body).trim();
+      const markdown = (0, import_obsidian24.htmlToMarkdown)(parsed.body).trim();
       if (!markdown) {
-        new import_obsidian22.Notice(t("No readable page content"));
+        new import_obsidian24.Notice(t("No readable page content"));
         return;
       }
       const title = (this.currentTitle || parsed.title || "Web page").trim();
@@ -8276,10 +8605,10 @@ source: ${JSON.stringify(pageUrl)}
 `;
       const note = await vault.create(path, frontmatter + markdown + "\n");
       await this.plugin.app.workspace.openLinkText(note.path, "", true);
-      new import_obsidian22.Notice(t("Page saved as Markdown"));
+      new import_obsidian24.Notice(t("Page saved as Markdown"));
     } catch (error) {
       console.warn("Unified Browser Core: page clipping failed", error);
-      new import_obsidian22.Notice(t("Could not save page as Markdown"));
+      new import_obsidian24.Notice(t("Could not save page as Markdown"));
     }
   }
   async copySelectionHighlightUrl(selected) {
@@ -8290,11 +8619,11 @@ source: ${JSON.stringify(pageUrl)}
     ))?.trim();
     const link = webTextFragmentUrl(url, text ?? "");
     if (!link) {
-      new import_obsidian22.Notice(t("Select text on an HTTP(S) page to copy its highlight link."));
+      new import_obsidian24.Notice(t("Select text on an HTTP(S) page to copy its highlight link."));
       return false;
     }
     await navigator.clipboard.writeText(link);
-    new import_obsidian22.Notice(t("Highlight link copied"));
+    new import_obsidian24.Notice(t("Highlight link copied"));
     return true;
   }
   async saveSelectionAsMarkdown(selected) {
@@ -8304,7 +8633,7 @@ source: ${JSON.stringify(pageUrl)}
       "window.getSelection()?.toString() || ''"
     ))?.trim();
     if (!text) {
-      new import_obsidian22.Notice(t("Select web page text to create a note."));
+      new import_obsidian24.Notice(t("Select web page text to create a note."));
       return false;
     }
     try {
@@ -8320,12 +8649,24 @@ source: ${JSON.stringify(pageUrl)}
       for (let count = 2; vault.getAbstractFileByPath(path); count++) path = `${folder}/${baseName} (${count}).md`;
       const file = await vault.create(path, markdown);
       await this.plugin.app.workspace.openLinkText(file.path, "", true);
-      new import_obsidian22.Notice(t("Selected text saved as a Markdown note"));
+      new import_obsidian24.Notice(t("Selected text saved as a Markdown note"));
       return true;
     } catch (error) {
       console.warn("Unified Browser Core: selection clipping failed", error);
-      new import_obsidian22.Notice(t("Could not save selected text"));
+      new import_obsidian24.Notice(t("Could not save selected text"));
       return false;
+    }
+  }
+  async currentVideoTimestampLink() {
+    const guest = this.readyWebview();
+    if (!guest?.executeJavaScript) return null;
+    try {
+      const seconds = await guest.executeJavaScript(
+        "(() => { const video = document.querySelector('video'); return video && Number.isFinite(video.currentTime) ? video.currentTime : null; })()"
+      );
+      return seconds === null || this.webview !== guest ? null : videoTimestampLink(this.currentUrlValue, seconds);
+    } catch {
+      return null;
     }
   }
   executeWebEdit(command) {
@@ -8374,12 +8715,12 @@ source: ${JSON.stringify(pageUrl)}
     );
     const webViews = views.filter((view) => !view.currentUrl().startsWith("browser://"));
     if (!webViews.length) {
-      new import_obsidian22.Notice(t("There are no web pages to bookmark."));
+      new import_obsidian24.Notice(t("There are no web pages to bookmark."));
       return;
     }
     const newViews = webViews.filter((view) => !this.plugin.core.bookmarks.isBookmarked(view.currentUrl()));
     if (!newViews.length) {
-      new import_obsidian22.Notice(t("All open web pages are already bookmarked."));
+      new import_obsidian24.Notice(t("All open web pages are already bookmarked."));
       return;
     }
     const folder = this.plugin.core.bookmarks.addFolder(
@@ -8394,7 +8735,7 @@ source: ${JSON.stringify(pageUrl)}
     }
     this.plugin.core.scheduleSave();
     this.refreshBookmarks();
-    new import_obsidian22.Notice("Bookmarked " + newViews.length + " open browser tab(s)." + (newViews.length < webViews.length ? " Existing bookmarks were skipped." : ""));
+    new import_obsidian24.Notice("Bookmarked " + newViews.length + " open browser tab(s)." + (newViews.length < webViews.length ? " Existing bookmarks were skipped." : ""));
   }
   currentPageBookmarked() {
     return !this.currentUrlValue.startsWith("browser://") && this.plugin.core.bookmarks.isBookmarked(this.currentUrlValue);
@@ -8457,17 +8798,17 @@ source: ${JSON.stringify(pageUrl)}
   }
   enableFormRecoveryForSite() {
     if (!this.plugin.core.formRecovery.enableSite(this.containerId, this.currentUrlValue)) {
-      new import_obsidian22.Notice(t("Form recovery is only available for web pages."));
+      new import_obsidian24.Notice(t("Form recovery is only available for web pages."));
       return;
     }
     this.plugin.core.scheduleSave();
     void this.syncFormRecoveryInstrumentation();
-    new import_obsidian22.Notice(t("Form recovery enabled for this site."));
+    new import_obsidian24.Notice(t("Form recovery enabled for this site."));
   }
   showRecoveryCandidates() {
     const fields = this.plugin.core.formRecovery.recoveryFieldsForDocument(this.containerId, this.currentUrlValue);
     if (!fields.length) {
-      new import_obsidian22.Notice(t("No saved form values are available for this page."));
+      new import_obsidian24.Notice(t("No saved form values are available for this page."));
       return;
     }
     showFormRecoveryCandidates(
@@ -8478,13 +8819,13 @@ source: ${JSON.stringify(pageUrl)}
   }
   disableFormRecoveryForSite() {
     if (!this.plugin.core.formRecovery.disableSite(this.containerId, this.currentUrlValue, true)) {
-      new import_obsidian22.Notice(t("Form recovery is only available for web pages."));
+      new import_obsidian24.Notice(t("Form recovery is only available for web pages."));
       return;
     }
     this.formRecoveryWatchEnabled = false;
     this.plugin.core.scheduleSave();
     void this.syncFormRecoveryInstrumentation();
-    new import_obsidian22.Notice(t("Form recovery disabled and stored form values cleared for this site."));
+    new import_obsidian24.Notice(t("Form recovery disabled and stored form values cleared for this site."));
   }
   async syncFormRecoveryInstrumentation() {
     const webview = this.readyWebview();
@@ -8512,17 +8853,17 @@ source: ${JSON.stringify(pageUrl)}
   async disableFocusedFormRecoveryField() {
     const field2 = await this.focusedFormField();
     if (!field2 || !this.plugin.core.formRecovery.excludeField(this.containerId, this.currentUrlValue, field2)) {
-      new import_obsidian22.Notice(t("Could not identify the focused form field."));
+      new import_obsidian24.Notice(t("Could not identify the focused form field."));
       return;
     }
     this.plugin.core.scheduleSave();
-    new import_obsidian22.Notice(t("This form field is excluded from recovery on this site."));
+    new import_obsidian24.Notice(t("This form field is excluded from recovery on this site."));
   }
   async restoreFocusedFormValue() {
     const saved = this.plugin.core.formRecovery.recoveryFieldsForDocument(this.containerId, this.currentUrlValue);
     const webview = this.readyWebview();
     if (!saved.length || !webview?.executeJavaScript) {
-      new import_obsidian22.Notice(t("No saved form value is available for this page."));
+      new import_obsidian24.Notice(t("No saved form value is available for this page."));
       return;
     }
     const payload = JSON.stringify(saved);
@@ -8561,13 +8902,13 @@ source: ${JSON.stringify(pageUrl)}
       el.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
     })()`);
-    new import_obsidian22.Notice(restored ? t("Restored the previous value for this field.") : t("No matching saved value was found for this field."));
+    new import_obsidian24.Notice(restored ? t("Restored the previous value for this field.") : t("No matching saved value was found for this field."));
   }
   async restoreFormValues(options = {}) {
     const recoveryFields = this.plugin.core.formRecovery.recoveryFieldsForDocument(this.containerId, this.currentUrlValue);
     const webview = this.readyWebview();
     if (!recoveryFields.length || !webview?.executeJavaScript) {
-      if (!options.silent) new import_obsidian22.Notice(t("No saved form values for this page."));
+      if (!options.silent) new import_obsidian24.Notice(t("No saved form values for this page."));
       return;
     }
     const watchNextSteps = options.watchNextSteps ?? true;
@@ -8647,7 +8988,7 @@ source: ${JSON.stringify(pageUrl)}
       return initialCount;
     })()`);
     if (!options.silent) {
-      new import_obsidian22.Notice(
+      new import_obsidian24.Notice(
         restored > 0 ? t("Restored {v0} form field(s).{v1}", { v0: restored, v1: watchNextSteps ? " Matching fields in later form steps will also be restored when they appear." : "" }) : t("No matching fields were found for the saved form values.")
       );
     }
@@ -8699,7 +9040,7 @@ source: ${JSON.stringify(pageUrl)}
         try {
           this.plugin.app.workspace.moveLeafToPopout(this.leaf);
         } catch {
-          new import_obsidian22.Notice(t("This Obsidian build cannot move the tab to a new window."));
+          new import_obsidian24.Notice(t("This Obsidian build cannot move the tab to a new window."));
         }
       }));
       for (const container of this.plugin.core.containers.list()) {
@@ -8739,6 +9080,22 @@ source: ${JSON.stringify(pageUrl)}
       this.browserHeaderEl?.addClass("ubc-browser-view-header");
     }
     this.toolbarEl = toolbarHost.createDiv({ cls: "ubc-toolbar" });
+    const dragLink = this.toolbarEl.createEl("button", {
+      cls: "ubc-drag-markdown-link clickable-icon",
+      attr: { type: "button", draggable: "true", title: "Drag page link into an Obsidian note", "aria-label": "Drag Markdown link to note" }
+    });
+    (0, import_obsidian24.setIcon)(dragLink, "grip");
+    dragLink.addEventListener("dragstart", (event) => {
+      if (!event.dataTransfer || !/^https?:\/\//i.test(this.currentUrlValue)) {
+        event.preventDefault();
+        return;
+      }
+      const url = this.currentUrlValue;
+      const markdown = formatBrowserTabsMarkdown([{ title: this.currentTitle || url, url }]).replace(/^- /, "");
+      event.dataTransfer.setData("text/plain", markdown);
+      event.dataTransfer.setData("text/uri-list", url);
+      event.dataTransfer.effectAllowed = "copy";
+    });
     this.backButtonEl = this.addToolbarButton("arrow-left", t("Back"), () => this.goBack());
     this.backButtonEl.addEventListener("contextmenu", (event) => {
       event.preventDefault();
@@ -8755,7 +9112,7 @@ source: ${JSON.stringify(pageUrl)}
     });
     this.reloadButtonEl.addEventListener("contextmenu", (event) => {
       event.preventDefault();
-      const menu = new import_obsidian22.Menu();
+      const menu = new import_obsidian24.Menu();
       menu.addItem((item) => item.setTitle(t("Reload")).setIcon("rotate-cw").onClick(() => this.reload()));
       menu.addItem((item) => item.setTitle(t("Hard reload")).onClick(() => this.hardReload()));
       menu.addItem((item) => item.setTitle(t("Stop loading")).onClick(() => this.stopLoading()));
@@ -8838,7 +9195,7 @@ source: ${JSON.stringify(pageUrl)}
       cls: "ubc-toolbar-button clickable-icon",
       attr: { "aria-label": label2, title: label2 }
     });
-    (0, import_obsidian22.setIcon)(button2, icon);
+    (0, import_obsidian24.setIcon)(button2, icon);
     button2.addEventListener("click", callback);
     return button2;
   }
@@ -8867,7 +9224,7 @@ source: ${JSON.stringify(pageUrl)}
     }
     if (this.reloadButtonEl) {
       const loading = status === "waiting" || status === "loading";
-      (0, import_obsidian22.setIcon)(this.reloadButtonEl, loading ? "x" : "rotate-cw");
+      (0, import_obsidian24.setIcon)(this.reloadButtonEl, loading ? "x" : "rotate-cw");
       const actionLabel = t(loading ? "Stop loading" : "Reload");
       this.reloadButtonEl.setAttribute("aria-label", actionLabel);
       this.reloadButtonEl.title = actionLabel;
@@ -8887,7 +9244,7 @@ source: ${JSON.stringify(pageUrl)}
     this.favoritesBarEl.toggleClass("is-hidden", !visible);
     if (!visible) return;
     const library = this.favoritesBarEl.createEl("button", { cls: "ubc-favorite-item ubc-bar-library", attr: { title: t("Open bookmarks"), "aria-label": t("Open bookmarks") } });
-    (0, import_obsidian22.setIcon)(library, "book-open");
+    (0, import_obsidian24.setIcon)(library, "book-open");
     library.addEventListener("click", () => this.showInternal("bookmarks"));
     if (!favorites.length && this.plugin.core.settings().bookmarkBarMode === "selected") {
       const choose = this.favoritesBarEl.createEl("button", { cls: "ubc-favorite-item", text: t("Choose members") });
@@ -8899,10 +9256,10 @@ source: ${JSON.stringify(pageUrl)}
     for (const item of favorites) {
       if (item.kind === "folder") {
         const folder = this.favoritesBarEl.createEl("button", { cls: "ubc-favorite-item" });
-        (0, import_obsidian22.setIcon)(folder.createSpan(), "folder");
+        (0, import_obsidian24.setIcon)(folder.createSpan(), "folder");
         folder.createSpan({ text: item.title });
         folder.addEventListener("click", () => {
-          const menu = new import_obsidian22.Menu();
+          const menu = new import_obsidian24.Menu();
           const append = (parentId, target) => {
             for (const child of this.plugin.core.bookmarks.children(parentId)) {
               target.addItem((entry) => {
@@ -9095,12 +9452,12 @@ ${item.url}` }
     this.plugin.core.bookmarks.setFavorite(bookmark.id, true);
     this.plugin.core.scheduleSave();
     this.refreshBookmarks();
-    new import_obsidian22.Notice(t("Added to favorites."));
+    new import_obsidian24.Notice(t("Added to favorites."));
   }
   updateBookmarkButton() {
     if (!this.bookmarkButtonEl) return;
     const bookmark = !this.currentUrlValue.startsWith("browser://") ? this.plugin.core.bookmarks.findByUrl(this.currentUrlValue) : void 0;
-    (0, import_obsidian22.setIcon)(this.bookmarkButtonEl, "star");
+    (0, import_obsidian24.setIcon)(this.bookmarkButtonEl, "star");
     const label2 = bookmark ? t("Edit bookmark") : t("Bookmark page");
     this.bookmarkButtonEl.setAttribute("aria-label", label2);
     this.bookmarkButtonEl.title = label2;
@@ -9497,7 +9854,7 @@ ${item.url}` }
       if (this.formRecoveryWatchEnabled) {
         await this.restoreFormValues({ silent: true, watchNextSteps: true });
       } else {
-        new import_obsidian22.Notice(t("Saved form values are available for this page."));
+        new import_obsidian24.Notice(t("Saved form values are available for this page."));
       }
     }
     if (this.checkpointTimer === void 0) {
@@ -9603,7 +9960,7 @@ ${item.url}` }
       this.plugin.scheduleSessionCheckpoint();
       const preserving = this.manualRetention === "preserve";
       retention.setText(preserving ? t("Use normal recovery retention") : t("Keep recovery data"));
-      new import_obsidian22.Notice(
+      new import_obsidian24.Notice(
         preserving ? t("Detailed recovery data for this tab will be kept until you remove it.") : t("Detailed recovery data for this tab will use normal retention again.")
       );
     });
@@ -9636,7 +9993,7 @@ ${item.url}` }
     if (!webview || !this.restoredFromLeafId) return;
     const capsule = this.plugin.core.restore.get(this.restoredFromLeafId);
     if (!capsule || !await this.navigationHistoryAdapter.restore(webview, capsule)) {
-      new import_obsidian22.Notice(t("Detailed tab recovery is not currently available; the page can still be reopened normally."));
+      new import_obsidian24.Notice(t("Detailed tab recovery is not currently available; the page can still be reopened normally."));
       return;
     }
     this.setNavigationStatus("restored", "Restored tab state");
@@ -9971,7 +10328,7 @@ ${item.url}` }
       off = this.plugin.passwords.subscribe(close);
       this.passwordPopoverClose = close;
     } catch {
-      new import_obsidian22.Notice(t("Password input is unavailable on this page. Use an HTTPS page with a visible login form."));
+      new import_obsidian24.Notice(t("Password input is unavailable on this page. Use an HTTPS page with a visible login form."));
     }
   }
   async savePasswordForCurrentSite() {
@@ -9980,7 +10337,7 @@ ${item.url}` }
     try {
       origin = passwordOrigin(this.currentUrlValue);
     } catch {
-      new import_obsidian22.Notice(t("Passwords require a secure website."));
+      new import_obsidian24.Notice(t("Passwords require a secure website."));
       return;
     }
     if (!this.plugin.passwords.exists) {
@@ -9997,17 +10354,17 @@ ${item.url}` }
         return;
       }
       if (!event) {
-        new import_obsidian22.Notice(t("No filled-in password on this page. Open the login form and enter your password before choosing Save password for this site."));
+        new import_obsidian24.Notice(t("No filled-in password on this page. Open the login form and enter your password before choosing Save password for this site."));
         return;
       }
       if (this.plugin.passwords.excluded(origin)) {
         event.password = "";
-        new import_obsidian22.Notice(t("Password saving is disabled for this site. Allow save suggestions in Passwords settings."));
+        new import_obsidian24.Notice(t("Password saving is disabled for this site. Allow save suggestions in Passwords settings."));
         return;
       }
       this.showPasswordSave(event);
     } catch {
-      new import_obsidian22.Notice(t("The filled-in password could not be read from this page."));
+      new import_obsidian24.Notice(t("The filled-in password could not be read from this page."));
     }
   }
   showPasswordSave(event) {
@@ -10096,7 +10453,7 @@ ${item.url}` }
       const target = event.target;
       if (target instanceof HTMLElement && target.closest("button, input, a")) return;
       event.preventDefault();
-      const menu = new import_obsidian22.Menu();
+      const menu = new import_obsidian24.Menu();
       menu.addItem((item) => item.setTitle(t("New browser tab")).setIcon("plus").onClick(() => void this.plugin.openBrowser()));
       for (const container of this.plugin.core.containers.list()) {
         menu.addItem((item) => item.setTitle("New tab in " + container.name).setIcon("box").onClick(() => void this.plugin.openBrowser({ url: "browser://home", containerId: container.id })));
@@ -10122,10 +10479,10 @@ ${item.url}` }
     const localLogo = this.plugin.app.vault.getAbstractFileByPath(logoName);
     if (logoName.startsWith("https://")) {
       titleIcon.createEl("img", { attr: { alt: "", src: logoName } });
-    } else if (localLogo instanceof import_obsidian22.TFile && /^(png|jpe?g|gif|svg|webp|avif)$/i.test(localLogo.extension)) {
+    } else if (localLogo instanceof import_obsidian24.TFile && /^(png|jpe?g|gif|svg|webp|avif)$/i.test(localLogo.extension)) {
       titleIcon.createEl("img", { attr: { alt: "", src: this.plugin.app.vault.getResourcePath(localLogo) } });
-    } else if (logoName && (0, import_obsidian22.getIcon)(logoName)) {
-      (0, import_obsidian22.setIcon)(titleIcon, logoName);
+    } else if (logoName && (0, import_obsidian24.getIcon)(logoName)) {
+      (0, import_obsidian24.setIcon)(titleIcon, logoName);
     } else {
       titleIcon.addClass("is-hidden");
     }
@@ -10204,7 +10561,7 @@ ${item.url}` }
         button2.addEventListener("click", () => this.plugin.restoreLeaf(leaf.id));
         button2.addEventListener("contextmenu", (event) => {
           event.preventDefault();
-          const menu = new import_obsidian22.Menu();
+          const menu = new import_obsidian24.Menu();
           menu.addItem((item) => item.setTitle(t("Restore")).setIcon("rotate-ccw").onClick(() => this.plugin.restoreLeaf(leaf.id)));
           for (const container of this.plugin.core.containers.list()) {
             menu.addItem(
@@ -10245,7 +10602,7 @@ ${item.url}` }
       const iconName = kind === "bookmarked" ? this.plugin.core.settings().homeBookmarkIcons[file.path] : void 0;
       if (iconName) {
         const visual = button2.createSpan({ cls: "ubc-home-bookmark-icon" });
-        (0, import_obsidian22.setIcon)(visual, iconName);
+        (0, import_obsidian24.setIcon)(visual, iconName);
       }
       button2.createSpan({ text: file.name });
       button2.createSpan({
@@ -10261,7 +10618,7 @@ ${item.url}` }
       });
       button2.addEventListener("contextmenu", (event) => {
         event.preventDefault();
-        const menu = new import_obsidian22.Menu();
+        const menu = new import_obsidian24.Menu();
         menu.addItem(
           (item) => item.setTitle(t("Open")).setIcon("file").onClick(() => void this.openVaultHomeFile(file.path))
         );
@@ -10295,18 +10652,18 @@ ${item.url}` }
       const opened = await this.plugin.homeAdapter.openFile(this.leaf, path, newTab);
       if (!opened) {
         if (!newTab) this.closeReasonOverride = void 0;
-        new import_obsidian22.Notice(t("That file is no longer available."));
+        new import_obsidian24.Notice(t("That file is no longer available."));
       }
     } catch (error) {
       if (!newTab) this.closeReasonOverride = void 0;
       console.error("Unified Browser Core: failed to open Home file", error);
-      new import_obsidian22.Notice(t("Could not open that file."));
+      new import_obsidian24.Notice(t("Could not open that file."));
     }
   }
   renderBookmarks() {
     const page = this.internalLayerEl.createDiv({ cls: "ubc-surface ubc-bookmarks" });
     const hero = page.createDiv({ cls: "ubc-bookmark-hero" });
-    (0, import_obsidian22.setIcon)(hero.createDiv({ cls: "ubc-bookmark-hero-icon" }), "library-big");
+    (0, import_obsidian24.setIcon)(hero.createDiv({ cls: "ubc-bookmark-hero-icon" }), "library-big");
     const heading = hero.createDiv();
     heading.createEl("h1", { text: t("Bookmarks") });
     heading.createEl("p", { text: t("Save freely. Find what you need by type or folder.") });
@@ -10328,7 +10685,7 @@ ${item.url}` }
     });
     const imports = actions.createEl("button", { text: t("Import") });
     imports.addEventListener("click", () => {
-      const menu = new import_obsidian22.Menu();
+      const menu = new import_obsidian24.Menu();
       menu.addItem((item) => item.setTitle(t("Import Obsidian Bookmarks")).setIcon("book-open").onClick(async () => {
         await this.plugin.importObsidianBookmarks();
         this.refreshBookmarks();
@@ -10351,7 +10708,7 @@ ${item.url}` }
     const choices = [["type", "By type", "shapes"], ["folder", "By folder", "folder"], ["selected", "Selected members", "star"]];
     for (const [mode, label2, icon] of choices) {
       const button2 = modes.createEl("button", { attr: { "aria-pressed": String(this.bookmarkLayout === mode) } });
-      (0, import_obsidian22.setIcon)(button2.createSpan(), icon);
+      (0, import_obsidian24.setIcon)(button2.createSpan(), icon);
       button2.createSpan({ text: t(label2) });
       button2.toggleClass("is-active", this.bookmarkLayout === mode);
       button2.addEventListener("click", () => {
@@ -10379,7 +10736,7 @@ ${item.url}` }
       summary.setText(needle ? t("{count} results", { count: presented.length }) : this.bookmarkLayout === "selected" ? t("{count} selected", { count: presented.length }) : this.bookmarkLayout === "manage" ? t("Pick the pages you use every day from your bookmarks.") : "");
       if (!presented.length && (needle || !this.plugin.core.bookmarks.folders().length || this.bookmarkLayout !== "folder")) {
         const empty = list.createDiv({ cls: "ubc-empty-state ubc-bookmark-empty" });
-        (0, import_obsidian22.setIcon)(empty.createDiv({ cls: "ubc-bookmark-empty-icon" }), needle ? "search" : "bookmark-plus");
+        (0, import_obsidian24.setIcon)(empty.createDiv({ cls: "ubc-bookmark-empty-icon" }), needle ? "search" : "bookmark-plus");
         const noSelected = !needle && this.bookmarkLayout === "selected" && all.length > 0;
         empty.createEl("h2", { text: t(needle ? "No matching bookmarks" : noSelected ? "No selected bookmarks" : "No bookmarks yet") });
         empty.createEl("p", { text: t(needle ? "Try another title, URL, or folder name." : noSelected ? "Select pages to show in your everyday bookmarks." : "Save a page with the star in the toolbar, or add your first bookmark here.") });
@@ -10402,11 +10759,11 @@ ${item.url}` }
         if (!members.length) continue;
         const section = list.createEl("section", { cls: "ubc-bookmark-category" });
         const groupHeading = section.createDiv({ cls: "ubc-bookmark-category-heading" });
-        (0, import_obsidian22.setIcon)(groupHeading.createSpan(), media.icon);
+        (0, import_obsidian24.setIcon)(groupHeading.createSpan(), media.icon);
         groupHeading.createEl("h2", { text: t(media.label) });
         groupHeading.createSpan({ cls: "ubc-bookmark-count", text: String(members.length) });
         const shortcut = categories.createEl("button", { cls: "ubc-bookmark-category-chip" });
-        (0, import_obsidian22.setIcon)(shortcut.createSpan(), media.icon);
+        (0, import_obsidian24.setIcon)(shortcut.createSpan(), media.icon);
         shortcut.createSpan({ text: t(media.label) + " \xB7 " + members.length });
         shortcut.addEventListener("click", () => section.scrollIntoView({ block: "start", behavior: this.plugin.core.settings().reducedMotion ? "auto" : "smooth" }));
         const grid = section.createDiv({ cls: "ubc-bookmark-grid" });
@@ -10444,16 +10801,16 @@ ${item.url}` }
     const footer = card.createDiv({ cls: "ubc-bookmark-card-footer" });
     const media = BOOKMARK_MEDIA.find((entry) => entry.type === classifyBookmark(bookmark));
     const badge = footer.createSpan({ cls: "ubc-bookmark-type-badge" });
-    (0, import_obsidian22.setIcon)(badge.createSpan(), media.icon);
+    (0, import_obsidian24.setIcon)(badge.createSpan(), media.icon);
     badge.createSpan({ text: t(media.label) });
     const edit = footer.createEl("button", { cls: "clickable-icon", attr: { title: t("Edit bookmark"), "aria-label": t("Edit bookmark") } });
-    (0, import_obsidian22.setIcon)(edit, "pencil");
+    (0, import_obsidian24.setIcon)(edit, "pencil");
     edit.addEventListener("click", () => {
       this.bookmarkPopoverClose?.();
       this.bookmarkPopoverClose = showBookmarkPopover(this.plugin, bookmark, edit, this.browserContentEl, () => this.refreshBookmarks());
     });
     const move = footer.createEl("button", { cls: "clickable-icon", attr: { title: t("Move to folder"), "aria-label": t("Move to folder") } });
-    (0, import_obsidian22.setIcon)(move, "folder-input");
+    (0, import_obsidian24.setIcon)(move, "folder-input");
     move.addEventListener("click", async () => {
       const parentId = await pickBookmarkFolder(this.plugin.app, this.plugin.core.bookmarks);
       if (parentId === void 0 || !this.plugin.core.bookmarks.moveBookmark(bookmark.id, parentId)) return;
@@ -10508,7 +10865,7 @@ ${item.url}` }
               "aria-expanded": String(!collapsed)
             }
           });
-          (0, import_obsidian22.setIcon)(toggle, collapsed ? "chevron-right" : "chevron-down");
+          (0, import_obsidian24.setIcon)(toggle, collapsed ? "chevron-right" : "chevron-down");
           const title = row.createEl("button", {
             cls: "ubc-bookmark-folder-title",
             text: item.title,
@@ -10568,7 +10925,7 @@ ${item.url}` }
         title: bookmark.favorite ? t("Remove from favorites") : t("Add to favorites")
       }
     });
-    (0, import_obsidian22.setIcon)(button2, "star");
+    (0, import_obsidian24.setIcon)(button2, "star");
     button2.toggleClass("is-active", bookmark.favorite);
     button2.setAttribute("aria-pressed", String(bookmark.favorite));
     button2.addEventListener("click", () => {
@@ -10715,7 +11072,7 @@ ${item.url}` }
                 restore.addEventListener("click", () => {
                   void (async () => {
                     const restored = await this.plugin.restoreSavedHistoryLeaf(savedVersionId, leafId);
-                    if (!restored) new import_obsidian22.Notice(t("This saved tab no longer has a restorable URL."));
+                    if (!restored) new import_obsidian24.Notice(t("This saved tab no longer has a restorable URL."));
                   })();
                 });
               }
@@ -10783,7 +11140,7 @@ ${item.url}` }
       if (!state) {
         this.historyVersionId = void 0;
         versionFilter.value = "";
-        new import_obsidian22.Notice(t("This saved history version is no longer available."));
+        new import_obsidian24.Notice(t("This saved history version is no longer available."));
         render();
         return;
       }
@@ -10854,7 +11211,7 @@ ${item.url}` }
       button2.addEventListener("click", () => {
         void (async () => {
           const restored = await this.plugin.restoreSavedHistoryNode(versionId, node.id);
-          if (!restored) new import_obsidian22.Notice(t("This saved visit is no longer available."));
+          if (!restored) new import_obsidian24.Notice(t("This saved visit is no longer available."));
         })();
       });
     }
@@ -10876,7 +11233,7 @@ ${item.url}` }
     this.navigate(url);
   }
   showHistoryDayMenu(day, dayNodes, event, filterDay, refresh) {
-    const menu = new import_obsidian22.Menu();
+    const menu = new import_obsidian24.Menu();
     const navigationNodes = dayNodes.filter((node) => node.kind === "navigation");
     const branchIds = [...new Set(navigationNodes.map((node) => node.branchId))];
     menu.addItem((item) => item.setTitle(t("Expand all alternate paths")).onClick(() => {
@@ -10911,7 +11268,7 @@ ${item.url}` }
     const navigationNodes = leafNodes.filter((node) => node.kind === "navigation");
     const mainBranch = this.plugin.core.history.currentBranchForLeaf(leafId) ?? navigationNodes.at(-1)?.branchId;
     const mainNodes = mainBranch ? this.plugin.core.history.navigationNodesForBranch(mainBranch) : navigationNodes;
-    const menu = new import_obsidian22.Menu();
+    const menu = new import_obsidian24.Menu();
     if (record?.lastUrl) {
       menu.addItem((item) => item.setTitle(t("Restore tab")).setIcon("rotate-ccw").onClick(() => void this.plugin.restoreLeaf(leafId)));
       const originalContainerExists = Boolean(this.plugin.core.containers.find(record.containerId));
@@ -10968,12 +11325,12 @@ ${item.url}` }
         row.addEventListener("contextmenu", (event) => {
           event.preventDefault();
           const check = this.plugin.core.history.canRemoveTombstone(node.id);
-          const menu = new import_obsidian22.Menu();
+          const menu = new import_obsidian24.Menu();
           menu.addItem(
             (item) => item.setTitle(t("Remove deleted entry marker")).setIcon("trash").setDisabled(!check.ok).onClick(() => {
               const result = this.plugin.core.history.removeTombstone(node.id);
               if (!result.ok) {
-                new import_obsidian22.Notice(result.reason || "This deleted entry marker cannot be removed.");
+                new import_obsidian24.Notice(result.reason || "This deleted entry marker cannot be removed.");
                 return;
               }
               this.plugin.core.scheduleSave();
@@ -11007,7 +11364,7 @@ ${item.url}` }
           event.preventDefault();
           const branchNodes = this.plugin.core.history.navigationNodesForBranch(node.branchId);
           const latest = branchNodes.at(-1);
-          const menu = new import_obsidian22.Menu();
+          const menu = new import_obsidian24.Menu();
           menu.addItem((item) => item.setTitle(t("Show alternate path")).onClick(() => {
             this.expandedHistoryBranches.add(node.branchId);
             this.showInternal("history");
@@ -11064,7 +11421,7 @@ ${item.url}` }
       }
       row.addEventListener("contextmenu", (event) => {
         event.preventDefault();
-        const menu = new import_obsidian22.Menu();
+        const menu = new import_obsidian24.Menu();
         menu.addItem((item) => item.setTitle(t("Open")).onClick(() => this.navigate(node.url)));
         menu.addItem((item) => item.setTitle(t("Open in new tab")).onClick(() => this.plugin.openBrowser({ url: node.url, containerId: node.containerId })));
         for (const container of this.plugin.core.containers.list()) {
@@ -11132,7 +11489,7 @@ ${item.url}` }
           detail.createSpan({ text });
           detail.addEventListener("contextmenu", (event) => {
             event.preventDefault();
-            const menu = new import_obsidian22.Menu();
+            const menu = new import_obsidian24.Menu();
             menu.addItem((item) => item.setTitle(t("Copy event details")).setIcon("copy").onClick(() => {
               void navigator.clipboard.writeText(JSON.stringify(residual, null, 2));
             }));
@@ -11163,7 +11520,7 @@ ${item.url}` }
   showContainerMenuAt(position) {
     const mode = this.plugin.core.settings().containerMode;
     if (mode === "off") return;
-    const menu = new import_obsidian22.Menu();
+    const menu = new import_obsidian24.Menu();
     menu.addItem(
       (item) => item.setTitle(t("Open new tab in this container")).setIcon("plus").onClick(() => void this.plugin.openBrowser({ url: "browser://home", containerId: this.containerId }))
     );
@@ -11227,7 +11584,7 @@ ${item.url}` }
           this.plugin.core.scheduleSave();
           this.plugin.scheduleSessionCheckpoint();
           this.updateContainerIndicator();
-          new import_obsidian22.Notice("Forgot the site default container for " + assignment.originPattern);
+          new import_obsidian24.Notice("Forgot the site default container for " + assignment.originPattern);
         }));
       }
     } else {
@@ -11258,7 +11615,7 @@ ${item.url}` }
     this.plugin.core.scheduleSave();
     this.plugin.scheduleSessionCheckpoint();
     this.updateContainerIndicator();
-    new import_obsidian22.Notice(t("Always open {v0} in {v1}.", { v0: hostname, v1: this.plugin.core.containers.nameFor(containerId) }));
+    new import_obsidian24.Notice(t("Always open {v0} in {v1}.", { v0: hostname, v1: this.plugin.core.containers.nameFor(containerId) }));
   }
   updateContainerIndicator() {
     if (!this.containerButtonEl) return;
@@ -11266,7 +11623,7 @@ ${item.url}` }
     this.containerButtonEl.hidden = mode === "off";
     if (mode === "off") return;
     const container = this.plugin.core.containers.get(this.containerId);
-    (0, import_obsidian22.setIcon)(this.containerButtonEl, container.icon || "box");
+    (0, import_obsidian24.setIcon)(this.containerButtonEl, container.icon || "box");
     const routing = this.plugin.core.containers.routingStatus(
       this.currentUrlValue,
       this.containerId,
@@ -11283,7 +11640,7 @@ ${item.url}` }
     );
   }
   showPermissionMenu(event) {
-    const menu = new import_obsidian22.Menu();
+    const menu = new import_obsidian24.Menu();
     const origin = this.currentOrigin();
     if (!origin) {
       menu.addItem((item) => item.setTitle(t("Site permissions are only available for web pages")).setDisabled(true));
@@ -11336,7 +11693,7 @@ ${item.url}` }
     }
   }
   showNavigationHistoryMenu(direction, event) {
-    const menu = new import_obsidian22.Menu();
+    const menu = new import_obsidian24.Menu();
     const transientIndices = [];
     if (direction < 0) {
       for (let index = this.transientIndex - 1; index >= 0 && transientIndices.length < 12; index--) {
@@ -11415,7 +11772,7 @@ ${item.url}` }
     }
   }
   showAddressMenu(event) {
-    const menu = new import_obsidian22.Menu();
+    const menu = new import_obsidian24.Menu();
     const start = this.addressEl.selectionStart ?? 0;
     const end = this.addressEl.selectionEnd ?? start;
     const selectionStart = Math.min(start, end);
@@ -11671,13 +12028,13 @@ function validSavedFavicon(value) {
 }
 
 // src/ui/permission-prompt.ts
-var import_obsidian23 = require("obsidian");
+var import_obsidian25 = require("obsidian");
 function promptPermission(app, origin, permission) {
   return new Promise((resolve) => {
     new PermissionPromptModal(app, origin, permission, resolve).open();
   });
 }
-var PermissionPromptModal = class extends import_obsidian23.Modal {
+var PermissionPromptModal = class extends import_obsidian25.Modal {
   constructor(app, origin, permission, resolve) {
     super(app);
     this.origin = origin;
@@ -11714,8 +12071,8 @@ var PermissionPromptModal = class extends import_obsidian23.Modal {
 };
 
 // src/ui/tab-search-modal.ts
-var import_obsidian24 = require("obsidian");
-var TabSearchModal = class extends import_obsidian24.FuzzySuggestModal {
+var import_obsidian26 = require("obsidian");
+var TabSearchModal = class extends import_obsidian26.FuzzySuggestModal {
   constructor(app, plugin) {
     super(app);
     this.plugin = plugin;
@@ -11813,14 +12170,14 @@ var TabSearchModal = class extends import_obsidian24.FuzzySuggestModal {
       event.stopPropagation();
       const { leaf, title, url } = match.item;
       const view = leaf.view instanceof BrowserView ? leaf.view : void 0;
-      const menu = new import_obsidian24.Menu();
+      const menu = new import_obsidian26.Menu();
       menu.addItem((item) => item.setTitle(t("Switch to tab")).setIcon("mouse-pointer-click").onClick(() => this.plugin.app.workspace.revealLeaf(leaf)));
       menu.addItem((item) => item.setTitle(match.item.pinned ? t("Unpin") : t("Pin")).setIcon("pin").onClick(() => leaf.setPinned(!match.item.pinned)));
       menu.addItem((item) => item.setTitle(t("Move to new window")).setIcon("picture-in-picture").onClick(() => {
         try {
           this.plugin.app.workspace.moveLeafToPopout(leaf);
         } catch {
-          new import_obsidian24.Notice(t("This Obsidian build cannot move the tab to a new window."));
+          new import_obsidian26.Notice(t("This Obsidian build cannot move the tab to a new window."));
         }
       }));
       if (view) {
@@ -12961,10 +13318,10 @@ function validateContents(value) {
 }
 
 // src/main.ts
-var import_obsidian26 = require("obsidian");
+var import_obsidian28 = require("obsidian");
 var import_node_path4 = require("node:path");
 var import_node_url3 = require("node:url");
-var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
+var UnifiedBrowserCorePlugin = class extends import_obsidian27.Plugin {
   core;
   passwords;
   api;
@@ -13020,7 +13377,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
   }
   async onload() {
     const adapter = this.app.vault.adapter;
-    if (!(adapter instanceof import_obsidian26.FileSystemAdapter)) throw new Error("Password vault requires a local desktop vault");
+    if (!(adapter instanceof import_obsidian28.FileSystemAdapter)) throw new Error("Password vault requires a local desktop vault");
     this.passwords = new PasswordVault((0, import_node_path4.join)(adapter.getBasePath(), this.app.vault.configDir, "plugins", this.manifest.id, "password-vault.json"));
     await this.passwords.load();
     this.register(() => this.passwords.dispose());
@@ -13064,7 +13421,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
     const state = BrowserCore.normalize(raw);
     await this.persistence.archiveExistingHistoryVersions();
     await this.persistence.captureHistoryVersion(state.history);
-    setLocaleResolver(import_obsidian25.getLanguage);
+    setLocaleResolver(import_obsidian27.getLanguage);
     setLanguage(state.settings.language);
     this.core = new BrowserCore(
       this.app,
@@ -13135,6 +13492,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
       if (!this.unloading) void this.managedWebviewBackend.flushPersistentSessions().catch((error) => console.warn("Unified Browser Core: failed periodic guest storage flush", error));
     }, 15e3));
     this.registerView(BROWSER_VIEW_TYPE, (leaf) => new BrowserView(leaf, this));
+    this.registerView(BROWSER_TREE_VIEW_TYPE, (leaf) => new ObsidianBrowserTreeView(leaf, this));
     this.registerView(UBC_HTML_FILE_VIEW, (leaf) => new UbcHtmlFileView(leaf, this));
     this.linkHoverPreview = new ObsidianHoverPreview(this);
     this.register(() => this.linkHoverPreview.close());
@@ -13160,8 +13518,15 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
       registerEvent: (ref) => this.registerEvent(ref),
       openUrl: (url) => this.openObsidianLink({ url, source: "canvas", external: false })
     });
+    registerObsidianSearchSurfaces({
+      app: this.app,
+      core: this.core,
+      openBrowser: (request) => this.openBrowser(request),
+      registerEvent: (ref) => this.registerEvent(ref),
+      register: (callback) => this.register(callback)
+    });
     this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
-      if (file instanceof import_obsidian25.TFile && ["html", "htm"].includes(file.extension)) {
+      if (file instanceof import_obsidian27.TFile && ["html", "htm"].includes(file.extension)) {
         menu.addItem((item) => item.setTitle(t("Open HTML in UBC")).setIcon("globe").onClick(() => void this.openHtmlFileInBrowser(file)));
       }
     }));
@@ -13200,9 +13565,9 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
     this.addCommand({
       id: "toggle-vault-bookmark-sync",
       name: t("Toggle two-way Vault bookmark sync"),
-      callback: () => void this.vaultBookmarkMirror.setEnabled(!this.vaultBookmarkMirror.enabled).then(() => new import_obsidian25.Notice(this.vaultBookmarkMirror.enabled ? t("Vault bookmark sync enabled \xB7 UBC Bookmarks") : t("Vault bookmark sync disabled"))).catch((error) => {
+      callback: () => void this.vaultBookmarkMirror.setEnabled(!this.vaultBookmarkMirror.enabled).then(() => new import_obsidian27.Notice(this.vaultBookmarkMirror.enabled ? t("Vault bookmark sync enabled \xB7 UBC Bookmarks") : t("Vault bookmark sync disabled"))).catch((error) => {
         console.warn("Unified Browser Core: failed to toggle Vault sync", error);
-        new import_obsidian25.Notice(t("Could not change Vault bookmark sync"));
+        new import_obsidian27.Notice(t("Could not change Vault bookmark sync"));
       })
     });
     this.addCommand({
@@ -13221,7 +13586,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
       callback: () => {
         const closed = this.core.history.recentlyClosed(1)[0];
         if (closed) void this.restoreLeaf(closed.id);
-        else new import_obsidian25.Notice(t("No recently closed browser tab."));
+        else new import_obsidian27.Notice(t("No recently closed browser tab."));
       }
     });
     this.addCommand({
@@ -13230,15 +13595,30 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
       callback: () => this.openBrowserTabSearch()
     });
     this.addCommand({
+      id: "open-browser-tab-tree",
+      name: t("Open browser tab tree sidebar"),
+      callback: () => void this.openBrowserTabTree()
+    });
+    this.addCommand({
+      id: "search-in-markdown-header",
+      name: t("Search web from current note header"),
+      checkCallback: (checking) => {
+        const view = this.app.workspace.getActiveViewOfType(import_obsidian27.MarkdownView);
+        if (!view) return false;
+        if (!checking) this.showMarkdownHeaderSearch(view);
+        return true;
+      }
+    });
+    this.addCommand({
       id: "copy-browser-tabs-as-markdown",
       name: t("Copy browser tabs as Markdown links"),
       callback: () => {
         const text = formatBrowserTabsMarkdown(this.api.tabs());
         if (!text) {
-          new import_obsidian25.Notice(t("No web tabs to copy"));
+          new import_obsidian27.Notice(t("No web tabs to copy"));
           return;
         }
-        void navigator.clipboard.writeText(text).then(() => new import_obsidian25.Notice(t("Browser tab links copied")));
+        void navigator.clipboard.writeText(text).then(() => new import_obsidian27.Notice(t("Browser tab links copied")));
       }
     });
     for (const engine of [
@@ -13279,6 +13659,22 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
         if (!view || !/^https?:\/\//i.test(view.currentUrl())) return false;
         if (!checking) void view.copySelectionHighlightUrl();
         return true;
+      }
+    });
+    this.addCommand({
+      id: "insert-browser-video-timestamp",
+      name: t("Insert browser video timestamp into note"),
+      editorCallback: async (editor) => {
+        const view = this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE).sort((a, b) => {
+          const touched = (leaf) => leaf.view instanceof BrowserView ? this.core.state.history.leaves[leaf.view.lifecycleIdentity()]?.lastActiveAt ?? 0 : 0;
+          return touched(b) - touched(a);
+        }).find((leaf) => leaf.view instanceof BrowserView)?.view;
+        const timestamp = await view?.currentVideoTimestampLink();
+        if (!timestamp) {
+          new import_obsidian27.Notice(t("No playable video position found in an open browser tab."));
+          return;
+        }
+        editor.replaceSelection(`[${timestamp.label}](<${timestamp.url}>)`);
       }
     });
     this.addCommand({
@@ -13638,6 +14034,54 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
     if (reveal) this.app.workspace.revealLeaf(leaf);
     return leaf;
   }
+  async openBrowserTabTree() {
+    const present = this.app.workspace.getLeavesOfType(BROWSER_TREE_VIEW_TYPE)[0];
+    if (present) {
+      await this.app.workspace.revealLeaf(present);
+      return;
+    }
+    const leaf = this.app.workspace.getRightLeaf(true) ?? this.app.workspace.getLeaf("split");
+    await leaf.setViewState({ type: BROWSER_TREE_VIEW_TYPE, active: true });
+    await this.app.workspace.revealLeaf(leaf);
+  }
+  showMarkdownHeaderSearch(view) {
+    const header = view.containerEl.querySelector(".view-header");
+    if (!header) {
+      new import_obsidian27.Notice(t("Could not find the note header"));
+      return;
+    }
+    const previous = header.querySelector(".ubc-markdown-header-search");
+    if (previous) {
+      previous.focus();
+      previous.select();
+      return;
+    }
+    const input = header.createEl("input", { cls: "ubc-markdown-header-search", attr: {
+      type: "search",
+      "aria-label": "Search web from note",
+      placeholder: "Search web or URL"
+    } });
+    const remove = () => input.remove();
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        remove();
+        return;
+      }
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      const value = input.value.trim();
+      if (!value) {
+        remove();
+        return;
+      }
+      const url = normalizeBrowserAddress(value, (query) => this.core.searchUrl(query));
+      remove();
+      void this.openBrowser({ url });
+    });
+    input.addEventListener("blur", remove, { once: true });
+    input.focus();
+  }
   async openFromOpener(url, containerId, disposition) {
     if (isExternalAppLink(url)) {
       window.open(url, "_external");
@@ -13658,18 +14102,18 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
     }
     void this.openBrowser({ url: intent.url }).catch((error) => {
       console.warn("Unified Browser Core: failed to open Obsidian link", error);
-      new import_obsidian25.Notice(t("Could not open web link"));
+      new import_obsidian27.Notice(t("Could not open web link"));
     });
   }
   async openHtmlFileInBrowser(file) {
     const adapter = this.app.vault.adapter;
-    if (!(adapter instanceof import_obsidian26.FileSystemAdapter)) return;
+    if (!(adapter instanceof import_obsidian28.FileSystemAdapter)) return;
     await this.openBrowser({ url: (0, import_node_url3.pathToFileURL)((0, import_node_path4.join)(adapter.getBasePath(), file.path)).href });
   }
   async restoreLeaf(oldLeafId, options = {}) {
     const record = this.core.state.history.leaves[oldLeafId];
     if (!record?.lastUrl) {
-      new import_obsidian25.Notice(t("This tab has no restorable URL."));
+      new import_obsidian27.Notice(t("This tab has no restorable URL."));
       return;
     }
     const pinned = options.pinned ?? record.pinned;
@@ -13754,13 +14198,13 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
       return leaf.view instanceof BrowserView && leaf.view.getState().containerId === containerId;
     });
     if (hasLiveLeaf) {
-      new import_obsidian25.Notice(t("Close or reopen tabs using this container before deleting it."));
+      new import_obsidian27.Notice(t("Close or reopen tabs using this container before deleting it."));
       return false;
     }
     this.permissionAdapter.release(containerId);
     const cleared = await this.sessionDataAdapter.clearPartition(container.partition);
     if (!cleared) {
-      new import_obsidian25.Notice(t("Could not clear this container's browsing data, so the container was not deleted."));
+      new import_obsidian27.Notice(t("Could not clear this container's browsing data, so the container was not deleted."));
       return false;
     }
     this.core.permissions.resetContainer(containerId);
@@ -13768,7 +14212,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
     const removed = this.core.containers.remove(containerId);
     if (removed) {
       this.core.scheduleSave();
-      new import_obsidian25.Notice(t("Deleted container \u201C{v0}\u201D and cleared its browsing data.", { v0: container.name }));
+      new import_obsidian27.Notice(t("Deleted container \u201C{v0}\u201D and cleared its browsing data.", { v0: container.name }));
     }
     return removed;
   }
@@ -13819,12 +14263,12 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
     if (!container) return false;
     const cleared = await this.sessionDataAdapter.clearPartition(container.partition);
     if (!cleared) {
-      new import_obsidian25.Notice(t("Could not clear browsing data for \u201C{v0}\u201D.", { v0: container.name }));
+      new import_obsidian27.Notice(t("Could not clear browsing data for \u201C{v0}\u201D.", { v0: container.name }));
       return false;
     }
     this.core.permissions.resetContainer(containerId);
     this.core.scheduleSave();
-    new import_obsidian25.Notice(t("Cleared browsing data and saved permissions for \u201C{v0}\u201D.", { v0: container.name }));
+    new import_obsidian27.Notice(t("Cleared browsing data and saved permissions for \u201C{v0}\u201D.", { v0: container.name }));
     return true;
   }
   captureSessionCheckpoint() {
@@ -13863,12 +14307,12 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
   async restorePreviousSession(notify) {
     const checkpoint = this.previousSessionCheckpoint;
     if (!checkpoint.leaves.length) {
-      if (notify) new import_obsidian25.Notice(t("No previous browser session is available."));
+      if (notify) new import_obsidian27.Notice(t("No previous browser session is available."));
       return;
     }
     const leavesToRestore = this.pendingPreviousSessionLeaves();
     if (!leavesToRestore.length) {
-      if (notify) new import_obsidian25.Notice(t("The previous browser session is already restored."));
+      if (notify) new import_obsidian27.Notice(t("The previous browser session is already restored."));
       return;
     }
     for (const saved of leavesToRestore) {
@@ -13890,7 +14334,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
       });
       leaf.setPinned(saved.pinned);
     }
-    if (notify) new import_obsidian25.Notice(t("Restored {v0} browser tab(s).", { v0: leavesToRestore.length }));
+    if (notify) new import_obsidian27.Notice(t("Restored {v0} browser tab(s).", { v0: leavesToRestore.length }));
   }
   async reconcileInitialSession() {
     if (this.unloading) return;
@@ -13977,13 +14421,13 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
   }
   openSettings() {
     if (!this.settingsAdapter.openPluginSettings(this.app, this.manifest.id)) {
-      new import_obsidian25.Notice(t("Open Obsidian Settings \u2192 Community plugins \u2192 Unified Browser Core."));
+      new import_obsidian27.Notice(t("Open Obsidian Settings \u2192 Community plugins \u2192 Unified Browser Core."));
     }
   }
   async importObsidianBookmarks(notify = true) {
     const snapshot = await this.bookmarksAdapter.scan();
     if (!snapshot.available) {
-      if (notify) new import_obsidian25.Notice(t("Obsidian Bookmarks is unavailable or has no readable bookmark data."));
+      if (notify) new import_obsidian27.Notice(t("Obsidian Bookmarks is unavailable or has no readable bookmark data."));
       return { available: false, added: 0, reused: 0, foldersCreated: 0, skippedNonWeb: 0 };
     }
     const imported = this.core.bookmarks.importWebBookmarks(snapshot.entries);
@@ -13998,7 +14442,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
         imported.foldersCreated ? `${imported.foldersCreated} folder${imported.foldersCreated === 1 ? "" : "s"} created` : "",
         snapshot.skippedNonWeb ? `${snapshot.skippedNonWeb} non-web item${snapshot.skippedNonWeb === 1 ? "" : "s"} left in Obsidian Bookmarks` : ""
       ].filter(Boolean);
-      new import_obsidian25.Notice(parts.join(" \xB7 "));
+      new import_obsidian27.Notice(parts.join(" \xB7 "));
     }
     return { available: true, ...imported, skippedNonWeb: snapshot.skippedNonWeb };
   }
@@ -14010,7 +14454,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
   async importWebViewerBookmarks(notify = true) {
     const snapshot = await this.webViewerBookmarksAdapter.scan();
     if (!snapshot.available) {
-      if (notify) new import_obsidian25.Notice(t("Web viewer Bookmarks has no readable data in this vault."));
+      if (notify) new import_obsidian27.Notice(t("Web viewer Bookmarks has no readable data in this vault."));
       return { available: false, added: 0, reused: 0, skippedInvalid: 0 };
     }
     const imported = this.core.bookmarks.importWebBookmarks(snapshot.entries);
@@ -14024,7 +14468,7 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
         imported.reused ? `${imported.reused} already present` : "",
         snapshot.skippedInvalid ? `${snapshot.skippedInvalid} invalid item${snapshot.skippedInvalid === 1 ? "" : "s"} skipped` : ""
       ].filter(Boolean);
-      new import_obsidian25.Notice(parts.join(" \xB7 "));
+      new import_obsidian27.Notice(parts.join(" \xB7 "));
     }
     return { available: true, added: imported.added, reused: imported.reused, skippedInvalid: snapshot.skippedInvalid };
   }
@@ -14034,16 +14478,16 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
     try {
       const previous = this.core.state.surfingMigration;
       if (previous?.completedAt) {
-        new import_obsidian25.Notice(t("Surfing migration already completed. Backup: {v0}", { v0: previous.backupPath }));
+        new import_obsidian27.Notice(t("Surfing migration already completed. Backup: {v0}", { v0: previous.backupPath }));
         return;
       }
       const snapshot = previous ? null : await this.surfingMigrationAdapter.scan();
       if (snapshot && !snapshot.settingsFound && !snapshot.bookmarksFound && snapshot.tabs.length === 0) {
-        new import_obsidian25.Notice(t("No Surfing data was found in this vault. Run migration before uninstalling Surfing."));
+        new import_obsidian27.Notice(t("No Surfing data was found in this vault. Run migration before uninstalling Surfing."));
         return;
       }
       if (snapshot && (snapshot.settingsFound && !snapshot.settings || snapshot.bookmarksFound && !snapshot.bookmarksValid)) {
-        new import_obsidian25.Notice(t("Surfing data could not be read safely. No changes were made."));
+        new import_obsidian27.Notice(t("Surfing data could not be read safely. No changes were made."));
         return;
       }
       const tabs = previous?.tabs ?? snapshot?.tabs ?? [];
@@ -14171,10 +14615,10 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
       this.refreshContainerPresentation();
       if (this.sessionCheckpointArmed) this.captureSessionCheckpoint();
       await this.core.flush();
-      new import_obsidian25.Notice(`Surfing migration complete: ${record.bookmarksAdded} bookmark(s) added, ${record.tabs.length} tab(s) opened. Backup: ${record.backupPath}`, 12e3);
+      new import_obsidian27.Notice(`Surfing migration complete: ${record.bookmarksAdded} bookmark(s) added, ${record.tabs.length} tab(s) opened. Backup: ${record.backupPath}`, 12e3);
     } catch (error) {
       console.error("Unified Browser Core: Surfing migration failed.", error);
-      new import_obsidian25.Notice(t("Surfing migration stopped. Source data was not deleted; run the command again to resume."), 12e3);
+      new import_obsidian27.Notice(t("Surfing migration stopped. Source data was not deleted; run the command again to resume."), 12e3);
     } finally {
       this.surfingMigrationRunning = false;
     }
@@ -14267,11 +14711,11 @@ var UnifiedBrowserCorePlugin = class extends import_obsidian25.Plugin {
   }
   openQuickSwitcher() {
     if (!this.commandAdapter.openQuickSwitcher(this.app)) {
-      new import_obsidian25.Notice(t("Obsidian Quick Switcher is not available."));
+      new import_obsidian27.Notice(t("Obsidian Quick Switcher is not available."));
     }
   }
   showTabStripMenu(event) {
-    const menu = new import_obsidian25.Menu();
+    const menu = new import_obsidian27.Menu();
     menu.addItem((item) => item.setTitle(t("New browser tab")).setIcon("plus").onClick(() => void this.openBrowser()));
     for (const container of this.core.containers.list()) {
       menu.addItem(

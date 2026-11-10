@@ -62,6 +62,7 @@ try {
     const l=app.workspace.getLeavesOfType('markdown').find(l=>l.view.file?.path==='${fixtureName}' && l.view.getMode?.()==='source');
     if(!l)throw Error('Source note not found');
     app.workspace.setActiveLeaf(l,{focus:true});await app.workspace.revealLeaf(l);
+    await new Promise(resolve=>setTimeout(resolve,150));
     const node=[...l.view.containerEl.querySelectorAll('.cm-underline')].find(n=>n.textContent?.includes('reading link'));
     if(!node)throw Error('Rendered Live Preview link not found');
     const b=node.getBoundingClientRect(),x=b.x+b.width/2,y=b.y+b.height/2;

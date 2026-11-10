@@ -130,7 +130,10 @@ export class ObsidianVaultBookmarkMirror {
       if (!(item instanceof TFile) || item.extension !== "md") continue;
       const data = parseMirroredBookmark(await this.app.vault.cachedRead(item));
       if (data && !result.has(data.id)) result.set(data.id, { file: item, data });
-      else unreadable = true;
+      else if (this.core.state.vaultBookmarkMirror.publishedIds.some(id =>
+        item.path === `${BOOKMARK_VAULT_FOLDER}/${encodeURIComponent(id)}.md` || this.files.get(id) === item)) {
+        unreadable = true;
+      }
     }
     return { records: result, unreadable };
   }
@@ -182,6 +185,15 @@ export class ObsidianVaultBookmarkMirror {
         this.files.set(id, file);
       }
     } finally { this.applyingFromVault = false; }
+
+    if (unreadable) {
+      // Never replace malformed user frontmatter with UBC data merely to make
+      // the mirror look consistent. Keep source and target for user repair.
+      console.warn("Unified Browser Core: a managed Vault bookmark note has invalid frontmatter; export paused");
+      this.core.scheduleSave();
+      this.refreshViews();
+      return;
+    }
 
     // A note that was created manually with an obsolete ID does not
     // overwrite the user's file or duplicate another valid bookmark.

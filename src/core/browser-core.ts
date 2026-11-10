@@ -121,6 +121,13 @@ export class BrowserCore {
           ? raw.vaultBookmarkMirror.publishedIds.filter((id): id is string => typeof id === "string")
           : [],
       },
+      browserTabTree: {
+        groups: Array.isArray(raw?.browserTabTree?.groups) ? raw.browserTabTree.groups : [],
+        tabToGroup: raw?.browserTabTree?.tabToGroup && typeof raw.browserTabTree.tabToGroup === "object" ? raw.browserTabTree.tabToGroup : {},
+        tabOrder: Array.isArray(raw?.browserTabTree?.tabOrder) ? raw.browserTabTree.tabOrder : [],
+        savedWorkspaces: raw?.browserTabTree?.savedWorkspaces && typeof raw.browserTabTree.savedWorkspaces === "object"
+          ? raw.browserTabTree.savedWorkspaces : {},
+      },
     };
   }
 

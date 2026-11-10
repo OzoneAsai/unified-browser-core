@@ -50,6 +50,12 @@ try {
     } }],
   });
   await import(pathToFileURL(vaultMirrorBundle).href);
+  const browserTreeBundle = join(dir, "obsidian-browser-tree-model.mjs");
+  await esbuild.build({
+    entryPoints: ["tests/obsidian-browser-tree-model-smoke.ts"],
+    bundle: true, platform: "node", format: "esm", target: "node22", outfile: browserTreeBundle,
+  });
+  await import(pathToFileURL(browserTreeBundle).href);
   await esbuild.build({
     entryPoints: ["tests/core-smoke.ts"],
     bundle: true,

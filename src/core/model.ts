@@ -259,6 +259,18 @@ export interface BrowserCoreState {
     enabled: boolean;
     publishedIds: string[];
   };
+  browserTabTree: BrowserTabTreeState;
+}
+
+export interface BrowserTabTreeState {
+  groups: Array<{ id: string; name: string; collapsed: boolean }>;
+  tabToGroup: Record<string, string>;
+  tabOrder: string[];
+  savedWorkspaces: Record<string, {
+    savedAt: number;
+    groups: Array<{ id: string; name: string; collapsed: boolean }>;
+    tabs: Array<{ id: string; url: string; title: string; containerId: string; pinned: boolean; groupId: string | null }>;
+  }>;
 }
 
 export interface SurfingMigrationRecord {
