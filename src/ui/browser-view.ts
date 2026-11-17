@@ -150,6 +150,7 @@ export class BrowserView extends ItemView {
   private bookmarkLayout: NonNullable<BrowserLeafViewState["bookmarkLayout"]> = "type";
   private bookmarkPopoverClose?: () => void;
   private homeSearchWidget?: HomeSearchWidget;
+  private homeSectionsEl?: HTMLDivElement;
   private recoveryInteractionDisposer?: () => void;
   private popupInteractionDisposer?: () => void;
   private readonly navigationHistoryAdapter = new ElectronNavigationHistoryAdapter();
@@ -1303,6 +1304,7 @@ export class BrowserView extends ItemView {
     this.internalLayerEl.removeClass("is-hidden");
     this.homeSearchWidget?.dispose();
     this.homeSearchWidget = undefined;
+    this.homeSectionsEl = undefined;
     this.internalLayerEl.empty();
     if (resolvedSurface === "history") this.renderHistory();
     else if (resolvedSurface === "bookmarks") this.renderBookmarks();
@@ -2497,6 +2499,18 @@ export class BrowserView extends ItemView {
     // their original DOM location for a stable render and keyboard focus.
     page.insertBefore(this.homeSearchWidget.input.closest(".ubc-home-search-widget")!, homeSections);
 
+    this.homeSectionsEl = homeSections;
+    this.renderHomeSections(homeSections);
+  }
+
+  /** Refresh Obsidian-owned Home data without rebuilding the search input or browser chrome. */
+  refreshHomeData(): void {
+    if (this.internalSurface !== "home" || !this.homeSectionsEl?.isConnected) return;
+    this.homeSectionsEl.empty();
+    this.renderHomeSections(this.homeSectionsEl);
+  }
+
+  private renderHomeSections(homeSections: HTMLElement): void {
     if (this.plugin.core.settings().showVaultBookmarksOnHome) {
       const bookmarked = this.plugin.homeAdapter.bookmarkedFiles(this.plugin.core.settings().homeMaxBookmarkedFiles);
       if (bookmarked.length) {

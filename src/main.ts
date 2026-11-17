@@ -14,6 +14,7 @@ import { addEmbeddedBrowser } from "./ui/embedded-browser";
 import { ObsidianHoverPreview } from "./ui/obsidian-hover-preview";
 import { UbcHtmlFileView, UBC_HTML_FILE_VIEW } from "./ui/html-file-view";
 import { registerObsidianLinkBridge, type ObsidianBrowserLinkIntent } from "./integrations/obsidian-link-router";
+import { ubcOwnsObsidianWebLinks } from "./integrations/obsidian-core-ownership";
 import { registerObsidianCanvasBrowserActions } from "./integrations/obsidian-canvas";
 import { formatBrowserTabsMarkdown } from "./integrations/obsidian-web-transfer";
 import { ObsidianVaultBookmarkMirror } from "./integrations/obsidian-vault-bookmark-mirror";
@@ -279,6 +280,7 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       preview: (anchor, intent) => this.linkHoverPreview.enter(anchor, intent.url),
       leavePreview: anchor => this.linkHoverPreview.leave(anchor),
       closePreview: () => this.linkHoverPreview.close(),
+      ownsNavigation: () => ubcOwnsObsidianWebLinks(this.app),
     });
     registerObsidianCanvasBrowserActions({
       app: this.app,
@@ -291,6 +293,14 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
       openBrowser: request => this.openBrowser(request),
       registerEvent: ref => this.registerEvent(ref),
       register: callback => this.register(callback),
+    });
+    const refreshHomeData = () => this.refreshHomeViews();
+    this.registerEvent(this.app.workspace.on("file-open", refreshHomeData));
+    this.registerEvent(this.app.vault.on("rename", refreshHomeData));
+    this.registerEvent(this.app.vault.on("delete", refreshHomeData));
+    this.app.workspace.onLayoutReady(() => {
+      const ref = this.homeAdapter.bookmarkChangeEvent(refreshHomeData);
+      if (ref) this.registerEvent(ref);
     });
     this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
       if (file instanceof TFile && ["html", "htm"].includes(file.extension)) {
@@ -1234,7 +1244,17 @@ export default class UnifiedBrowserCorePlugin extends Plugin {
   refreshBrowserViews(): void {
     for (const leaf of this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE)) {
       const view = leaf.view;
-      if (view instanceof BrowserView) { view.renderFavoritesBar(); view.refreshRecoveryNotification(); }
+      if (view instanceof BrowserView) {
+        view.renderFavoritesBar();
+        view.refreshRecoveryNotification();
+        view.refreshHomeData();
+      }
+    }
+  }
+
+  private refreshHomeViews(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(BROWSER_VIEW_TYPE)) {
+      if (leaf.view instanceof BrowserView) leaf.view.refreshHomeData();
     }
   }
 

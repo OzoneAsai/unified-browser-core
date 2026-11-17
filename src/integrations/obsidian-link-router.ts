@@ -20,6 +20,8 @@ export interface ObsidianLinkHost {
   preview: (anchor: Element, intent: ObsidianBrowserLinkIntent) => void;
   leavePreview: (anchor: Element) => void;
   closePreview: () => void;
+  /** Dynamic ownership gate: false means Obsidian's Core Web Viewer keeps native link handling. */
+  ownsNavigation: () => boolean;
 }
 
 type ClickableEditor = Editor & {
@@ -87,7 +89,7 @@ export function registerObsidianLinkBridge(plugin: ObsidianLinkHost): void {
   const bindDocument = (doc: Document) => {
     if (documents.has(doc)) return;
     const onClick = (event: MouseEvent) => {
-      if (event.defaultPrevented || event.button !== 0) return;
+      if (event.defaultPrevented || event.button !== 0 || !plugin.ownsNavigation()) return;
       let intent = linkIntentFromDom(event.target, event);
       if (!intent && isElement(event.target)) {
         intent = linkIntentFromEditorDom(
@@ -101,6 +103,7 @@ export function registerObsidianLinkBridge(plugin: ObsidianLinkHost): void {
       plugin.open(intent);
     };
     const onPointerOver = (event: PointerEvent) => {
+      if (!plugin.ownsNavigation()) { plugin.closePreview(); return; }
       if (!isElement(event.target)) return;
       const anchor = event.target.closest("a[href], .metadata-link-inner[data-href], .cm-underline");
       if (!anchor || isWithin(anchor, event.relatedTarget)) return;

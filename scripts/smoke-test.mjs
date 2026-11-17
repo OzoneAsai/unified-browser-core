@@ -15,6 +15,12 @@ try {
     bundle: true, platform: "node", format: "esm", target: "node22", outfile: linkPolicyBundle,
   });
   await import(pathToFileURL(linkPolicyBundle).href);
+  const ownershipBundle = join(dir, "obsidian-core-ownership.mjs");
+  await esbuild.build({
+    entryPoints: ["tests/obsidian-core-ownership-smoke.ts"],
+    bundle: true, platform: "node", format: "esm", target: "node22", outfile: ownershipBundle,
+  });
+  await import(pathToFileURL(ownershipBundle).href);
   const linkRouterBundle = join(dir, "obsidian-link-router.mjs");
   await esbuild.build({
     entryPoints: ["tests/obsidian-link-router-smoke.ts"],

@@ -63,3 +63,18 @@
 - Follow-up: shared Live Preview routing, popout DOM ownership, hover visibility lifecycle, Canvas state scheduling, read-only QA harness and source-level regression tests. **Check Git for the latest checkpoint commit SHA.**
 
 The original root branch and ordinary Obsidian installation are not silently modified; QA uses the separate vault/profile.
+## 2026-11-17 native ownership integration follow-up
+
+The remaining non-rational Obsidian integration gaps were closed without changing the established Browser Core popup, Canvas, or namespace ownership model.
+
+- **Core Web Viewer ownership:** HTTP(S) clicks and hover interception now use a dynamic core-plugin ownership gate. When Obsidian's `webviewer` core plugin is enabled, UBC leaves ordinary external-link activation untouched; explicit **Open in Unified Browser Core** menu actions remain available. When Web Viewer is disabled, the existing UBC delegated link policy owns the navigation.
+- **Page Preview / hover ownership:** UBC no longer positions an independent fixed preview panel. It creates Obsidian's native `HoverPopover` immediately on pointer entry, lets the native state machine own its show/hide delay, positioning and hover-parent exclusivity, and mounts the managed UBC guest only from the popover's `onShow`. `onHide`, scroll, visibility change and plugin unload dispose the guest. The feature follows the Page Preview core plugin's enabled state.
+- **Home live data:** `browser://home` keeps its search widget stable while its Obsidian-owned sections refresh in place. Workspace `file-open`, Vault rename/delete and Core Bookmarks `changed` events invalidate Recent/Bookmarked file cards; UBC bookmark changes refresh the same section path.
+
+Validation on Obsidian 1.15.1, vault `dev-you-fat`, after deploying the built plugin:
+
+- Web Viewer disabled: delegated external click created exactly one UBC tab; enabled: the event reached native handling and created no UBC tab. The original Web Viewer enabled state was restored.
+- A real Markdown Reading View external link resolved its hover parent to `previewMode`; the visible preview carried native `popover hover-popover` classes, contained one managed WebView, increased live guest count by one, and returned to baseline after mouseout.
+- A temporary Vault note appeared in Home Recent files after `file-open`, disappeared after deletion, and the search widget DOM identity remained unchanged. Triggering Core Bookmarks `changed` caused exactly one Home refresh.
+- Existing named/sized popup regression still opened exactly one UBC tab and did not increase Electron `BrowserWindow` count.
+- `npm run verify`, CodeGraph sync and `git diff --check` passed.

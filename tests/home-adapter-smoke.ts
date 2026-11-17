@@ -14,6 +14,8 @@ const files = [file("notes/Project.md"), file("images/Project.png"), file("notes
 const byPath = new Map(files.map((entry) => [entry.path, entry]));
 const bookmarked = [{ type: "group", items: [{ type: "file", path: "notes/Project.md" }] }];
 const removed: string[] = [];
+let bookmarkChanged: (() => void) | undefined;
+const bookmarkEvent = { id: "bookmark-changed" };
 const app = {
   vault: {
     getFiles: () => [...byPath.values()],
@@ -39,6 +41,11 @@ const app = {
       instance: {
         getBookmarks: () => bookmarked,
         removeItem: (entry: { path: string }) => { removed.push(entry.path); },
+        on: (name: string, callback: () => void) => {
+          assert.equal(name, "changed");
+          bookmarkChanged = callback;
+          return bookmarkEvent;
+        },
       },
     }),
   },
@@ -58,6 +65,10 @@ assert.deepEqual(adapter.recentFiles(10, ["notes/Research.md"]).map((x) => x.pat
 assert.deepEqual(adapter.bookmarkedFiles().map((x) => x.path), ["notes/Project.md"]);
 assert.equal(adapter.removeBookmark("notes/Project.md"), true);
 assert.deepEqual(removed, ["notes/Project.md"]);
+let homeInvalidations = 0;
+assert.equal(adapter.bookmarkChangeEvent(() => { homeInvalidations++; }), bookmarkEvent);
+bookmarkChanged?.();
+assert.equal(homeInvalidations, 1);
 assert.equal(adapter.hasOmnisearch(), true);
 assert.equal((await adapter.searchOmnisearch("Project"))[0]?.excerpt, "A matching excerpt");
 const created = await adapter.createNote("New note");

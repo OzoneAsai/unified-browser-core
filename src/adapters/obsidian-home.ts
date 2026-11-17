@@ -5,6 +5,7 @@ import {
   TFile,
   normalizePath,
   type App,
+  type EventRef,
   type SearchResultContainer,
   type WorkspaceLeaf,
 } from "obsidian";
@@ -38,11 +39,13 @@ type BookmarksPluginLike = {
     getBookmarks?: () => BookmarkItemLike[];
     items?: BookmarkItemLike[];
     removeItem?: (item: BookmarkItemLike) => void;
+    on?: (name: "changed", callback: () => void) => EventRef;
   };
 };
 
 type InternalPluginsLike = {
   getPluginById?: (id: string) => BookmarksPluginLike | undefined;
+  plugins?: Record<string, BookmarksPluginLike | undefined>;
 };
 
 type OmniResult = { path: string; basename: string; excerpt?: string };
@@ -136,6 +139,13 @@ export class ObsidianHomeAdapter {
     if (!item || !instance?.removeItem) return false;
     instance.removeItem(item);
     return true;
+  }
+
+  /** Subscribe to Obsidian Core Bookmarks changes when that internal event is available. */
+  bookmarkChangeEvent(callback: () => void): EventRef | undefined {
+    const internal = (this.app as App & { internalPlugins?: InternalPluginsLike }).internalPlugins;
+    const plugin = internal?.getPluginById?.("bookmarks") ?? internal?.plugins?.bookmarks;
+    return plugin?.instance?.on?.("changed", callback);
   }
 
   hasOmnisearch(): boolean {
