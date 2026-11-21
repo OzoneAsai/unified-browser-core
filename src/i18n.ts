@@ -243,6 +243,7 @@ const ja: Record<string, string> = {
   "Open Obsidian Quick Switcher": "Obsidianのクイックスイッチャーを開く", "Open Browser Core settings": "Browser Coreの設定を開く",
   "Open Obsidian Settings → Community plugins → Unified Browser Core.": "Obsidianの設定 → コミュニティプラグイン → Unified Browser Coreを開いてください。",
   "Obsidian Quick Switcher is not available.": "Obsidianのクイックスイッチャーを利用できません。", "That file is no longer available.": "そのファイルは見つかりません。", "Could not open that file.": "ファイルを開けませんでした。",
+  "No Obsidian viewer is registered for this file type. Install a viewer to open it in a tab.": "この形式をObsidian内で開けるビューアがありません。対応するビューアを導入してください。",
   "Import web bookmarks from Obsidian Bookmarks": "Obsidianのウェブブックマークを取り込む", "Obsidian Bookmarks is unavailable or has no readable bookmark data.": "Obsidianのブックマークを利用できないか、読み取れるデータがありません。",
   "Web viewer Bookmarks has no readable data in this vault.": "このVaultにWeb viewer Bookmarksの読み取れるデータがありません。",
   "No Surfing data was found in this vault. Run migration before uninstalling Surfing.": "Surfingのデータが見つかりません。Surfingをアンインストールする前に移行してください。",

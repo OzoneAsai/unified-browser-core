@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { TFile } from "obsidian";
-import { ObsidianHomeAdapter } from "../src/adapters/obsidian-home";
+import { ObsidianHomeAdapter, UnsupportedHomeFileError, hasObsidianFileViewer } from "../src/adapters/obsidian-home";
 import { parseHomeFilter } from "../src/home/search-model";
 
 type File = TFile & { path: string; basename: string; extension: string };
@@ -14,6 +14,8 @@ const files = [file("notes/Project.md"), file("images/Project.png"), file("notes
 const byPath = new Map(files.map((entry) => [entry.path, entry]));
 const bookmarked = [{ type: "group", items: [{ type: "file", path: "notes/Project.md" }] }];
 const removed: string[] = [];
+const opened: string[] = [];
+let newTabCount = 0;
 let bookmarkChanged: (() => void) | undefined;
 const bookmarkEvent = { id: "bookmark-changed" };
 const app = {
@@ -29,8 +31,10 @@ const app = {
   },
   workspace: {
     getLastOpenFiles: () => ["notes/Research.md", "notes/Project.md"],
-    getLeaf: () => ({ openFile: async () => undefined }),
+    getLeaf: () => { newTabCount++; return { openFile: async (entry: File) => { opened.push("tab:" + entry.path); } }; },
+    revealLeaf: async () => undefined,
   },
+  viewRegistry: { typeByExtension: { md: "markdown", png: "image", pdf: "pdf" } },
   metadataCache: {
     getFileCache: (entry: File) => entry.path === "notes/Project.md" ? { frontmatter: { aliases: ["The project"] } } : {},
     unresolvedLinks: { "notes/Project.md": { "Uncreated page": 1 } },
@@ -75,4 +79,17 @@ const created = await adapter.createNote("New note");
 assert.equal(created.path, "notes/New note.md");
 assert.equal((await adapter.createNote("New note")).path, created.path);
 await assert.rejects(() => adapter.createNote("../escape"));
+const activeLeaf = { openFile: async (entry: File) => { opened.push("active:" + entry.path); } };
+byPath.set("docs/worksheet.docx", file("docs/worksheet.docx"));
+byPath.set("docs/resume.pdf", file("docs/resume.pdf"));
+assert.equal(hasObsidianFileViewer(app as never, "PDF"), true);
+assert.equal(hasObsidianFileViewer(app as never, "docx"), false);
+assert.equal(await adapter.openFile(activeLeaf as never, "notes/Research.md"), true);
+assert.equal(await adapter.openFile(activeLeaf as never, "docs/resume.pdf", true), true);
+assert.deepEqual(opened, ["active:notes/Research.md", "tab:docs/resume.pdf"]);
+assert.equal(newTabCount, 1);
+await assert.rejects(() => adapter.openFile(activeLeaf as never, "docs/worksheet.docx", true),
+  (error: unknown) => error instanceof UnsupportedHomeFileError);
+assert.equal(newTabCount, 1, "unsupported documents must not launch a system viewer");
+assert.equal(await adapter.openFile(activeLeaf as never, "docs/missing.pdf", true), false);
 console.log("Home search adapter regression tests passed");
