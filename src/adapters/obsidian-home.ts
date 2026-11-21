@@ -20,6 +20,24 @@ export interface VaultHomeFile {
   excerpt?: string;
 }
 
+/** Obsidian delegates unregistered extensions to the operating system. */
+export class UnsupportedHomeFileError extends Error {
+  constructor(extension: string) {
+    super(`No Obsidian view is registered for .${extension}`);
+    this.name = "UnsupportedHomeFileError";
+  }
+}
+
+export function hasObsidianFileViewer(app: App, extension: string): boolean {
+  const registry = (app as App & {
+    viewRegistry?: { typeByExtension?: Record<string, string | undefined> };
+  }).viewRegistry?.typeByExtension;
+  // This registry is an undocumented host capability. On versions without it,
+  // preserve the host's ordinary openFile behavior instead of guessing formats.
+  if (!registry) return true;
+  return Boolean(registry[extension.toLowerCase()]);
+}
+
 type RankedVaultFile = SearchResultContainer & {
   file: TFile;
   matchedAlias?: string;
@@ -213,6 +231,9 @@ export class ObsidianHomeAdapter {
   async openFile(leaf: WorkspaceLeaf, path: string, newTab = false): Promise<boolean> {
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) return false;
+    if (!hasObsidianFileViewer(this.app, file.extension)) {
+      throw new UnsupportedHomeFileError(file.extension);
+    }
     const target = newTab ? this.app.workspace.getLeaf("tab") : leaf;
     await target.openFile(file);
     if (newTab) await this.app.workspace.revealLeaf(target);

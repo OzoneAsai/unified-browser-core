@@ -47,7 +47,7 @@ import { resolveTabLayoutPolicy } from "../tabs/tab-layout-policy";
 import { gateLeafDetach } from "../adapters/leaf-close-gate";
 import { RICH_NAVIGATION_RESTORE_ENABLED } from "../core/experimental-features";
 import { normalizeBrowserAddress } from "../navigation/address-normalizer";
-import type { VaultHomeFile } from "../adapters/obsidian-home";
+import { UnsupportedHomeFileError, type VaultHomeFile } from "../adapters/obsidian-home";
 import { mountHomeSearch, type HomeSearchWidget } from "./home-search-widget";
 import { buildWebContentMenuEntries } from "./web-content-menu-model";
 import { editBookmark } from "./bookmark-editor";
@@ -2493,7 +2493,9 @@ export class BrowserView extends ItemView {
       core: this.plugin.core,
       home: this.plugin.homeAdapter,
       openFile: (path, newTab) => this.openVaultHomeFile(path, newTab),
-      webSearch: (query) => this.navigate(this.normalizeAddress(query)),
+      webSearch: (query, newTab) => newTab
+        ? this.plugin.openBrowser({ url: this.normalizeAddress(query) }).then(() => undefined)
+        : this.navigate(this.normalizeAddress(query)),
     }, homeSections);
     // Search precedes the sections visually, but the sections are retained in
     // their original DOM location for a stable render and keyboard focus.
@@ -2668,7 +2670,9 @@ export class BrowserView extends ItemView {
     } catch (error) {
       if (!newTab) this.closeReasonOverride = undefined;
       console.error("Unified Browser Core: failed to open Home file", error);
-      new Notice(t("Could not open that file."));
+      new Notice(t(error instanceof UnsupportedHomeFileError
+        ? "No Obsidian viewer is registered for this file type. Install a viewer to open it in a tab."
+        : "Could not open that file."));
     }
   }
 

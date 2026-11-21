@@ -3,7 +3,7 @@ import type { App } from "obsidian";
 import type { BrowserCore } from "../core/browser-core";
 import type { BrowserSettings } from "../core/model";
 import { matchesHomeFilter, parseHomeFilter, safeHomeNoteName, type HomeSearchFilter } from "../home/search-model";
-import type { ObsidianHomeAdapter, VaultHomeFile } from "../adapters/obsidian-home";
+import { UnsupportedHomeFileError, type ObsidianHomeAdapter, type VaultHomeFile } from "../adapters/obsidian-home";
 import { t } from "../i18n";
 
 export type HomeSearchMode = BrowserSettings["homeSearchMode"];
@@ -13,7 +13,7 @@ export interface HomeSearchHost {
   core: BrowserCore;
   home: ObsidianHomeAdapter;
   openFile(path: string, newTab: boolean): Promise<void> | void;
-  webSearch(query: string): Promise<void> | void;
+  webSearch(query: string, newTab: boolean): Promise<void> | void;
   onModeChange?: (mode: HomeSearchMode) => void;
   onFileCreated?: (file: VaultHomeFile) => void;
 }
@@ -53,6 +53,7 @@ export function mountHomeSearch(parent: HTMLElement, host: HomeSearchHost, secti
   let requestId = 0;
   let timer: number | undefined;
   let disposed = false;
+  let resultQuery = "";
 
   const updateFilter = () => {
     filterPill.toggleClass("is-hidden", !filter);
@@ -62,6 +63,7 @@ export function mountHomeSearch(parent: HTMLElement, host: HomeSearchHost, secti
     resultsEl.empty();
     current = [];
     selected = 0;
+    resultQuery = "";
     input.removeAttribute("aria-activedescendant");
     sections?.removeClass("is-hidden");
   };
@@ -81,6 +83,7 @@ export function mountHomeSearch(parent: HTMLElement, host: HomeSearchHost, secti
     resultsEl.empty();
     current = files;
     selected = 0;
+    resultQuery = query;
     if (!query) {
       clearResults();
       return;
@@ -94,7 +97,7 @@ export function mountHomeSearch(parent: HTMLElement, host: HomeSearchHost, secti
     for (const [index, item] of files.entries()) {
       const button = resultsEl.createEl("button", {
         cls: "ubc-home-result",
-        attr: { id: "ubc-home-result-" + widgetId + "-" + String(requestId) + "-" + index, type: "button", role: "option", "data-home-result": "" },
+        attr: { id: "ubc-home-result-" + widgetId + "-" + String(requestId) + "-" + index, type: "button", role: "option", "data-home-result": "", "data-result-index": String(index) },
       });
       const icon = button.createSpan({ cls: "ubc-home-result-icon" });
       setIcon(icon, item.unresolved ? "file-plus" : "file");
@@ -134,7 +137,9 @@ export function mountHomeSearch(parent: HTMLElement, host: HomeSearchHost, secti
       await host.openFile(file.path, newTab);
     } catch (error) {
       console.warn("Unified Browser Core: Home could not open a file", error);
-      new Notice(t("Could not open that file."));
+      new Notice(t(error instanceof UnsupportedHomeFileError
+        ? "No Obsidian viewer is registered for this file type. Install a viewer to open it in a tab."
+        : "Could not open that file."));
     }
   }
 
@@ -182,6 +187,8 @@ export function mountHomeSearch(parent: HTMLElement, host: HomeSearchHost, secti
   };
 
   const schedule = () => {
+    // An in-flight search must never restore choices for an older query.
+    ++requestId;
     if (timer !== undefined) window.clearTimeout(timer);
     const delay = Math.max(0, Math.min(500, settings().homeSearchDelayMs));
     if (delay) timer = window.setTimeout(() => { timer = undefined; void render(); }, delay);
@@ -212,9 +219,16 @@ export function mountHomeSearch(parent: HTMLElement, host: HomeSearchHost, secti
   webMode.addEventListener("click", () => { filter = undefined; updateFilter(); setMode("web"); });
   filterPill.addEventListener("click", () => { filter = undefined; updateFilter(); schedule(); input.focus(); });
   input.addEventListener("input", schedule);
-  input.addEventListener("keydown", (event) => {
+  // Listen on the shared widget, not just the input: clicking a result moves
+  // focus to its button, but Enter/Ctrl+Enter must keep working there too.
+  wrapper.addEventListener("keydown", (event) => {
     if (event.isComposing) return;
-    if (event.key === "Tab") {
+    const target = event.target;
+    const onInput = target === input;
+    const focusedResult = target instanceof HTMLElement
+      ? target.closest<HTMLElement>("[data-home-result]") : null;
+    if (!onInput && !focusedResult) return;
+    if (onInput && event.key === "Tab") {
       const parsed = parseHomeFilter(input.value);
       if (parsed) {
         if (parsed.kind === "omnisearch" && !host.home.hasOmnisearch()) {
@@ -238,7 +252,7 @@ export function mountHomeSearch(parent: HTMLElement, host: HomeSearchHost, secti
       }
       return;
     }
-    if (event.key === "Backspace" && !input.value && filter) {
+    if (onInput && event.key === "Backspace" && !input.value && filter) {
       event.preventDefault();
       filter = undefined;
       updateFilter();
@@ -248,33 +262,50 @@ export function mountHomeSearch(parent: HTMLElement, host: HomeSearchHost, secti
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       if (!current.length) return;
       event.preventDefault();
+      event.stopPropagation();
       selected = (selected + (event.key === "ArrowDown" ? 1 : -1) + current.length) % current.length;
       markSelection();
+      input.focus();
       return;
     }
     if (event.key === "Escape") {
       event.preventDefault();
+      event.stopPropagation();
       ++requestId;
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = undefined;
       clearResults();
+      input.focus();
       return;
     }
     if (event.key === "Enter") {
       event.preventDefault();
+      event.stopPropagation();
       const newTab = event.ctrlKey || event.metaKey;
       if (mode === "web") {
-        if (input.value.trim()) void host.webSearch(input.value.trim());
+        if (input.value.trim()) void host.webSearch(input.value.trim(), newTab);
       } else if (event.shiftKey && mode === "vault" &&
         (!filter || matchesNoteFilter(filter))) {
         void createNote(newTab);
-      } else if (current[selected]) {
-        const chosen = current[selected];
-        if (chosen) void activate(chosen, newTab);
-      } else if (mode === "vault" && safeHomeNoteName(input.value) &&
-        (!filter || matchesNoteFilter(filter))) {
-        void createNote(newTab);
+      } else {
+        const query = input.value.trim();
+        const focusedIndex = focusedResult ? Number(focusedResult.dataset.resultIndex) : -1;
+        void (async () => {
+          // Debounced Vault/Omnisearch results may not yet exist when Enter
+          // arrives. Resolve the current query instead of opening stale data
+          // or implicitly creating an unrelated note.
+          if (timer !== undefined || resultQuery !== query) {
+            if (timer !== undefined) window.clearTimeout(timer);
+            timer = undefined;
+            await render();
+          }
+          if (disposed || input.value.trim() !== query || resultQuery !== query) return;
+          const chosen = current[focusedIndex >= 0 ? focusedIndex : selected];
+          if (chosen) await activate(chosen, newTab);
+        })();
       }
     }
-  });
+  }, true);
   omniMode.toggleClass("is-hidden", !host.home.hasOmnisearch());
   if (mode === "omnisearch" && !host.home.hasOmnisearch()) mode = "vault";
   setMode(mode, false);

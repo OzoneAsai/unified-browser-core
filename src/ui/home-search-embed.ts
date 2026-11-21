@@ -2,7 +2,7 @@ import { MarkdownRenderChild, Notice, type App, type WorkspaceLeaf } from "obsid
 import type UnifiedBrowserCorePlugin from "../main";
 import { mountHomeSearch, type HomeSearchWidget } from "./home-search-widget";
 import { normalizeBrowserAddress } from "../navigation/address-normalizer";
-import type { VaultHomeFile } from "../adapters/obsidian-home";
+import { UnsupportedHomeFileError, type VaultHomeFile } from "../adapters/obsidian-home";
 import { t } from "../i18n";
 
 /**
@@ -56,9 +56,15 @@ export class EmbeddedHomeSearch extends MarkdownRenderChild {
     for (const file of files) {
       const item = list.createEl("button", { text: file.name, attr: { type: "button", title: file.path } });
       item.addEventListener("click", async (event) => {
-        const leaf: WorkspaceLeaf = this.plugin.app.workspace.getMostRecentLeaf() ?? this.plugin.app.workspace.getLeaf("tab");
-        const opened = await this.plugin.homeAdapter.openFile(leaf, file.path, event.ctrlKey || event.metaKey);
-        if (!opened) new Notice(t("That file is no longer available."));
+        try {
+          const leaf: WorkspaceLeaf = this.plugin.app.workspace.getMostRecentLeaf() ?? this.plugin.app.workspace.getLeaf("tab");
+          const opened = await this.plugin.homeAdapter.openFile(leaf, file.path, event.ctrlKey || event.metaKey);
+          if (!opened) new Notice(t("That file is no longer available."));
+        } catch (error) {
+          new Notice(t(error instanceof UnsupportedHomeFileError
+            ? "No Obsidian viewer is registered for this file type. Install a viewer to open it in a tab."
+            : "Could not open that file."));
+        }
       });
     }
   }
